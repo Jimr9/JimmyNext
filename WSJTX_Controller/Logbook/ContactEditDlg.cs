@@ -213,6 +213,7 @@ namespace WSJTX_Controller
             ApplyEditable();
             ClientSize = new Size(Math.Min(_flow.PreferredSize.Width + 30, 760),
                                   Math.Min(_flow.PreferredSize.Height + 12, Screen.FromControl(this).WorkingArea.Height - 80));
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         // ── Layout ───────────────────────────────────────────────────────────────────────────
@@ -375,6 +376,7 @@ namespace WSJTX_Controller
                 dlg.Controls.Add(new Label { Text = "The TQSL station location this contact was made from:", Location = new Point(10, 10), AutoSize = true });
                 dlg.Controls.AddRange(new Control[] { list, review, ok, cancel });
                 dlg.CancelButton = cancel;
+                AppLook.Attach(dlg);   // the shared look
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 var chosen = all[names[Math.Max(0, list.SelectedIndex)]];
                 _tqslLocation.Text = chosen.Name;

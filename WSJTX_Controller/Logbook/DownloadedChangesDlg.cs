@@ -91,6 +91,7 @@ namespace WSJTX_Controller
             CancelButton = close;   // Escape closes, applying nothing
             Fill(keepStatus: false);
             ActiveControl = _lines;
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private void Fill(bool keepStatus)

@@ -195,6 +195,8 @@ namespace WSJTX_Controller
         private Color _appearanceForeColor;
         private Color _appearanceAltRowColor;
 
+        private System.Windows.Forms.ComboBox _appearanceTextSizeCombo, _appearanceRowSpacingCombo;
+        private System.Windows.Forms.NumericUpDown _appearanceLoggedPercentNumeric;
         // Alert category colors (Options > Appearance)
         private System.Windows.Forms.ComboBox alertCategoryCombo;
         private System.Windows.Forms.Button alertForeColorButton;
@@ -255,6 +257,8 @@ namespace WSJTX_Controller
             void SizeLabel9() => label9.Width = Math.Max(50, basicPanel.ClientSize.Width - label9.Left - 10);
             SizeLabel9();
             basicPanel.Resize += (s, e) => SizeLabel9();
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
+            AppLook.RememberBounds(this, "Options");   // opens where it was last closed
         }
 
         public void UpdateView()
@@ -595,7 +599,7 @@ namespace WSJTX_Controller
             _smartStartSilencePeriodsNumeric = new System.Windows.Forms.NumericUpDown
             {
                 AccessibleName = "Smart Mode silence periods",
-                Location       = new System.Drawing.Point(320, 45),
+                Location       = new System.Drawing.Point(335, 45),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = 1,
                 Minimum        = 1,
@@ -609,12 +613,12 @@ namespace WSJTX_Controller
             // was heard working another station (TargetMonitor.BusySilenceThreshold).
             smartStartGroup.Controls.Add(new System.Windows.Forms.Label
             {
-                Text = "after busy:", AutoSize = true, Location = new System.Drawing.Point(385, 48), Font = font, TabStop = false,
+                Text = "after busy:", AutoSize = true, Location = new System.Drawing.Point(400, 48), Font = font, TabStop = false,
             });
             _smartStartBusyQuietNumeric = new System.Windows.Forms.NumericUpDown
             {
                 AccessibleName = "Smart Mode quiet periods after target busy",
-                Location       = new System.Drawing.Point(460, 45),
+                Location       = new System.Drawing.Point(475, 45),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = 1,
                 Minimum        = 1,
@@ -642,7 +646,7 @@ namespace WSJTX_Controller
             _smartStartMaxStandbyRoundsNumeric = new System.Windows.Forms.NumericUpDown
             {
                 AccessibleName = "Consecutive target-not-heard limit",
-                Location       = new System.Drawing.Point(320, 73),
+                Location       = new System.Drawing.Point(335, 73),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = 2,
                 Minimum        = 1,
@@ -670,7 +674,7 @@ namespace WSJTX_Controller
             _smartStartTimeLimitMinutesNumeric = new System.Windows.Forms.NumericUpDown
             {
                 AccessibleName = "Smart Mode time limit in minutes",
-                Location       = new System.Drawing.Point(320, 101),
+                Location       = new System.Drawing.Point(335, 101),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = 3,
                 Minimum        = 0,
@@ -698,7 +702,7 @@ namespace WSJTX_Controller
             _otherStationRepliesBeforeYieldingNumeric = new System.Windows.Forms.NumericUpDown
             {
                 AccessibleName = "Other-station replies before yielding, Smart Mode",
-                Location       = new System.Drawing.Point(320, 129),
+                Location       = new System.Drawing.Point(335, 129),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = 4,
                 Minimum        = 1,
@@ -721,7 +725,7 @@ namespace WSJTX_Controller
             _smartStartCallsBeforeSwitchNumeric = new System.Windows.Forms.NumericUpDown
             {
                 AccessibleName = "Calls before trying another station",
-                Location       = new System.Drawing.Point(320, 157),
+                Location       = new System.Drawing.Point(335, 157),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = 5,
                 Minimum        = 0,
@@ -744,7 +748,7 @@ namespace WSJTX_Controller
             _smartModeStationsNumeric = new System.Windows.Forms.NumericUpDown
             {
                 AccessibleName = "Smart Mode stations",
-                Location       = new System.Drawing.Point(320, 185),
+                Location       = new System.Drawing.Point(335, 185),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = 6,
                 Minimum        = 1,
@@ -1309,7 +1313,7 @@ namespace WSJTX_Controller
             {
                 Text = "Advanced filters",
                 Location = new System.Drawing.Point(left, y),
-                Size = new System.Drawing.Size(fullW, 120),
+                Size = new System.Drawing.Size(fullW, 144),   // five rows; at 120 the last one was cut off
                 Font = font,
                 TabStop = false,
                 AccessibleName = "Advanced filters group"
@@ -2396,8 +2400,11 @@ namespace WSJTX_Controller
             _radioEngineTxLevelStatusLabel = new AnnouncingLabel
             {
                 Text = "",
-                AutoSize = true,
-                Location = new System.Drawing.Point(200, 92),
+                // Two lines' room inside the group: on one line the longer messages ran out
+                // past the group's right edge.
+                AutoSize = false,
+                Location = new System.Drawing.Point(200, 86),
+                Size = new System.Drawing.Size(182, 30),
                 Font = font,
                 TabStop = false,
                 AccessibleName = "Engine transmit tone level status",
@@ -2899,8 +2906,8 @@ namespace WSJTX_Controller
             int y = 8;
             const int left = 8;
             const int w = 640;
-            const int col2Label = 280;
-            const int col2Box = 430;
+            const int col2Label = 300;   // was 280: the first box (150 to 290) covered the start of the second label
+            const int col2Box = 450;
             const int boxW = 140;
 
             var instrBox = new System.Windows.Forms.TextBox
@@ -4240,12 +4247,14 @@ namespace WSJTX_Controller
             repeatsGroup.Controls.Add(new System.Windows.Forms.Label
             {
                 Text = "Minimum seconds between repeats (0 = no limit):",
-                Location = new System.Drawing.Point(12, 50), Size = new System.Drawing.Size(300, 18),
+                Location = new System.Drawing.Point(12, 50), Size = new System.Drawing.Size(256, 18),
                 Font = font, TabStop = false,
             });
+            // (This row was label to 312, box at 316, label 392 to about 600, box at 560: the
+            // second label ran under its box. Now each box follows its own label.)
             _notifyRepeatSecondsUpDown = new System.Windows.Forms.NumericUpDown
             {
-                Minimum = 0, Maximum = 600, Location = new System.Drawing.Point(316, 48),
+                Minimum = 0, Maximum = 600, Location = new System.Drawing.Point(270, 48),
                 Size = new System.Drawing.Size(64, 22), TabIndex = tabIdx++, Font = font,
                 AccessibleName = "Minimum seconds between repeats",
             };
@@ -4254,13 +4263,13 @@ namespace WSJTX_Controller
             repeatsGroup.Controls.Add(new System.Windows.Forms.Label
             {
                 Text = "Minimum gap between any two (ms):",
-                Location = new System.Drawing.Point(392, 50), Size = new System.Drawing.Size(210, 18),
+                Location = new System.Drawing.Point(344, 50), Size = new System.Drawing.Size(200, 18),
                 Font = font, TabStop = false,
             });
             _notifyThrottleMsUpDown = new System.Windows.Forms.NumericUpDown
             {
                 Minimum = 0, Maximum = 60000, Increment = 100,
-                Location = new System.Drawing.Point(560, 48), Size = new System.Drawing.Size(70, 22),
+                Location = new System.Drawing.Point(546, 48), Size = new System.Drawing.Size(70, 22),
                 TabIndex = tabIdx++, Font = font,
                 AccessibleName = "Minimum milliseconds between any two announcements of this event",
             };
@@ -5638,7 +5647,7 @@ namespace WSJTX_Controller
             // Replying section (DX/Local + band/message filter) → Receive / Auto Reply tab
             ReparentTo(ctrl.replyNormCqLabel,   rcvReplyingGroupBox, new Point(8, 22));
             ReparentTo(ctrl.replyDxCheckBox,    rcvReplyingGroupBox, new Point(185, 20));
-            ReparentTo(ctrl.replyLocalCheckBox, rcvReplyingGroupBox, new Point(240, 20));
+            ReparentTo(ctrl.replyLocalCheckBox, rcvReplyingGroupBox, new Point(275, 20));   // was 240: cut "DX stations" short
 
             // 2.0.58: operator continent selector -- affects DX classification only when set
             // (a blank value keeps the existing conservative "not DX unless known" fallback).
@@ -5696,7 +5705,9 @@ namespace WSJTX_Controller
             ReparentTo(ctrl.PeriodHelpLabel,    rcvTransmitGroupBox, new Point(127, 132));
 
             // General tab
-            ReparentTo(ctrl.showUsStateCheckBox, generalPanel, new Point(10, 61));
+            // Below the last row: at (10, 61) it sat on top of "Move focus to status after
+            // selecting a call". It is still last in the tab order, as before.
+            ReparentTo(ctrl.showUsStateCheckBox, generalPanel, new Point(10, 243));
         }
 
         private System.Windows.Forms.Label _txFreqModeLabel;
@@ -5779,10 +5790,12 @@ namespace WSJTX_Controller
         private void ReparentTo(Control c, Control newParent, Point newLocation)
         {
             originalParents[c] = c.Parent;
-            originalLocations[c] = c.Location;
+            // Kept as pixels at 100 percent text, so it goes back to the right place even if the
+            // text size was changed while this dialog was open. newLocation is given that way too.
+            originalLocations[c] = AppLook.At100(c.Location);
             c.Parent?.Controls.Remove(c);
             newParent.Controls.Add(c);
-            c.Location = newLocation;
+            c.Location = AppLook.Px(newLocation);
             c.Visible = true;
             reparentedControls.Add(c);
         }
@@ -5796,7 +5809,7 @@ namespace WSJTX_Controller
                 {
                     origParent.Controls.Add(c);
                     if (originalLocations.TryGetValue(c, out Point origLoc))
-                        c.Location = origLoc;
+                        c.Location = AppLook.Px(origLoc);
                     c.Visible = false;
                 }
             }
@@ -6461,14 +6474,14 @@ namespace WSJTX_Controller
                 Minimum        = 1,
                 Maximum        = 365,
                 Value          = Math.Max(1, Math.Min(365, ctrl.qrzLogbookRefreshDays)),
-                Location       = new System.Drawing.Point(216, y - 2),
+                Location       = new System.Drawing.Point(234, y - 2),   // was 216, under the end of the check box text
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "QRZ Logbook automatic sync interval in days",
             };
             qrzLogbookBox.Controls.Add(_qrzLogbookRefreshDaysNum);
-            qrzLogbookBox.Controls.Add(MakeLabel("days", 270, y, font));
+            qrzLogbookBox.Controls.Add(MakeLabel("days", 288, y, font));
 
             // ── LoTW Logbook Download ────────────────────────────────────────────
             tabIdx = 1;
@@ -6529,14 +6542,14 @@ namespace WSJTX_Controller
                 Minimum        = 1,
                 Maximum        = 365,
                 Value          = Math.Max(1, Math.Min(365, ctrl.lotwLogbookRefreshDays)),
-                Location       = new System.Drawing.Point(216, y - 2),
+                Location       = new System.Drawing.Point(234, y - 2),   // was 216, under the end of the check box text
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "LoTW Logbook automatic sync interval in days",
             };
             lotwLogbookBox.Controls.Add(_lotwLogbookRefreshDaysNum);
-            lotwLogbookBox.Controls.Add(MakeLabel("days", 270, y, font));
+            lotwLogbookBox.Controls.Add(MakeLabel("days", 288, y, font));
             y += 26;
 
             // ── LoTW upload (self-sufficiency plan, Phase 3) ────────────────
@@ -6660,14 +6673,14 @@ namespace WSJTX_Controller
                 Minimum        = 1,
                 Maximum        = 365,
                 Value          = Math.Max(1, Math.Min(365, ctrl.clubLogLogbookRefreshDays)),
-                Location       = new System.Drawing.Point(216, y - 2),
+                Location       = new System.Drawing.Point(234, y - 2),   // was 216, under the end of the check box text
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "Club Log Logbook automatic sync interval in days",
             };
             clUploadBox.Controls.Add(_clubLogLogbookRefreshDaysNum);
-            clUploadBox.Controls.Add(MakeLabel("days", 270, y, font));
+            clUploadBox.Controls.Add(MakeLabel("days", 288, y, font));
             y += 26;
 
             clUploadBox.Controls.Add(MakeWrapLabel(
@@ -6980,7 +6993,7 @@ namespace WSJTX_Controller
 
             _qrzStatusLbl = MakeStatusBox(QrzStatusText(), 110, y + 2, tabIdx++, "QRZ login status", font);
             qrzBox.Controls.Add(_qrzStatusLbl);
-            y += 32;
+            y += 40;   // was 32: the status box's second line ran into the note below
 
             qrzBox.Controls.Add(MakeWrapLabel(
                 "Real-time station lookup by callsign (name, address, grid). Uses your normal QRZ.com " +
@@ -7420,17 +7433,26 @@ namespace WSJTX_Controller
                 AutoScroll = true,
                 Padding    = new System.Windows.Forms.Padding(8, 5, 5, 5),
             };
+            // selectorWidth and topOffset are pixels at 100 percent text; the page's own size is
+            // whatever it is now. The host is sized from that, so AppLook is told it is already
+            // at the text size in force (Placed) and does not size it a second time.
             void PositionDetailHost()
             {
-                detailHost.Location = new System.Drawing.Point(selectorWidth, topOffset);
-                detailHost.Size = new System.Drawing.Size(
-                    Math.Max(0, page.ClientSize.Width - selectorWidth),
-                    Math.Max(0, page.ClientSize.Height - topOffset));
+                int left = AppLook.Px(selectorWidth), top = AppLook.Px(topOffset);
+                var want = new System.Drawing.Rectangle(left, top,
+                    Math.Max(0, page.ClientSize.Width - left),
+                    Math.Max(0, page.ClientSize.Height - top));
+                if (detailHost.Bounds != want) detailHost.Bounds = want;
             }
             PositionDetailHost();
+            AppLook.Placed(detailHost);
+            AppLook.AfterChange(page, PositionDetailHost);
             detailHost.Anchor = System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left
                 | System.Windows.Forms.AnchorStyles.Right | System.Windows.Forms.AnchorStyles.Bottom;
             page.Resize += (s, e) => PositionDetailHost();
+            // Also whenever the page lays out: a page that was not showing when the text size
+            // changed is brought to it when it is next shown, and the host with it.
+            page.Layout += (s, e) => PositionDetailHost();
             page.Controls.Add(serviceList);
             page.Controls.Add(detailHost);
             return detailHost;
@@ -7639,37 +7661,43 @@ namespace WSJTX_Controller
             _alertForeColors = new Dictionary<WsjtxClient.CallCategory, Color?>(ctrl.Settings.AlertForeColors);
             _alertBackColors = new Dictionary<WsjtxClient.CallCategory, Color?>(ctrl.Settings.AlertBackColors);
 
-            var themeLabel = new System.Windows.Forms.Label
+            // Theme, text size and row spacing are for every window (AppLook.cs); the list
+            // colours and list font size below are the station lists' own, as before.
+            System.Windows.Forms.ComboBox Choice(string label, string accessibleName, string[] items, int selected, int tabIndex)
             {
-                Text = "Theme:",
-                AutoSize = true,
-                Location = new System.Drawing.Point(left, y + 3),
-                Font = font,
-                TabStop = false,
-            };
-            appearancePanel.Controls.Add(themeLabel);
-
-            appearanceThemeCombo = new System.Windows.Forms.ComboBox
-            {
-                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
-                Location = new System.Drawing.Point(left + 60, y),
-                Size = new System.Drawing.Size(160, 22),
-                TabIndex = 0,
-                Font = font,
-                AccessibleName = "Appearance theme",
-            };
-            appearanceThemeCombo.Items.AddRange(new object[] { "Default", "Dark", "High Contrast" });
-            appearanceThemeCombo.SelectedIndex = AppearanceThemeIndexForColors(_appearanceBackColor, _appearanceForeColor, _appearanceAltRowColor);
+                appearancePanel.Controls.Add(new System.Windows.Forms.Label
+                {
+                    Text = label, AutoSize = true, Location = new System.Drawing.Point(left, y + 3), Font = font, TabStop = false,
+                });
+                var combo = new System.Windows.Forms.ComboBox
+                {
+                    DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                    Location = new System.Drawing.Point(left + 90, y),
+                    Size = new System.Drawing.Size(160, 22),
+                    TabIndex = tabIndex,
+                    Font = font,
+                    AccessibleName = accessibleName,
+                };
+                combo.Items.AddRange(items);
+                combo.SelectedIndex = Math.Max(0, Math.Min(items.Length - 1, selected));
+                appearancePanel.Controls.Add(combo);
+                y += 30;
+                return combo;
+            }
+            appearanceThemeCombo = Choice("Theme:", "Appearance theme, all windows", AppLook.ThemeNames, ctrl.Settings.AppTheme, 0);
             appearanceThemeCombo.SelectedIndexChanged += AppearanceThemeCombo_SelectedIndexChanged;
-            appearancePanel.Controls.Add(appearanceThemeCombo);
-            y += 34;
+            _appearanceTextSizeCombo = Choice("Text size:", "Text size, all windows", AppLook.TextPercentNames,
+                Array.IndexOf(AppLook.TextPercents, ctrl.Settings.AppTextPercent), 1);
+            _appearanceRowSpacingCombo = Choice("Row spacing:", "List row spacing", new[] { "Compact", "Comfortable" },
+                ctrl.Settings.RowSpacingComfortable ? 1 : 0, 2);
+            y += 4;
 
             appearanceBackColorButton = new System.Windows.Forms.Button
             {
                 Text = "List background color...",
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(200, 24),
-                TabIndex = 1,
+                TabIndex = 3,
                 Font = font,
                 AccessibleName = "List background color",
             };
@@ -7682,7 +7710,7 @@ namespace WSJTX_Controller
                 Text = "List text color...",
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(200, 24),
-                TabIndex = 2,
+                TabIndex = 4,
                 Font = font,
                 AccessibleName = "List text color",
             };
@@ -7695,7 +7723,7 @@ namespace WSJTX_Controller
                 Text = "Alternating row color...",
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(200, 24),
-                TabIndex = 3,
+                TabIndex = 5,
                 Font = font,
                 AccessibleName = "Alternating row color",
             };
@@ -7717,7 +7745,7 @@ namespace WSJTX_Controller
             {
                 Location = new System.Drawing.Point(left + 90, y),
                 Size = new System.Drawing.Size(60, 22),
-                TabIndex = 4,
+                TabIndex = 6,
                 Minimum = 8,
                 Maximum = 18,
                 Value = Math.Max(8, Math.Min(18, ctrl.Settings.ListFontSize)),
@@ -7725,6 +7753,28 @@ namespace WSJTX_Controller
                 AccessibleName = "List font size",
             };
             appearancePanel.Controls.Add(appearanceFontSizeNumeric);
+            y += 30;
+
+            // The divider between the main window's two lists, moved from the keyboard: the
+            // Logged list's share of the width. 0 leaves it at its usual fixed width.
+            appearancePanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Logged list width, percent (0 = usual):", AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3), Font = font, TabStop = false,
+            });
+            _appearanceLoggedPercentNumeric = new System.Windows.Forms.NumericUpDown
+            {
+                Location = new System.Drawing.Point(left + 220, y),
+                Size = new System.Drawing.Size(60, 22),
+                TabIndex = 7,
+                Minimum = 0,
+                Maximum = 70,
+                Increment = 5,
+                Value = Math.Max(0, Math.Min(70, ctrl.Settings.LoggedListPercent)),
+                Font = font,
+                AccessibleName = "Logged list width in the main window, percent of the two lists, 0 for the usual width",
+            };
+            appearancePanel.Controls.Add(_appearanceLoggedPercentNumeric);
             y += 36;
 
             var restoreDefaultsButton = new System.Windows.Forms.Button
@@ -7732,13 +7782,43 @@ namespace WSJTX_Controller
                 Text = "Restore Defaults",
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(140, 24),
-                TabIndex = 5,
+                TabIndex = 8,
                 Font = font,
                 AccessibleName = "Restore appearance defaults",
             };
             restoreDefaultsButton.Click += AppearanceRestoreDefaultsButton_Click;
             appearancePanel.Controls.Add(restoreDefaultsButton);
-            y += 38;
+
+            var resetWindowsButton = new System.Windows.Forms.Button
+            {
+                Text = "Reset Window Positions",
+                Location = new System.Drawing.Point(left + 150, y),
+                Size = new System.Drawing.Size(170, 24),
+                TabIndex = 9,
+                Font = font,
+                AccessibleName = "Reset remembered window positions and sizes",
+            };
+            resetWindowsButton.Click += (s2, e2) =>
+            {
+                AppLook.ForgetBounds();
+                System.Windows.Forms.MessageBox.Show(this, "Windows will open at their usual place and size the next time each is opened.",
+                    "Appearance", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information);
+            };
+            appearancePanel.Controls.Add(resetWindowsButton);
+            y += 32;
+
+            // How these work together, where a screen reader can read it (Tab reaches it).
+            appearancePanel.Controls.Add(new System.Windows.Forms.TextBox
+            {
+                ReadOnly = true, Multiline = true, BorderStyle = System.Windows.Forms.BorderStyle.None,
+                Location = new System.Drawing.Point(left, y), Size = new System.Drawing.Size(600, 62),
+                TabIndex = 10, Font = font,
+                AccessibleName = "About these settings",
+                Text = "Theme and text size apply to every window. List font size is the size of list rows before text size is applied. " +
+                       "Follow Windows uses light or dark as Windows is set. " +
+                       "While Windows high contrast is on, Windows' own colors are used everywhere, and the theme, list colors and alert colors chosen here wait until it is off.",
+            });
+            y += 70;
 
             var alertSectionLabel = new System.Windows.Forms.Label
             {
@@ -7756,7 +7836,7 @@ namespace WSJTX_Controller
                 DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(220, 22),
-                TabIndex = 6,
+                TabIndex = 11,
                 Font = font,
                 AccessibleName = "Alert category",
             };
@@ -7772,7 +7852,7 @@ namespace WSJTX_Controller
                 Text = "Alert text color...",
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(220, 24),
-                TabIndex = 7,
+                TabIndex = 12,
                 Font = font,
             };
             alertForeColorButton.Click += AlertForeColorButton_Click;
@@ -7784,7 +7864,7 @@ namespace WSJTX_Controller
                 Text = "Alert background color...",
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(220, 24),
-                TabIndex = 8,
+                TabIndex = 13,
                 Font = font,
             };
             alertBackColorButton.Click += AlertBackColorButton_Click;
@@ -7796,7 +7876,7 @@ namespace WSJTX_Controller
                 Text = "Clear This Category's Colors",
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(220, 24),
-                TabIndex = 9,
+                TabIndex = 14,
                 Font = font,
             };
             alertClearColorButton.Click += AlertClearColorButton_Click;
@@ -7805,26 +7885,13 @@ namespace WSJTX_Controller
             UpdateAlertColorAccessibleNames();
         }
 
+        // Choosing a theme also sets the lists to that theme's own colours, as it always did; the
+        // three colour buttons then change them from there. (Follow Windows: the Default ones,
+        // which are shown as the Dark ones while Windows is dark.)
         private void AppearanceThemeCombo_SelectedIndexChanged(object sender, EventArgs e)
         {
-            switch (appearanceThemeCombo.SelectedIndex)
-            {
-                case 0: // Default
-                    _appearanceBackColor = SystemColors.Window;
-                    _appearanceForeColor = SystemColors.WindowText;
-                    _appearanceAltRowColor = Color.FromArgb(233, 233, 233);
-                    break;
-                case 1: // Dark
-                    _appearanceBackColor = Color.FromArgb(30, 30, 30);
-                    _appearanceForeColor = Color.FromArgb(220, 220, 220);
-                    _appearanceAltRowColor = Color.FromArgb(45, 45, 45);
-                    break;
-                case 2: // High Contrast
-                    _appearanceBackColor = Color.Black;
-                    _appearanceForeColor = Color.Yellow;
-                    _appearanceAltRowColor = Color.FromArgb(40, 40, 0);
-                    break;
-            }
+            AppLook.PresetListColors((LookTheme)Math.Max(0, appearanceThemeCombo.SelectedIndex),
+                out _appearanceBackColor, out _appearanceForeColor, out _appearanceAltRowColor);
         }
 
         private void AppearanceBackColorButton_Click(object sender, EventArgs e)
@@ -7855,21 +7922,9 @@ namespace WSJTX_Controller
             _appearanceAltRowColor = Color.FromArgb(233, 233, 233);
             appearanceThemeCombo.SelectedIndex = 0;
             appearanceFontSizeNumeric.Value = 10;
-        }
-
-        // Matches the working colors back to a preset index for the combo's initial
-        // selection. No exact match (i.e. a manually-picked custom color) falls back
-        // to "Default" in the combo -- the combo is just a shortcut, not the source
-        // of truth, so this doesn't lose or alter the actual custom colors.
-        private static int AppearanceThemeIndexForColors(Color back, Color fore, Color alt)
-        {
-            if (ColorsEqual(back, SystemColors.Window) && ColorsEqual(fore, SystemColors.WindowText) && ColorsEqual(alt, Color.FromArgb(233, 233, 233)))
-                return 0;
-            if (ColorsEqual(back, Color.FromArgb(30, 30, 30)) && ColorsEqual(fore, Color.FromArgb(220, 220, 220)) && ColorsEqual(alt, Color.FromArgb(45, 45, 45)))
-                return 1;
-            if (ColorsEqual(back, Color.Black) && ColorsEqual(fore, Color.Yellow) && ColorsEqual(alt, Color.FromArgb(40, 40, 0)))
-                return 2;
-            return 0;
+            _appearanceTextSizeCombo.SelectedIndex = 0;
+            _appearanceRowSpacingCombo.SelectedIndex = 0;
+            _appearanceLoggedPercentNumeric.Value = 0;
         }
 
         private static bool ColorsEqual(Color a, Color b) => a.ToArgb() == b.ToArgb();
@@ -7965,6 +8020,11 @@ namespace WSJTX_Controller
             ctrl.Settings.ListForeColor = _appearanceForeColor;
             ctrl.Settings.ListAltRowColor = _appearanceAltRowColor;
             ctrl.Settings.ListFontSize = (int)appearanceFontSizeNumeric.Value;
+            ctrl.Settings.AppTheme = Math.Max(0, appearanceThemeCombo.SelectedIndex);
+            ctrl.Settings.AppTextPercent = AppLook.TextPercents[Math.Max(0, _appearanceTextSizeCombo.SelectedIndex)];
+            ctrl.Settings.RowSpacingComfortable = _appearanceRowSpacingCombo.SelectedIndex == 1;
+            int logged = (int)_appearanceLoggedPercentNumeric.Value;
+            ctrl.Settings.LoggedListPercent = logged <= 0 ? 0 : Math.Max(15, logged);
 
             foreach (var cat in JimmySettings.AlertCategories)
             {

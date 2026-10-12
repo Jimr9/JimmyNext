@@ -192,6 +192,8 @@ namespace WSJTX_Controller
             // dispose it. A fetch still in flight comes back through SafeBeginInvoke, which does
             // nothing once the window is disposed, and nothing restarts the timer.
             FormClosed += (s, e) => { _refreshTimer.Stop(); _refreshTimer.Dispose(); _logbookDb?.Dispose(); };
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
+            AppLook.RememberBounds(this, "Spots");   // opens where it was last closed
         }
 
         // Root cause of a live JAWS pass hearing "500 spots -- last spot 0s ago -- add a DX
@@ -522,6 +524,7 @@ namespace WSJTX_Controller
                 dlg.Controls.AddRange(new Control[] { about, list, ok, cancel });
                 dlg.AcceptButton = ok;
                 dlg.CancelButton = cancel;
+                AppLook.Attach(dlg);   // the shared look
                 if (dlg.ShowDialog(this) != DialogResult.OK) return null;
                 return list.SelectedIndex <= 0 ? "" : states[list.SelectedIndex - 1];
             }

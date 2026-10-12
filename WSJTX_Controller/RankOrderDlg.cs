@@ -99,6 +99,7 @@ namespace WSJTX_Controller
             PopulateCallingList(currentCallingPriorities);
             PopulateSortList(currentOrder);
             PopulateBeamCombo(currentBeam);
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         // ── InitializeComponent ────────────────────────────────────────────────

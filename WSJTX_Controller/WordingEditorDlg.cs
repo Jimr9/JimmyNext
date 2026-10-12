@@ -137,6 +137,7 @@ namespace WSJTX_Controller
 
             ShowWhichFile();
             _sectionCb.SelectedIndex = 0;
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private static bool UsingProfileFile(string profile) =>

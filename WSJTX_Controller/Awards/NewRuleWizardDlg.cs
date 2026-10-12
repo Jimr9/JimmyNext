@@ -47,6 +47,7 @@ namespace WSJTX_Controller
             BuildUi();
 
             KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private void BuildPresets()

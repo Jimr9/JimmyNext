@@ -282,6 +282,7 @@ namespace WSJTX_Controller
                 (kept.Upload ? _uploadRadio : saveRadio).Checked = true;
             }
             FormClosing += OnFormClosing;
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         // Something the operator would lose: a description or steps typed and not yet sent.

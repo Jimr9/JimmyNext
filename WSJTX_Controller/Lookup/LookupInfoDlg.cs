@@ -104,6 +104,9 @@ namespace WSJTX_Controller
             };
             Controls.Add(_closeButton);
             AcceptButton = _closeButton;
+            // As tall as its content: at the fixed 510 the Close button was partly below the
+            // bottom edge of the window.
+            ClientSize = new Size(ClientSize.Width, _closeButton.Bottom + 12);
 
             PopulateFromCache();
 
@@ -131,6 +134,7 @@ namespace WSJTX_Controller
                         : "Using cached data.";
                 }
             };
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private TextBox AddRow(string labelText, ref int y, int lx, int vx, int fw, int rh, ref int tabIndex)

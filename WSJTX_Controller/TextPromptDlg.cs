@@ -64,6 +64,7 @@ namespace WSJTX_Controller
             AcceptButton = okButton;
             CancelButton = cancelButton;
             Shown += (s, e) => { _textBox.Focus(); _textBox.SelectAll(); };
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
     }
 }

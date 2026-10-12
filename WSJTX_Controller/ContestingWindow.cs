@@ -166,6 +166,8 @@ namespace WSJTX_Controller
             // the page, exactly like Options/Logbook Center's own identical category lists.
             Shown += (s, e) => _categoryListBox.Focus();
             FormClosed += (s, e) => { _statusTimer.Stop(); };
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
+            AppLook.RememberBounds(this, "Contesting");   // opens where it was last closed
         }
 
         // ── UI construction ──────────────────────────────────────────────────────
@@ -836,6 +838,10 @@ namespace WSJTX_Controller
         {
             return new Panel
             {
+                // The size its pages are laid out for. Without one a new panel is 200 wide, and
+                // everything on it that stretches with the window had, once the page was docked,
+                // stretched to far wider than the window: text and lists ran off the right edge.
+                Size           = new Size(690, 500),
                 Dock           = DockStyle.Fill,
                 AutoScroll     = true,
                 AccessibleName = "",

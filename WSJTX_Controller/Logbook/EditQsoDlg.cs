@@ -65,13 +65,13 @@ namespace WSJTX_Controller
             KeyPreview      = true;
 
             int yA = 12, yB = 12, tab = 1;
-            _callTb    = AddField(this, "Callsign:",    12, ref yA, 90, 110, out _, ref tab, q.Callsign, upper: true);
+            _callTb    = AddField(this, "Callsign:",    12, ref yA, 112, 92, out _, ref tab, q.Callsign, upper: true);
             _callTb.Leave += CallTb_Leave;
-            _bandTb    = AddField(this, "Band:",        12, ref yA, 90, 110, out _, ref tab, q.Band);
-            _modeCb    = AddModeField(this, 12, ref yA, 90, 110, ref tab, q.Mode);
-            _dateTb    = AddField(this, "Date (YYYYMMDD):", 12, ref yA, 90, 110, out _, ref tab, q.QsoDate);
-            _timeOnTb  = AddField(this, "Time on (HHMM):",  12, ref yA, 90, 110, out _, ref tab, q.TimeOn);
-            _timeOffTb = AddField(this, "Time off (HHMM):", 12, ref yA, 90, 110, out _, ref tab, q.TimeOff);
+            _bandTb    = AddField(this, "Band:",        12, ref yA, 112, 92, out _, ref tab, q.Band);
+            _modeCb    = AddModeField(this, 12, ref yA, 112, 92, ref tab, q.Mode);
+            _dateTb    = AddField(this, "Date (YYYYMMDD):", 12, ref yA, 112, 92, out _, ref tab, q.QsoDate);
+            _timeOnTb  = AddField(this, "Time on (HHMM):",  12, ref yA, 112, 92, out _, ref tab, q.TimeOn);
+            _timeOffTb = AddField(this, "Time off (HHMM):", 12, ref yA, 112, 92, out _, ref tab, q.TimeOff);
 
             _stateTb   = AddField(this, "State:",       242, ref yB, 70, 130, out _, ref tab, q.State, upper: true);
             _countryTb = AddField(this, "Country:",     242, ref yB, 70, 130, out _, ref tab, q.Country);
@@ -138,6 +138,7 @@ namespace WSJTX_Controller
             yC += 26;
 
             ClientSize = new Size(460, yC);
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private static TextBox AddField(Form form, string label, int x, ref int y, int labelWidth, int boxWidth,

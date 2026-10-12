@@ -1371,6 +1371,8 @@ static class JimmyTests
                 "(Jimmy / Jimmy Next is running). Close it before running the test suite.");
             Environment.Exit(2);
         }
+        // Pictures of every window at one theme and text size, and what does not fit (LookShots.cs).
+        if (args.Length >= 4 && args[0] == "--look-shots") { LookShots.Run(args); return; }
         // Focused run (2026-09-26): `--only NameA,NameB` runs just those test methods (the same
         // static void ...Tests() methods Main calls below), so a change can be verified with the
         // groups that exercise it instead of the whole 3,000+ assertion suite.
@@ -1673,6 +1675,7 @@ static class JimmyTests
         OtherProgramsTests();
         SpotRowsTests();
         SpotPrepareTests();
+        AppLookTests();
         SharedSettingsTests();
         AlertRegionsAndNewGridTests();
         QsoTimeOnIsStartOfContactTests();
@@ -21979,6 +21982,198 @@ static class JimmyTests
     // Handoff 21 (2026-10-12): Prepare this station. The plan for a spot (what would be set, or
     // why not), and -- through the real decode pipeline -- that a prepared station is listed when
     // heard even where a filter would hide it, while transmit stays off and nothing is called.
+    // Handoff 31 (2026-10-12): the look shared by every window (AppLook.cs) -- theme, text size,
+    // row spacing, list colours -- its settings, and remembered window places.
+    static void AppLookTests()
+    {
+        Console.WriteLine("\n── The shared look: theme, text size, row spacing, window places ──");
+        var white = System.Drawing.Color.White; var black = System.Drawing.Color.Black;
+        try
+        {
+            AppLook.ResetForTests();
+            AppLook.TestWindowsHighContrast = false; AppLook.TestWindowsDark = false;
+
+            // Contrast.
+            Check("black on white is the most contrast there is (21 to 1)", Math.Abs(AppLook.Contrast(black, white) - 21.0) < 0.01, true);
+            Check("a readable colour is left alone", AppLook.Readable(black, white, 4.5).ToArgb() == black.ToArgb(), true);
+            var dim = System.Drawing.Color.FromArgb(70, 70, 70); var darkBack = System.Drawing.Color.FromArgb(30, 30, 30);
+            Check("an unreadable colour is moved until it can be read", AppLook.Contrast(dim, darkBack) < 4.5 && AppLook.Contrast(AppLook.Readable(dim, darkBack, 4.5), darkBack) >= 4.5, true);
+            Check("a dark red on a dark row is made readable, and stays a red",
+                AppLook.Readable(System.Drawing.Color.DarkRed, darkBack, 4.5) is System.Drawing.Color r && AppLook.Contrast(r, darkBack) >= 4.5 && r.R > r.G && r.R > r.B, true);
+
+            // Each theme's own list colours, and colours picked by hand.
+            AppLook.PresetListColors(LookTheme.Dark, out var db, out var df, out var da);
+            Check("the Dark theme's list colours are known as Dark's", AppLook.IsPresetListColors(db, df, da, out var which) && which == LookTheme.Dark, true);
+            Check("the default colours as older versions saved them (white, black) are known as Default's",
+                AppLook.IsPresetListColors(white, black, System.Drawing.Color.FromArgb(233, 233, 233), out which) && which == LookTheme.Default, true);
+            Check("colours picked by hand are nobody's preset", AppLook.IsPresetListColors(System.Drawing.Color.Navy, white, da, out _), false);
+            foreach (LookTheme t in new[] { LookTheme.Default, LookTheme.Dark, LookTheme.HighContrast })
+            {
+                AppLook.PresetListColors(t, out var b0, out var f0, out var a0);
+                Check($"{t}: list text can be read on the row and on the shaded row", AppLook.Contrast(f0, b0) >= 7 && AppLook.Contrast(f0, a0) >= 7, true);
+            }
+
+            // What lists are drawn in.
+            AppLook.Use(LookTheme.Dark, 100, false, 10, white, black, System.Drawing.Color.FromArgb(233, 233, 233));
+            Check("Dark theme with the default list colours: lists are dark", AppLook.ListBack.ToArgb() == db.ToArgb() && AppLook.ListFore.ToArgb() == df.ToArgb(), true);
+            AppLook.Use(LookTheme.Dark, 100, false, 10, System.Drawing.Color.Navy, white, System.Drawing.Color.Blue);
+            Check("list colours picked by hand are used as picked, whatever the theme", AppLook.ListBack.ToArgb() == System.Drawing.Color.Navy.ToArgb() && AppLook.ListAlt.ToArgb() == System.Drawing.Color.Blue.ToArgb(), true);
+            AppLook.Use(LookTheme.System, 100, false, 10, white, black, System.Drawing.Color.FromArgb(233, 233, 233));
+            Check("Follow Windows, Windows light: no palette (Windows' own colours)", AppLook.Palette == null && AppLook.EffectiveTheme == LookTheme.Default, true);
+            AppLook.TestWindowsDark = true;
+            Check("Follow Windows, Windows dark: the Dark palette and dark lists", AppLook.Palette != null && AppLook.EffectiveTheme == LookTheme.Dark && AppLook.ListBack.ToArgb() == db.ToArgb(), true);
+            AppLook.TestWindowsDark = false;
+
+            // Windows high contrast wins.
+            AppLook.Use(LookTheme.Dark, 100, false, 10, System.Drawing.Color.Navy, white, System.Drawing.Color.Blue);
+            AppLook.TestWindowsHighContrast = true;
+            Check("Windows high contrast on: no palette of ours, and lists in Windows' colours",
+                AppLook.Palette == null && AppLook.ListBack.ToArgb() == System.Drawing.SystemColors.Window.ToArgb() && AppLook.ListAlt.ToArgb() == System.Drawing.SystemColors.Window.ToArgb(), true);
+            AppLook.AlertColors(System.Drawing.Color.Red, System.Drawing.Color.Yellow, white, black, out var ab, out var af);
+            Check("...and alert colours are not drawn", ab.ToArgb() == white.ToArgb() && af.ToArgb() == black.ToArgb(), true);
+            AppLook.TestWindowsHighContrast = false;
+            AppLook.AlertColors(System.Drawing.Color.Red, System.Drawing.Color.Yellow, white, black, out ab, out af);
+            Check("an alert's own two colours are drawn as chosen", ab.ToArgb() == System.Drawing.Color.Red.ToArgb() && af.ToArgb() == System.Drawing.Color.Yellow.ToArgb(), true);
+            AppLook.AlertColors(null, System.Drawing.Color.FromArgb(40, 40, 40), darkBack, df, out ab, out af);
+            Check("an alert text colour that cannot be read on a dark row is moved until it can", ab.ToArgb() == darkBack.ToArgb() && AppLook.Contrast(af, ab) >= 4.5, true);
+
+            // Text size and rows.
+            AppLook.Use(LookTheme.Default, 150, false, 12, white, black, System.Drawing.Color.FromArgb(233, 233, 233));
+            Check("lengths follow the text size, and back", AppLook.Px(100) == 150 && AppLook.At100(new System.Drawing.Point(150, 30)) == new System.Drawing.Point(100, 20), true);
+            Check("the station lists' font is the list size times the text size, bold Consolas",
+                Math.Abs(AppLook.MainListFont.SizeInPoints - 18f) < 0.01 && AppLook.MainListFont.Bold && AppLook.MainListFont.Name == "Consolas", true);
+            Check("the same font is handed out each time (shared, not made again)", ReferenceEquals(AppLook.MainListFont, AppLook.MainListFont), true);
+            int compact = AppLook.RowHeight(AppLook.MainListFont);
+            AppLook.Use(LookTheme.Default, 150, true, 12, white, black, System.Drawing.Color.FromArgb(233, 233, 233));
+            Check("comfortable rows are taller than compact ones, for the same font", AppLook.RowHeight(AppLook.MainListFont) >= compact + 4, true);
+            AppLook.Use(LookTheme.Default, 137, false, 40, white, black, white);
+            Check("a text size or list size that is not offered falls back to a safe one", AppLook.TextPercent == 100 && AppLook.ListFontSize == 18, true);
+
+            // Saved window places.
+            var primary = new System.Drawing.Rectangle(0, 0, 1920, 1040);
+            var second = new System.Drawing.Rectangle(1920, 0, 1920, 1040);
+            var min = new System.Drawing.Size(400, 300);
+            Check("a place on a screen that is there is kept", AppLook.OnScreen(new System.Drawing.Rectangle(2000, 100, 800, 600), min, new[] { primary, second }, primary) == new System.Drawing.Rectangle(2000, 100, 800, 600), true);
+            var back1 = AppLook.OnScreen(new System.Drawing.Rectangle(2000, 100, 800, 600), min, new[] { primary }, primary);
+            Check("a place on a screen that is gone comes back onto the main screen, whole", primary.Contains(back1) && back1.Size == new System.Drawing.Size(800, 600), true);
+            var big = AppLook.OnScreen(new System.Drawing.Rectangle(-50, -50, 4000, 3000), min, new[] { primary }, primary);
+            Check("a window larger than the screen is brought down to it", big == primary, true);
+            Check("a saved size below the window's minimum is raised to it", AppLook.OnScreen(new System.Drawing.Rectangle(10, 10, 100, 100), min, new[] { primary }, primary).Size == min, true);
+            string saved = AppLook.FormatBounds(new System.Drawing.Rectangle(-1200, 40, 900, 700), true, 125);
+            Check("a saved place reads back as written", AppLook.TryParseBounds(saved, out var pr, out bool pmax, out int ppct)
+                && pr == new System.Drawing.Rectangle(-1200, 40, 900, 700) && pmax && ppct == 125, true);
+            foreach (var bad in new[] { "", null, "1,2,3", "a,b,c,d,e,f", "0,0,10,10,0,100", "0,0,800,600,0,137" })
+                Check($"a saved place that is not one ('{bad}') is ignored", AppLook.TryParseBounds(bad, out _, out _, out _), false);
+            var places = new Dictionary<string, string> { ["window_Logbook"] = saved };
+            AppLook.LoadBounds(k => places.TryGetValue(k, out var v) ? v : "");
+            var written = new Dictionary<string, string>();
+            AppLook.SaveBounds((k, v) => written[k] = v);
+            Check("saved places are written back, one key per window", written["window_Logbook"] == saved && written["window_Spots"] == "" && written.Count == AppLook.BoundsKeys.Length, true);
+            AppLook.ForgetBounds();
+            AppLook.SaveBounds((k, v) => written[k] = v);
+            Check("Reset Window Positions forgets them all", written.Values.All(v => v == ""), true);
+
+            // Settings: read, written, and a settings file from before there was a theme.
+            string tmpIni = Path.Combine(Path.GetTempPath(), "JimmyTest_Look_" + Guid.NewGuid().ToString("N") + ".ini");
+            try
+            {
+                var ini = new IniFile(tmpIni);
+                ini.Write("listBackColor", db.ToArgb().ToString()); ini.Write("listForeColor", df.ToArgb().ToString()); ini.Write("listAltRowColor", da.ToArgb().ToString());
+                var st = new JimmySettings(); st.LoadFromIni(ini);
+                Check("an older settings file with Dark's list colours: the theme is Dark", st.AppTheme == (int)LookTheme.Dark && st.AppTextPercent == 100 && !st.RowSpacingComfortable && st.LoggedListPercent == 0, true);
+                ini.Write("listBackColor", System.Drawing.Color.Navy.ToArgb().ToString());
+                st = new JimmySettings(); st.LoadFromIni(ini);
+                Check("an older settings file with colours picked by hand: the theme is Default, the colours are kept",
+                    st.AppTheme == (int)LookTheme.Default && st.ListBackColor.ToArgb() == System.Drawing.Color.Navy.ToArgb(), true);
+                st.AppTheme = (int)LookTheme.System; st.AppTextPercent = 125; st.RowSpacingComfortable = true; st.LoggedListPercent = 40;
+                st.SaveToIni(ini);
+                var st2 = new JimmySettings(); st2.LoadFromIni(ini);
+                Check("theme, text size, row spacing and the list divider are saved and read back",
+                    st2.AppTheme == (int)LookTheme.System && st2.AppTextPercent == 125 && st2.RowSpacingComfortable && st2.LoggedListPercent == 40, true);
+                ini.Write("appTextPercent", "300"); ini.Write("appTheme", "Purple"); ini.Write("loggedListPercent", "5");
+                var st3 = new JimmySettings(); st3.LoadFromIni(ini);
+                Check("values that are not offered are not taken from the file", st3.AppTextPercent == 100 && st3.AppTheme == (int)LookTheme.Default && st3.LoggedListPercent == 0, true);
+            }
+            finally { try { File.Delete(tmpIni); } catch { } }
+
+            // A window: text size sizes it and its text; a theme colours it; both go back.
+            TabOrderWalker.OnSTA(() =>
+            {
+                AppLook.ResetForTests();
+                AppLook.TestWindowsHighContrast = false; AppLook.TestWindowsDark = false;
+                using (var f = new System.Windows.Forms.Form { ClientSize = new System.Drawing.Size(400, 300) })
+                {
+                    var plainFont = new System.Drawing.Font("Microsoft Sans Serif", 8.25f);
+                    f.Font = plainFont;
+                    var button = new System.Windows.Forms.Button { Text = "Go", Location = new System.Drawing.Point(10, 20), Size = new System.Drawing.Size(100, 24) };
+                    var warn = new System.Windows.Forms.Label { Text = "Careful", ForeColor = System.Drawing.Color.DarkRed, Location = new System.Drawing.Point(10, 60), Size = new System.Drawing.Size(100, 16) };
+                    var list = new System.Windows.Forms.ListBox { Location = new System.Drawing.Point(10, 90), Size = new System.Drawing.Size(200, 100), AccessibleName = "Rows" };
+                    list.Items.AddRange(new object[] { "one", "two", "three" });
+                    list.SelectedIndex = 1;
+                    f.Controls.AddRange(new System.Windows.Forms.Control[] { button, warn, list });
+                    AppLook.Attach(f);
+                    Check("joining at the default look leaves a window's layout as built", button.Bounds == new System.Drawing.Rectangle(10, 20, 100, 24) && f.ClientSize == new System.Drawing.Size(400, 300), true);
+                    Check("a plain list is given rows this look draws (same items, same selection, same name)",
+                        list.DrawMode == System.Windows.Forms.DrawMode.OwnerDrawFixed && list.Items.Count == 3 && list.SelectedIndex == 1 && (string)list.Items[1] == "two" && list.AccessibleName == "Rows", true);
+                    Check("...at a row height from its font", list.ItemHeight == AppLook.RowHeight(list.Font), true);
+
+                    AppLook.Use(LookTheme.Default, 150, false, 10, System.Drawing.SystemColors.Window, System.Drawing.SystemColors.WindowText, AppLook.DefaultAlt);
+                    Check("larger text: the control is moved and sized with it", button.Bounds == new System.Drawing.Rectangle(15, 30, 150, 36), true);
+                    Check("...its text is larger", Math.Abs(button.Font.SizeInPoints - 12.5f) < 0.3f, true);
+                    Check("...the window is larger", f.ClientSize == new System.Drawing.Size(600, 450), true);
+                    Check("...the window's own font is left alone (so Windows' scaling is not set off)", Math.Abs(f.Font.SizeInPoints - 8.25f) < 0.01f, true);
+                    var late = new System.Windows.Forms.Button { Text = "Later", Location = new System.Drawing.Point(120, 20), Size = new System.Drawing.Size(80, 24) };
+                    f.Controls.Add(late);
+                    AppLook.Apply(f);
+                    Check("a control added afterwards is brought to the text size too", late.Bounds == new System.Drawing.Rectangle(180, 30, 120, 36) && Math.Abs(late.Font.SizeInPoints - 12.5f) < 0.3f, true);
+                    AppLook.Apply(f);
+                    Check("...once, however often the look is applied", late.Bounds == new System.Drawing.Rectangle(180, 30, 120, 36) && button.Bounds == new System.Drawing.Rectangle(15, 30, 150, 36), true);
+                    Check("selection and items are untouched by the change", list.SelectedIndex == 1 && list.Items.Count == 3, true);
+
+                    AppLook.Use(LookTheme.Default, 100, false, 10, System.Drawing.SystemColors.Window, System.Drawing.SystemColors.WindowText, AppLook.DefaultAlt);
+                    Check("back to normal text: everything is back where it was", button.Bounds == new System.Drawing.Rectangle(10, 20, 100, 24)
+                        && late.Bounds == new System.Drawing.Rectangle(120, 20, 80, 24) && f.ClientSize == new System.Drawing.Size(400, 300) && Math.Abs(button.Font.SizeInPoints - 8.25f) < 0.01f, true);
+
+                    AppLook.PresetListColors(LookTheme.Dark, out var lb, out var lf, out var la);
+                    AppLook.Use(LookTheme.Dark, 100, false, 10, lb, lf, la);
+                    Check("Dark: the window and its list are dark, its text light", AppLook.Luminance(f.BackColor) < 0.1 && AppLook.Contrast(f.ForeColor, f.BackColor) >= 7
+                        && list.BackColor.ToArgb() == lb.ToArgb() && AppLook.Contrast(button.ForeColor, button.BackColor) >= 7, true);
+                    Check("...a label's own warning colour is kept a red, and readable", warn.ForeColor.R > warn.ForeColor.G && AppLook.Contrast(warn.ForeColor, f.BackColor) >= 4.5, true);
+                    AppLook.Use(LookTheme.HighContrast, 100, false, 10, lb, lf, la);
+                    Check("High Contrast: white on black, at least 15 to 1", f.BackColor.ToArgb() == black.ToArgb() && AppLook.Contrast(f.ForeColor, f.BackColor) >= 15, true);
+                    AppLook.TestWindowsHighContrast = true;
+                    AppLook.Use(LookTheme.Dark, 100, false, 10, lb, lf, la);
+                    Check("Windows high contrast on: the window goes back to Windows' colours", f.BackColor.ToArgb() == System.Drawing.SystemColors.Control.ToArgb()
+                        && list.BackColor.ToArgb() == System.Drawing.SystemColors.Window.ToArgb(), true);
+                    AppLook.TestWindowsHighContrast = false;
+                    AppLook.Use(LookTheme.Default, 100, false, 10, System.Drawing.SystemColors.Window, System.Drawing.SystemColors.WindowText, AppLook.DefaultAlt);
+                    Check("back to Default: Windows' colours, and the label's own red exactly",
+                        f.BackColor.ToArgb() == System.Drawing.SystemColors.Control.ToArgb() && warn.ForeColor.ToArgb() == System.Drawing.Color.DarkRed.ToArgb()
+                        && button.FlatStyle == System.Windows.Forms.FlatStyle.Standard, true);
+                    plainFont.Dispose();
+                }
+            });
+
+            // Every window joins.
+            string src = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "WSJTX_Controller"));
+            if (!Directory.Exists(src)) Skip("every window joins the shared look", "source folder not beside the tests");
+            else
+            {
+                var missing = Directory.GetFiles(src, "*.cs", SearchOption.AllDirectories)
+                    .Where(p => !p.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar) && !p.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar))
+                    .Where(p => { string t = File.ReadAllText(p); return System.Text.RegularExpressions.Regex.IsMatch(t, @"class \w+ : Form\b") && !t.Contains("AppLook.Attach(this)"); })
+                    .Select(Path.GetFileName).ToList();
+                CheckStr("every window (each class that is a Form) joins the shared look", string.Join(", ", missing), "");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  AppLookTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally { AppLook.ResetForTests(); }
+    }
+
     static void SpotPrepareTests()
     {
         Console.WriteLine("\n── Prepare this station: the plan, the listing, and transmit staying off ──");

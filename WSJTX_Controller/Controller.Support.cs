@@ -444,6 +444,7 @@ namespace WSJTX_Controller
             CancelButton = cancel;   // Enter in the text above does not install; Install is pressed on purpose
             ClientSize = new Size(580, y + 40);
             ActiveControl = info;
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
     }
 }

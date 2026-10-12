@@ -49,6 +49,7 @@ namespace WSJTX_Controller
             CancelButton = closeBtn;
             Controls.AddRange(new Control[] { _list, _dismissBtn, closeBtn });
             Fill(0);
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         // One line per held contact: everything kept about it.

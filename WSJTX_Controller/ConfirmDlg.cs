@@ -20,6 +20,7 @@ namespace WSJTX_Controller
         {
             InitializeComponent();
             text = "";
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private void ConfirmDlg_FormClosing(object sender, FormClosingEventArgs e)

@@ -102,6 +102,7 @@ namespace WSJTX_Controller
                 rawDecodeMoveUpButton, rawDecodeMoveDownButton);
             PopulateList(spotWatchListBox, SpotWatchDefaultFields, SpotWatchFieldLabels, currentSpotWatchOrder,
                 spotWatchMoveUpButton, spotWatchMoveDownButton);
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private static void UpdateMoveButtons(CheckedListBox listBox, Button moveUpButton, Button moveDownButton)

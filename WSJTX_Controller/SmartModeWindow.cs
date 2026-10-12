@@ -82,7 +82,8 @@ namespace WSJTX_Controller
             _timer.Tick += (s, e) => RefreshRows();
             Load += (s, e) => { RefreshRows(); _timer.Start(); _list.Focus(); };
             FormClosed += (s, e) => { _timer.Stop(); _timer.Dispose(); };
-            Disposed += (s, e) => _listFont?.Dispose();   // the list's own font (ApplyListLook)
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
+            AppLook.RememberBounds(this, "SmartMode");   // opens where it was last closed
         }
 
         // The title from the wording file (List.SmartModeTitle), again after the file changes.
@@ -94,32 +95,10 @@ namespace WSJTX_Controller
             if (_list.AccessibleName != title) _list.AccessibleName = title;
         }
 
-        // The look of Jimmy Next's own station lists (Options > Appearance): bold Consolas at the
-        // chosen size, the list colours and the alternating row shade. Drawing only -- each row's
-        // text, which the screen reader reads, is unchanged.
-        private Font _listFont;
-        private void ApplyListLook(JimmySettings st)
-        {
-            var font = new Font("Consolas", st.ListFontSize, FontStyle.Bold);
-            _listFont = font;
-            _list.Font = font;
-            _list.BackColor = st.ListBackColor;
-            _list.ForeColor = st.ListForeColor;
-            _list.DrawMode = DrawMode.OwnerDrawFixed;
-            _list.ItemHeight = TextRenderer.MeasureText("Ag", font).Height + 2;
-            Color alt = st.ListAltRowColor;
-            _list.DrawItem += (s, e) =>
-            {
-                if (e.Index < 0) return;
-                bool selected = (e.State & DrawItemState.Selected) != 0;
-                Color back = selected ? SystemColors.Highlight : e.Index % 2 == 1 ? alt : _list.BackColor;
-                Color fore = selected ? SystemColors.HighlightText : _list.ForeColor;
-                using (var b = new SolidBrush(back)) e.Graphics.FillRectangle(b, e.Bounds);
-                TextRenderer.DrawText(e.Graphics, _list.Items[e.Index].ToString(), _list.Font, e.Bounds, fore,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
-                e.DrawFocusRectangle();
-            };
-        }
+        // One of Jimmy Next's station lists (Options > Appearance): AppLook gives it the bold
+        // Consolas list font, the list colours, the shaded rows and the row height, and keeps
+        // them current. Drawing only -- each row's text, which the screen reader reads, is unchanged.
+        private void ApplyListLook(JimmySettings st) => AppLook.MainList(_list);
 
         private void CancelSelected()
         {

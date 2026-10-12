@@ -509,6 +509,7 @@ namespace WSJTX_Controller
             contestPollTimer = new System.Windows.Forms.Timer { Interval = 2000 };
             contestPollTimer.Tick += (s, e) => contestWorkflow.PollAndReconcile();
             contestPollTimer.Start();
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
 #if DEBUG
@@ -786,6 +787,13 @@ namespace WSJTX_Controller
             {
                 debug = iniFile.Read("debug") == "True";
 
+                // The look first (AppLook.cs): the window size saved below is in pixels at the
+                // text size it was saved with, so the window has to be at that text size before
+                // the size is put back -- otherwise it would be made larger again on every start.
+                var lookSettings = new JimmySettings();
+                lookSettings.LoadFromIni(iniFile);
+                AppLook.Use(lookSettings);
+
                 int x;
                 int.TryParse(iniFile.Read("windowPosX"), out x);
                 int y;
@@ -958,6 +966,7 @@ namespace WSJTX_Controller
                 usePskReporter = iniFile.Read("usePskReporter") != "False";              //default: true
                 showUsStateCheckBox.Checked = iniFile.Read("showUsState") == "True";
                 Settings.LoadFromIni(iniFile);
+                AppLook.LoadBounds(key => iniFile.Read(key));   // where the other windows were last closed
                 rawShowCq = iniFile.Read("rawShowCq") != "False";
                 rawShowDirected = iniFile.Read("rawShowDirected") != "False";
                 rawShowReports = iniFile.Read("rawShowReports") != "False";
@@ -1201,6 +1210,7 @@ namespace WSJTX_Controller
                 AccessibleName = "Call CQ options",
                 Location       = new System.Drawing.Point(15, 141),
                 Size           = new System.Drawing.Size(230, 26),
+                Font           = AppLook.FontOf(optionsButton.Font.FontFamily.Name, 8.25F, FontStyle.Regular),   // readable, as the other buttons (was the window's 6.75 point)
                 TabIndex       = 51,
                 Visible        = false,
             };
@@ -1440,12 +1450,14 @@ namespace WSJTX_Controller
             {
                 Text           = "Logbook",
                 AccessibleName = "Logbook",
-                Location       = new System.Drawing.Point(10, sortOrderButton.Bottom + 4),
-                Size           = new System.Drawing.Size(492, 24),
+                Location       = new System.Drawing.Point(sortOrderButton.Left, sortOrderButton.Bottom + AppLook.Px(4)),
+                Size           = sortOrderButton.Size,   // was a fixed 492 wide: ran off the right edge of a narrower window
+                Font           = sortOrderButton.Font,   // the same text as the buttons above it (was the window's much smaller one)
                 Anchor         = System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right,
                 TabIndex       = 50,
             };
             logbookButton.Click += (s2, e2) => OpenLogbookWindow();
+            AppLook.Placed(logbookButton);   // placed from sortOrderButton, so already at the text size
             this.Controls.Add(logbookButton);
             logbookButton.BringToFront();
 
@@ -1455,12 +1467,14 @@ namespace WSJTX_Controller
             {
                 Text           = "POTA / SOTA / DX Spots",
                 AccessibleName = "POTA, SOTA, and DX spots",
-                Location       = new System.Drawing.Point(10, logbookButton.Bottom + 4),
-                Size           = new System.Drawing.Size(492, 24),
+                Location       = new System.Drawing.Point(logbookButton.Left, logbookButton.Bottom + AppLook.Px(4)),
+                Size           = logbookButton.Size,
+                Font           = logbookButton.Font,
                 Anchor         = System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right,
                 TabIndex       = 52,
             };
             otaSpotsButton.Click += (s2, e2) => OpenOtaSpotsWindow();
+            AppLook.Placed(otaSpotsButton);
             this.Controls.Add(otaSpotsButton);
             otaSpotsButton.BringToFront();
 
@@ -2179,6 +2193,7 @@ namespace WSJTX_Controller
                 dlg.AcceptButton = okButton;
                 dlg.CancelButton = cancelButton;
                 dlg.ActiveControl = textBox;
+                AppLook.Attach(dlg);   // the shared look
                 return dlg.ShowDialog(this) == DialogResult.OK ? textBox.Text : null;
             }
         }
@@ -2213,6 +2228,7 @@ namespace WSJTX_Controller
                 dlg.AcceptButton = okButton;
                 dlg.CancelButton = cancelButton;
                 dlg.ActiveControl = listBox;
+                AppLook.Attach(dlg);   // the shared look
                 if (dlg.ShowDialog(this) != DialogResult.OK) return null;
                 return listBox.SelectedItem as string;
             }
@@ -2811,6 +2827,7 @@ namespace WSJTX_Controller
                 dlg.ActiveControl = pw;
                 while (true)
                 {
+                    AppLook.Attach(dlg);   // the shared look
                     if (dlg.ShowDialog(this) != DialogResult.OK) return null;
                     if (pw.Text.Length == 0) { MessageBox.Show(this, "Please type a password.", dlg.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning); continue; }
                     if (export && pw.Text != again.Text)
@@ -2882,6 +2899,7 @@ namespace WSJTX_Controller
                 dlg.AcceptButton = okButton;
                 dlg.CancelButton = cancelButton;
                 if (boxes.Count > 0) dlg.ActiveControl = boxes[0].Box;
+                AppLook.Attach(dlg);   // the shared look
                 if (dlg.ShowDialog(this) != DialogResult.OK) return CustomizationParts.None;
                 if (extraBox != null) extraChecked = extraBox.Checked;
                 var chosen = CustomizationParts.None;
@@ -3102,6 +3120,7 @@ namespace WSJTX_Controller
             // fire a second, identical write shortly after.
             _txLevelPersistTimer?.Stop();
             Settings.SaveToIni(iniFile);
+            AppLook.SaveBounds((key, value) => iniFile.Write(key, value));
             Radio.SaveToIni(iniFile);
             Decode.SaveToIni(iniFile);
             Frequencies.SaveToIni(iniFile);
@@ -3987,14 +4006,23 @@ namespace WSJTX_Controller
         private int ButtonBlockBottom() => Math.Max(verLabel.Bottom, verLabel2.Bottom);
 
         // First Y the advanced-list block (TX1/TX2/Raw/Spot Watch labels) may use.
-        private int AdvancedListStartY() => ButtonBlockBottom() + 6;
+        // Below the Tx period row too while that row is showing: it sits under the version line,
+        // where the first advanced list used to start, so the two were on top of each other.
+        private int AdvancedListStartY() =>
+            Math.Max(ButtonBlockBottom(), periodComboBox != null && periodComboBox.Parent == this && PeriodRowShown ? Math.Max(periodComboBox.Bottom, periodLabel.Bottom) : 0) + AppLook.Px(6);
+        // Its own setting, not Control.Visible (which is false for everything until the window is shown).
+        private bool PeriodRowShown => Visible ? periodComboBox.Visible : _periodRowShown;
+        private bool _periodRowShown;
+        internal void PeriodRowNowShown() { if (_periodRowShown) return; _periodRowShown = true; if (formLoaded && !_inResize) ApplyAdvancedLayout(); }
 
         // Vertical gap between one advanced list's bottom and the next section's heading.
         // Was two separately-hardcoded "6"s (one here, one in ApplyAdvancedLayout) -- visual
         // review with TX1/TX2/Raw/Spot Watch all enabled found 6px too subtle to read as
         // separate sections at a glance. Single shared constant this time so the two call
         // sites can't drift the way the old startY literals did.
-        private const int AdvancedListGroupGap = 11;
+        // (All of this layout's numbers are pixels at 100 percent text; AppLook.Px brings each to
+        // the text size in force, as AppLook does for the designed controls around them.)
+        private static int AdvancedListGroupGap => AppLook.Px(11);
 
         // Natural (unstretched) bottom Y of the advanced lists block for however many of
         // TX1/TX2/Raw are shown, always derived from the fixed base sizes below -- never
@@ -4004,8 +4032,8 @@ namespace WSJTX_Controller
         private int NaturalAdvancedListsBottom(bool showTx1, bool showTx2, bool showRaw, out int baseListH, out int baseRawH)
         {
             int startY = AdvancedListStartY();
-            const int labelH   = 14;    // approx height of bold 8.25pt label
-            const int labelGap = 2;     // gap between label bottom and list top
+            int labelH   = AppLook.Px(14);    // approx height of bold 8.25pt label
+            int labelGap = AppLook.Px(2);     // gap between label bottom and list top
             int groupGap = AdvancedListGroupGap;
 
             int count = (showTx1 ? 1 : 0) + (showTx2 ? 1 : 0) + (showRaw ? 1 : 0);
@@ -4015,6 +4043,8 @@ namespace WSJTX_Controller
                 case 2:  baseListH = 120; baseRawH = 120; break;
                 default: baseListH = 77;  baseRawH = 92;  break;   // 3 lists: original proportions
             }
+            baseListH = AppLook.Px(baseListH);
+            baseRawH  = AppLook.Px(baseRawH);
 
             int bottom = startY;
             if (showTx1) bottom += labelH + labelGap + baseListH + groupGap;
@@ -4076,7 +4106,8 @@ namespace WSJTX_Controller
                 if (anyAdvList)
                 {
                     int bottom = NaturalAdvancedListsBottom(advShowTx1, advShowTx2, advShowRaw, out _, out _);
-                    naturalHeight = bottom + 45;
+                    naturalHeight = bottom + AppLook.Px(45);
+                    if (advancedCallLayout && showSpotWatch) naturalHeight += AppLook.Px(14 + 2 + 92);
                 }
                 else
                 {
@@ -4084,15 +4115,18 @@ namespace WSJTX_Controller
                     // logbookButton/otaSpotsButton/verLabel/verLabel2 below it -- Simple
                     // mode's minimum height could be smaller than the button stack it must
                     // contain. ButtonBlockBottom() is the real bottom of that stack.
-                    naturalHeight = ButtonBlockBottom() + 45;
+                    naturalHeight = ButtonBlockBottom() + AppLook.Px(45);
                 }
                 // Spot Watch now requires Advanced Call Layout to be enabled, so its own height
                 // requirement only applies when both flags are on.
-                if (advancedCallLayout && showSpotWatch)
-                    naturalHeight = Math.Max(naturalHeight, spotWatchListBox.Location.Y + spotWatchListBox.Height + 45);
+                // (Spot Watch's own height is in naturalHeight above, from its fixed size -- not from
+                // where the list happens to be now, which ApplyAdvancedLayout may have squeezed.)
                 // 390 is the original Designer minimum height (today's default/safe floor);
                 // never let the per-configuration natural height shrink below it.
-                MinimumSize = new Size(MinimumSize.Width, Math.Max(390, naturalHeight));
+                // Never taller than the screen it is on (larger text with every list showing):
+                // ApplyAdvancedLayout then gives each list less height instead.
+                int screenH = Screen.FromControl(this).WorkingArea.Height;
+                MinimumSize = new Size(AppLook.Px(420), Math.Min(screenH, Math.Max(AppLook.Px(390), naturalHeight)));
 #if DEBUG
                 ShowWindow(GetConsoleWindow(), 0);
 #endif
@@ -7542,13 +7576,13 @@ namespace WSJTX_Controller
             if (anyAdvList || showSpot)
             {
                 int startY = AdvancedListStartY();
-                const int labelH   = 14;    // approx height of bold 8.25pt label
-                const int labelGap = 2;     // gap between label bottom and list top
+                int labelH   = AppLook.Px(14);    // approx height of bold 8.25pt label
+                int labelGap = AppLook.Px(2);     // gap between label bottom and list top
                 int groupGap = AdvancedListGroupGap;
-                const int listX    = 10;
+                int listX    = AppLook.Px(10);
 
                 // Lists widen to fill the window, never below today's default 280px.
-                int listW = Math.Max(280, this.ClientSize.Width - 2 * listX);
+                int listW = Math.Max(AppLook.Px(280), this.ClientSize.Width - 2 * listX);
 
                 // callListBox is hidden while any advanced list is shown, which would
                 // otherwise leave a large blank rectangle where it used to sit. Give the
@@ -7562,9 +7596,9 @@ namespace WSJTX_Controller
                 // with no visibility check, so if this ever sorted before callListBox the test
                 // harness would silently swap which list it thinks is which.
                 int logListX = callListBox.Location.X + 1;
-                loggedLabel.Location = new Point(logListX, 6);
-                logListBox.Location  = new Point(logListX, 24);
-                logListBox.Size      = new Size(listW - 1, 107);
+                loggedLabel.Location = new Point(logListX, AppLook.Px(6));
+                logListBox.Location  = new Point(logListX, AppLook.Px(24));
+                logListBox.Size      = new Size(listW - 1, AppLook.Px(107));
                 logListBox.Anchor    = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
                 int count = (showTx1 ? 1 : 0) + (showTx2 ? 1 : 0) + (showRaw ? 1 : 0);
@@ -7572,18 +7606,32 @@ namespace WSJTX_Controller
                 // Spot Watch's own fixed space, reserved up front so TX1/TX2/Raw never expand
                 // to consume the whole window and push it off the bottom (it used to get
                 // tacked on after the extra-space distribution below, with no space guaranteed).
-                const int spotWatchH = 92;
+                int spotWatchH = AppLook.Px(92);
                 int spotWatchReserve = showSpot ? (labelH + labelGap + spotWatchH) : 0;
 
                 // Extra vertical room the current window height offers beyond the natural
                 // (unstretched) size for however many lists are shown, split evenly between
                 // them — grows TX1/TX2/Raw with the window without shrinking below the base sizes.
                 int naturalBottom = NaturalAdvancedListsBottom(showTx1, showTx2, showRaw, out int baseListH, out int baseRawH);
-                int extra = Math.Max(0, this.Height - (naturalBottom + spotWatchReserve + 45));
+                int extra = Math.Max(0, this.Height - (naturalBottom + spotWatchReserve + AppLook.Px(45)));
                 int extraPerList = count > 0 ? extra / count : 0;
 
                 int listH = baseListH + extraPerList;
                 int rawH  = baseRawH + extraPerList;
+
+                // A window that cannot be as tall as the lists want (larger text on a small
+                // screen): every list gives up the same share of its height, down to about
+                // two rows, so all of them and Spot Watch stay inside the window.
+                int needed = naturalBottom + spotWatchReserve + AppLook.Px(45);
+                if (needed > this.Height)
+                {
+                    int lists = (showTx1 ? baseListH : 0) + (showTx2 ? baseListH : 0) + (showRaw ? baseRawH : 0) + (showSpot ? spotWatchH : 0);
+                    int floor = AppLook.RowHeight(advRawListBox.Font) + 4;   // one row at the very least
+                    double keep = lists > 0 ? Math.Max(0.0, (lists - (needed - this.Height)) / (double)lists) : 1.0;
+                    listH = Math.Max(floor, (int)(baseListH * keep));
+                    rawH = Math.Max(floor, (int)(baseRawH * keep));
+                    spotWatchH = Math.Max(floor, (int)(spotWatchH * keep));
+                }
 
                 int y = startY;
                 if (showTx1)
@@ -7622,10 +7670,21 @@ namespace WSJTX_Controller
             {
                 // Simple mode: callListBox is visible again, so restore logListBox's
                 // normal narrow, right-pinned position beside it.
-                loggedLabel.Location = new Point(366, 6);
-                logListBox.Location  = new Point(366, 24);
-                logListBox.Size      = new Size(140, 107);
-                logListBox.Anchor    = AnchorStyles.Top | AnchorStyles.Right;
+                // The window's width between its two lists: the Logged list on the right at its
+                // usual width, or the share of the width chosen in Options > Appearance (the
+                // keyboard way to move the divider between them); the station list has the rest.
+                int margin = callListBox.Left;
+                int gap    = AppLook.Px(16);
+                int room   = this.ClientSize.Width - 2 * margin - gap;
+                int logW   = Settings.LoggedListPercent > 0 ? room * Settings.LoggedListPercent / 100 : AppLook.Px(140);
+                logW = Math.Max(AppLook.Px(90), Math.Min(logW, room - AppLook.Px(150)));
+                int logX = this.ClientSize.Width - margin + 1 - logW;
+                callListBox.Anchor   = AnchorStyles.Top | AnchorStyles.Left;
+                callListBox.Width    = Math.Max(AppLook.Px(150), logX - gap - margin);
+                loggedLabel.Location = new Point(logX, AppLook.Px(6));
+                logListBox.Location  = new Point(logX, AppLook.Px(24));
+                logListBox.Size      = new Size(logW, AppLook.Px(107));
+                logListBox.Anchor    = AnchorStyles.Top | AnchorStyles.Left;
             }
 
             ResumeLayout(false);
@@ -7646,36 +7705,24 @@ namespace WSJTX_Controller
         // AdvListAltRowColor is the one true constant, now settable via ApplyListAppearance().
         private Color AdvListAltRowColor = Color.FromArgb(233, 233, 233);
 
-        // Applies the current Appearance settings (font size/colors) to all 5 main
-        // lists. Called once at startup (after Settings.LoadFromIni) and again whenever
-        // Options saves. ItemHeight is recalculated from the new font so larger sizes
-        // don't clip -- it was previously a hardcoded 15 sized only for the default 10pt.
+        // Applies the current Appearance settings to every window. Called once at startup
+        // (after Settings.LoadFromIni) and again whenever Options saves. The look itself --
+        // theme, text size, row spacing, the list font and colours, and which window gets
+        // what -- is AppLook's (AppLook.cs); the five main lists here are its station lists,
+        // drawn by AdvListBox_DrawItem below because their rows carry alert colours.
         public void ApplyListAppearance()
         {
-            var font = new Font("Consolas", Settings.ListFontSize, FontStyle.Bold);
-            int itemHeight = TextRenderer.MeasureText("Ag", font).Height + 2;
-            // This window owns the one font its five lists share: the font it replaces is disposed
-            // once every list has the new one (below), and the last one when the window is disposed.
-            Font replaced = _listFont;
-            _listFont = font;
-            if (replaced == null) Disposed += (s, e) => { _listFont?.Dispose(); _listFont = null; };
-
-            ListBox[] lists = { callListBox, logListBox, advTx1ListBox, advTx2ListBox, advRawListBox };
-            foreach (var lb in lists)
+            if (!_mainListsMarked)
             {
-                lb.Font = font;
-                lb.BackColor = Settings.ListBackColor;
-                lb.ForeColor = Settings.ListForeColor;
-                lb.ItemHeight = itemHeight;
+                _mainListsMarked = true;
+                foreach (var lb in new ListBox[] { callListBox, logListBox, advTx1ListBox, advTx2ListBox, advRawListBox })
+                    AppLook.MainList(lb, ownPainter: true);
+                AppLook.AfterChange(this, () => { AdvListAltRowColor = AppLook.ListAlt; if (formLoaded) ApplyAdvancedLayout(); });
             }
-
-            AdvListAltRowColor = Settings.ListAltRowColor;
-
-            foreach (var lb in lists)
-                lb.Invalidate();
-            replaced?.Dispose();
+            AppLook.Use(Settings);
+            AdvListAltRowColor = AppLook.ListAlt;
         }
-        private Font _listFont;
+        private bool _mainListsMarked;
 
         // Per-category alert colors (Options > Appearance) only apply to the lists that carry
         // a CallCategory per row -- callListBox/advRawListBox/advTx1ListBox/advTx2ListBox.
@@ -7707,9 +7754,11 @@ namespace WSJTX_Controller
             }
 
             bool selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
-            Color backColor = selected ? SystemColors.Highlight
-                             : alertBack ?? ((e.Index % 2 == 0) ? lb.BackColor : AdvListAltRowColor);
-            Color foreColor = selected ? SystemColors.HighlightText : (alertFore ?? lb.ForeColor);
+            // An alert category's colours as AppLook lets them be drawn: none while Windows
+            // high contrast is on, and a text colour that cannot be read on its row is moved.
+            Color rowBack = (e.Index % 2 == 0) ? lb.BackColor : AdvListAltRowColor;
+            AppLook.AlertColors(alertBack, alertFore, rowBack, lb.ForeColor, out Color backColor, out Color foreColor);
+            if (selected) { backColor = SystemColors.Highlight; foreColor = SystemColors.HighlightText; }
 
             using (var backBrush = new SolidBrush(backColor))
                 e.Graphics.FillRectangle(backBrush, e.Bounds);

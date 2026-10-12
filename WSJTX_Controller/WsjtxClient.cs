@@ -4029,6 +4029,7 @@ namespace WSJTX_Controller
         private void UpdateListenModeTxPeriod()
         {
             ctrl.periodLabel.Visible = ctrl.periodComboBox.Visible = ctrl.PeriodHelpLabel.Visible = true;
+            ctrl.PeriodRowNowShown();   // the advanced lists start below this row
             ctrl.periodLabel.Enabled = ctrl.periodComboBox.Enabled = txMode == TxModes.LISTEN;
         }
 

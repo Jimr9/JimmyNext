@@ -95,7 +95,7 @@ namespace WSJTX_Controller
         private static readonly string[] ListDisplayKeys =
         {
             "rawNewestFirst", "rawMaxRows", "callWaitingRowOrder", "rawDecodeRowOrder", "spotWatchRowOrder",
-            "spotWatchSortKey", "listFontSize", "listBackColor", "listForeColor", "listAltRowColor", "showUsState",
+            "spotWatchSortKey", "listFontSize", "listBackColor", "listForeColor", "listAltRowColor", "appTheme", "appTextPercent", "rowSpacing", "showUsState",
             "editLogRowOrder", "smartWindowRowOrder", "potaSpotsRowOrder", "dxSpotsRowOrder", "whoHearsMeRowOrder", "advCallLayout", "advShowTx1", "advShowTx2", "advShowRaw", "showSpotWatch",
             "keepTransmitListDuringTx", "keepListPositionDuringRefresh", "moveFocusToStatusOnCallSelect",
         };

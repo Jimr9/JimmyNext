@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <Compile Include="JimmyTests.cs" />
+    <Compile Include="LookShots.cs" />
   </ItemGroup>
 
   <ItemGroup>

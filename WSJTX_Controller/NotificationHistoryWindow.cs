@@ -89,6 +89,8 @@ namespace WSJTX_Controller
                 _text.Focus();
             };
             FormClosed += (s, e) => _history.Changed -= OnHistoryChanged;
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
+            AppLook.RememberBounds(this, "NotificationHistory");   // opens where it was last closed
         }
 
         protected override void OnKeyDown(KeyEventArgs e)

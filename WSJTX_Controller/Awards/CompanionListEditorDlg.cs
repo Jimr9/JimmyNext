@@ -36,6 +36,7 @@ namespace WSJTX_Controller
             BuildUi();
             KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
             Load    += (s, e) => LoadFileList();
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private void BuildUi()
@@ -128,8 +129,10 @@ namespace WSJTX_Controller
 
             _statusLbl = new Label
             {
-                Location = new Point(10, 440), Size = new Size(500, 18),
-                Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
+                // Under the entries' buttons, two lines' room (the folder path is long). It was at
+                // (10, 440), on top of the Duplicate button.
+                Location = new Point(244, 462), Size = new Size(540, 32),
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
                 AccessibleName = "Companion list status",
             };
             Controls.Add(_statusLbl);

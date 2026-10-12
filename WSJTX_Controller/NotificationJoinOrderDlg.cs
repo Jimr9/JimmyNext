@@ -48,6 +48,7 @@ namespace WSJTX_Controller
         {
             InitializeComponent();
             PopulateList(currentOrder);
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private void InitializeComponent()

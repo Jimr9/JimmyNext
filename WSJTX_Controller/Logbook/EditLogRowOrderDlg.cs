@@ -133,6 +133,7 @@ namespace WSJTX_Controller
             CancelButton = _cancelButton;
 
             Populate(currentOrder);
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private void Populate(List<string> currentOrder)

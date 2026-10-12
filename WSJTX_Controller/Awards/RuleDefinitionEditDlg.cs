@@ -66,6 +66,7 @@ namespace WSJTX_Controller
             PopulateFromExisting();
 
             KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private static Label MakeLabel(string text, int x, int y) =>
@@ -217,9 +218,10 @@ namespace WSJTX_Controller
             page.Controls.Add(new Label
             {
                 Text = "e.g. US_50_STATES, CA_PROVINCES, CONTINENTS, DXCC_CURRENT, DXCC_NORTH_AMERICA, or File:name.txt",
-                Location = new Point(140, y), AutoSize = true, ForeColor = SystemColors.GrayText,
+                // Two lines: on one line it ran out past the right edge of the page.
+                Location = new Point(140, y), Size = new Size(400, 34), ForeColor = SystemColors.GrayText,
             });
-            y += 24;
+            y += 40;
 
             page.Controls.Add(MakeLabel("Limit To:", 10, y));
             _limitToTb = new TextBox

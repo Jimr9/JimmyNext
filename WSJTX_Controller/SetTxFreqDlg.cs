@@ -68,6 +68,7 @@ namespace WSJTX_Controller
             Controls.AddRange(new Control[] { lbl, _hzUpDown, okButton, cancelButton });
             AcceptButton = okButton;
             CancelButton = cancelButton;
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
     }
 }

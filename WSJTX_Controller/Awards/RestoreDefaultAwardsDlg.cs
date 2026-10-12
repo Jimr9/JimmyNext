@@ -76,6 +76,7 @@ namespace WSJTX_Controller
 
             AcceptButton = _restoreButton;
             CancelButton = _cancelButton;
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private void RestoreButton_Click(object sender, EventArgs e)

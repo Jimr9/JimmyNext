@@ -68,6 +68,7 @@ namespace WSJTX_Controller
             Controls.AddRange(new Control[] { lbl, _callTextBox, _okButton, _cancelButton });
             AcceptButton = _okButton;
             CancelButton = _cancelButton;
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private async void OkButton_Click(object sender, EventArgs e)

@@ -64,6 +64,7 @@ namespace WSJTX_Controller
             Controls.Add(yes);
             Controls.Add(no);
             CancelButton = no;   // Escape = No. No AcceptButton: Enter in the notes must not install.
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         // The first line of the offer (one wording for the real offer and the preview switch).

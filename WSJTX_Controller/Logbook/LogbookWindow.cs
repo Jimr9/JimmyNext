@@ -244,6 +244,8 @@ namespace WSJTX_Controller
 
             this.KeyDown    += LogbookWindow_KeyDown;
             this.FormClosed += (s, e) => { _db?.Dispose(); _db = null; };
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
+            AppLook.RememberBounds(this, "Logbook");   // opens where it was last closed
         }
 
         // ── UI construction ──────────────────────────────────────────────────────
@@ -618,7 +620,10 @@ namespace WSJTX_Controller
             // header (before the list in Tab order) and buttonRow (after it) -- both Dock=Top, so
             // the buttons sit above the list on screen but are reached after it, as before.
             // AccessibleName=""/AccessibleRole=None -- pure layout containers, see MakePage().
-            var header = new Panel { Dock = DockStyle.Top, Height = 214, AccessibleName = "", AccessibleRole = AccessibleRole.None };
+            // The width it is laid out for (the two boxes below are 680 wide and stretch with it).
+            // Without one a new panel is 200 wide, and once docked those boxes had stretched to
+            // far wider than the window: their text ran off the right edge.
+            var header = new Panel { Dock = DockStyle.Top, Size = new Size(696, 214), AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
             header.Controls.Add(new Label { Text = "Awards:", Font = font, Location = new Point(8, 10), AutoSize = true });
 

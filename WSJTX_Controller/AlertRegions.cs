@@ -153,6 +153,7 @@ namespace WSJTX_Controller
                 }
                 Result = r; // "Only these regions" with nothing chosen is All regions
             };
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private sealed class CountryItem

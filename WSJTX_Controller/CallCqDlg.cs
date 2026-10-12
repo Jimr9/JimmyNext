@@ -212,6 +212,7 @@ namespace WSJTX_Controller
             _slotStatusTimer.Start();
 
             FormClosed += (s, e) => { _slotStatusTimer.Stop(); _slotStatusTimer.Dispose(); };
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         // Matches Controller's private "separateBySpaces" placeholder constant -- duplicated

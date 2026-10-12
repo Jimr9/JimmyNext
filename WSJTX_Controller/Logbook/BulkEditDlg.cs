@@ -127,6 +127,7 @@ namespace WSJTX_Controller
             };
             flow.Controls.Add(_status);
             Shown += (s, e) => _rows[0].Box.Focus();
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private void Apply_Click(object sender, EventArgs e)

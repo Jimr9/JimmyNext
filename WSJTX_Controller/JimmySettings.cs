@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.Drawing;
 
@@ -93,6 +95,17 @@ namespace WSJTX_Controller
         public Color ListForeColor { get; set; } = SystemColors.WindowText;
         public Color ListAltRowColor { get; set; } = Color.FromArgb(233, 233, 233);
 
+        // The look of every window (AppLook.cs, 2026-10-12). AppTheme is a LookTheme: Default,
+        // Dark, High Contrast or Follow Windows. AppTextPercent (100, 125 or 150) makes the text
+        // of every window larger; it is separate from the list font size above, which stays the
+        // lists' own size, and from row spacing. All three default to how it always looked.
+        public int AppTheme { get; set; } = 0;
+        public int AppTextPercent { get; set; } = 100;
+        public bool RowSpacingComfortable { get; set; } = false;
+        // The main window's Logged list, as a share of the width the two lists have between
+        // them, in percent. 0 = the usual fixed width.
+        public int LoggedListPercent { get; set; } = 0;
+
         // Per-alert-category row colors (Options > Appearance). A category with no
         // entry here falls back to the normal list colors above -- so nothing changes
         // for anyone who never opens the alert color picker. DEFAULT is excluded; it's
@@ -167,6 +180,16 @@ namespace WSJTX_Controller
             ListForeColor = ReadColor(ini, "listForeColor", ListForeColor);
             ListAltRowColor = ReadColor(ini, "listAltRowColor", ListAltRowColor);
 
+            // A settings file from before there was a theme for every window: the theme is the
+            // one whose list colours were chosen then (so someone who picked Dark for the lists
+            // gets Dark), and Default for colours picked by hand.
+            string theme = ini.Read("appTheme");
+            if (Enum.TryParse(theme, true, out LookTheme lookTheme) && Enum.IsDefined(typeof(LookTheme), lookTheme)) AppTheme = (int)lookTheme;
+            else AppTheme = AppLook.IsPresetListColors(ListBackColor, ListForeColor, ListAltRowColor, out LookTheme was) ? (int)was : (int)LookTheme.Default;
+            if (int.TryParse(ini.Read("appTextPercent"), out int textPercent) && AppLook.TextPercents.Contains(textPercent)) AppTextPercent = textPercent;
+            RowSpacingComfortable = string.Equals(ini.Read("rowSpacing"), "Comfortable", StringComparison.OrdinalIgnoreCase);
+            if (int.TryParse(ini.Read("loggedListPercent"), out int loggedPercent) && (loggedPercent == 0 || (loggedPercent >= 15 && loggedPercent <= 70))) LoggedListPercent = loggedPercent;
+
             foreach (var cat in AlertCategories)
             {
                 AlertForeColors[cat] = ReadOptionalColor(ini, $"alertFore_{cat}");
@@ -194,6 +217,10 @@ namespace WSJTX_Controller
             ini.Write("listBackColor", ListBackColor.ToArgb().ToString());
             ini.Write("listForeColor", ListForeColor.ToArgb().ToString());
             ini.Write("listAltRowColor", ListAltRowColor.ToArgb().ToString());
+            ini.Write("appTheme", ((LookTheme)AppTheme).ToString());
+            ini.Write("appTextPercent", AppTextPercent.ToString());
+            ini.Write("rowSpacing", RowSpacingComfortable ? "Comfortable" : "Compact");
+            ini.Write("loggedListPercent", LoggedListPercent.ToString());
 
             foreach (var cat in AlertCategories)
             {

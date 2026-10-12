@@ -156,6 +156,7 @@ namespace WSJTX_Controller
                 RefreshNow();
                 _refresh.Start();
             };
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private TextBox MakeReadOnly(string accessibleName, int y)

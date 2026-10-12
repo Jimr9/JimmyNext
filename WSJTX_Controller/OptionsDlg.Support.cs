@@ -447,6 +447,7 @@ namespace WSJTX_Controller
                 dlg.Controls.AddRange(new Control[] { about, field, copy, close });
                 dlg.CancelButton = close;
                 dlg.Shown += (s, e) => { field.Focus(); field.SelectAll(); };
+                AppLook.Attach(dlg);   // the shared look
                 dlg.ShowDialog(this);
             }
         }

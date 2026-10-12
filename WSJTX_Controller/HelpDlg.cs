@@ -52,6 +52,7 @@ namespace WSJTX_Controller
             };
             donateButton.Click += (s, e) => OpenLink(DonateUrl);
             Controls.Add(donateButton);
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         internal const string DonateUrl = "https://www.paypal.com/donate/?hosted_button_id=5BKHZQ4ZU6UNG";
@@ -77,11 +78,12 @@ namespace WSJTX_Controller
 
             int y = helpLabel.Size.Height;
 
-            Height = helpLabel.Location.Y + y + 85;
-            closeButton.Location = new Point(closeButton.Location.X, Height - 70);
-            supportReportButton.Location = new Point(15, closeButton.Location.Y);
-            websiteButton.Location = new Point(supportReportButton.Right + 10, closeButton.Location.Y);
-            donateButton.Location = new Point(websiteButton.Right + 10, closeButton.Location.Y);
+            // (Pixels at 100 percent text, brought to the text size in force.)
+            Height = helpLabel.Location.Y + y + AppLook.Px(85);
+            closeButton.Location = new Point(closeButton.Location.X, Height - AppLook.Px(70));
+            supportReportButton.Location = new Point(AppLook.Px(15), closeButton.Location.Y);
+            websiteButton.Location = new Point(supportReportButton.Right + AppLook.Px(10), closeButton.Location.Y);
+            donateButton.Location = new Point(websiteButton.Right + AppLook.Px(10), closeButton.Location.Y);
 
             helpLabel.SelectionStart = 0;
             helpLabel.SelectionLength = 0;

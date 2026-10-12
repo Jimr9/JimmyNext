@@ -68,6 +68,7 @@ namespace WSJTX_Controller
 
             AcceptButton = _okButton;
             CancelButton = _cancelButton;
+            AppLook.Attach(this);   // the shared look: theme, text size, list colours
         }
 
         private void OkButton_Click(object sender, EventArgs e)
