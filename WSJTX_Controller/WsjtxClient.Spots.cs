@@ -2,26 +2,29 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Windows.Forms;
 
 namespace WSJTX_Controller
 {
-    // "Prepare this station" from a spot (operator's agreed workflow, 2026-10-08; built 2026-10-12):
-    // set the radio to the spot's band, mode and frequency, remember the callsign, and leave
-    // transmit OFF. Nothing more happens until the station is actually decoded; it is then in
-    // the ordinary station list, where the operator selects it and presses Enter to call it by
-    // the normal reply path, with every normal safety check.
+    // "Prepare this station" from a spot (operator's design, 2026-10-13; it replaces the first
+    // one of 2026-10-12, which used a Station Watch and so silenced Jimmy's routine speech for
+    // as long as the watch ran).
     //
+    //   - The radio is ALREADY on the spot's band, mode and frequency: the station goes onto
+    //     Smart Mode's waiting list, exactly as if it had been picked from the station list with
+    //     Smart Mode on. Smart Mode calls it when it is actually heard and free, with all its
+    //     own limits and its own speech.
+    //   - The radio has to move: it is moved (by the ordinary frequency path, the one a
+    //     frequency hotkey uses), transmit is turned OFF, the station is remembered -- and that
+    //     is all. The antenna may need tuning on the new band, and Jimmy cannot know. Nothing
+    //     is called until the operator says the station is ready: the Prepared Station Ready
+    //     key (default Alt+Shift+P), or Prepare Station on the spot again. Only then does the
+    //     station go onto Smart Mode. No dialog is left open meanwhile, so the tune key works.
+    //   - Smart Mode switched off in Options: Jimmy never calls on its own. The station is
+    //     listed when it is heard, even where a list filter would hide it, and that is said once.
     //   - A spot is not a decode. Nothing is invented from it: no SNR, no grid, no message.
-    //   - Preparing never transmits and never arms anything to transmit later. Smart Mode is
-    //     not started; only the receive-only Station Watch is, so the operator hears when the
-    //     station is first decoded.
-    //   - The radio is changed by the ordinary frequency path (SelectFrequency: the same one a
-    //     frequency hotkey uses), never by a second route.
-    //   - While it stands and transmit is off, the prepared station is listed when heard even
-    //     if a list filter would have hidden it (it was asked for by name). The operator's
-    //     filters are not changed. A blocked call stays blocked.
-    //   - It ends when the station is logged, the band or mode moves away, another station is
-    //     prepared, or after two hours.
+    //   - A remembered station is forgotten when the band or mode moves away, when it is logged,
+    //     when another is prepared, or after two hours.
     public partial class WsjtxClient
     {
         // The plan for one spot: what would be done, or why it cannot be. Made without touching
@@ -34,6 +37,7 @@ namespace WSJTX_Controller
             public int BandIdx, DialKHz;
             public bool OffUsual;          // not one of the usual FT8/FT4 frequencies for the band
             public double SpotKhz;
+            public string Outcome;         // what was done, once PrepareSpot has carried it out
 
             // "K1ABC, FT8 on 20 meters, dial 14.074 megahertz."
             public string Sentence() =>
@@ -99,47 +103,110 @@ namespace WSJTX_Controller
             public string Call, Band, Tier;
             public int DialKHz;
             public DateTime PreparedUtc;
-            public bool Settled;      // the radio reached the band and mode, and the watch is on
+            public bool Settled;      // the radio is on the band and mode
+            public bool ListOnly;     // Smart Mode is off: listed when heard, never called by Jimmy
+            public bool HeardSaid;
         }
         private PreparedSpot _preparedSpot;
         private static readonly TimeSpan PreparedSpotLife = TimeSpan.FromHours(2);
         private static readonly TimeSpan PreparedSpotSettle = TimeSpan.FromSeconds(25);
         internal string PreparedSpotCall => _preparedSpot?.Call;
 
-        // What preparing would interrupt right now, for the question asked first; null = nothing.
+        // Whether carrying the plan out moves the radio (band, mode or dial). When it does not,
+        // nothing is interrupted and there is nothing to tune.
+        internal bool PrepareMovesRadio(SpotPlan plan) =>
+            plan == null || !plan.Ok || mode != plan.Tier
+            || !string.Equals(CurrentBandStr, plan.Band, StringComparison.OrdinalIgnoreCase)
+            || (long)Math.Round(dialFrequency / 1000.0) != plan.DialKHz;
+
+        // What moving the radio would interrupt right now, for the question asked first; null = nothing.
         internal string PrepareWouldInterrupt()
         {
             if (tuning) return "The radio is sending a tune carrier, which will be stopped.";
             if (!string.IsNullOrEmpty(callInProg)) return $"You are working {SC(callInProg)}. That contact will be stopped.";
             if (transmitting) return "The radio is transmitting, which will be stopped.";
+            string waiting = SmartStillWaitingCalls();
+            if (waiting.Length > 0) return $"Smart Mode is waiting for {waiting}. That will stop.";
             if (txEnabled) return "Transmit is on. It will be turned off.";
             return null;
         }
 
-        // Carries the plan out. Null when it was started; else why not. Transmit is off when
-        // this returns, whatever happened.
+        // The key that says "the prepared station is ready", as the operator has it set.
+        private string PreparedReadyKeyText()
+        {
+            Keys key = ctrl.hotkeyConfig != null ? ctrl.hotkeyConfig[HotkeyAction.PreparedStationReady] : Keys.None;
+            return key == Keys.None ? "Prepare Station on the spot again" : HotkeyConfig.FormatKeys(key);
+        }
+
+        // Carries the plan out. Null when done (plan.Outcome says what was done); else why not.
         internal string PrepareSpot(SpotPlan plan)
         {
             if (plan == null || !plan.Ok) return plan?.Reason ?? "Nothing to prepare.";
             if (!_directConnected) return "The engine is not connected, so the radio cannot be set.";
             if (IsBlocked(plan.Call)) return $"{SC(plan.Call)} is on your blocked list, so it would not be listed. Remove it from the list first.";
-            // Transmit and any tune carrier stop first, and stay stopped: nothing below turns
-            // transmit on, and nothing here is left to turn it on later.
+
+            if (!PrepareMovesRadio(plan))
+            {
+                // On the band already: straight to Smart Mode. Nothing is halted or changed.
+                _preparedSpot = new PreparedSpot { Call = plan.Call, Band = plan.Band, Tier = plan.Tier, DialKHz = plan.DialKHz, PreparedUtc = DateTime.UtcNow, Settled = true };
+                DebugOutput($"{Time()} [SPOT] prepare {plan.Call}: already on {plan.Band} {plan.Tier} dial {plan.DialKHz} kHz");
+                return PreparedSpotBegin(out plan.Outcome);
+            }
+
+            // The radio moves. Transmit and any tune carrier stop first, and stay stopped:
+            // nothing below turns transmit on, and nothing here is left to turn it on later.
             HaltAndDisableTx();
-            StopStationWatch();
             _preparedSpot = new PreparedSpot { Call = plan.Call, Band = plan.Band, Tier = plan.Tier, DialKHz = plan.DialKHz, PreparedUtc = DateTime.UtcNow };
-            DebugOutput($"{Time()} [SPOT] prepare {plan.Call}: {plan.Tier} {plan.Band} dial {plan.DialKHz} kHz (spotted {plan.SpotKhz:0.0} kHz{(plan.OffUsual ? ", not a usual frequency" : "")}); transmit off");
+            DebugOutput($"{Time()} [SPOT] prepare {plan.Call}: {plan.Tier} {plan.Band} dial {plan.DialKHz} kHz (spotted {plan.SpotKhz:0.0} kHz{(plan.OffUsual ? ", not a usual frequency" : "")}); transmit off; waits for the operator");
             if (!SelectFrequency(plan.BandIdx, plan.Tier, plan.DialKHz, "USB"))
             {
                 _preparedSpot = null;
                 return "The radio could not be set to that frequency. Transmit is off.";
             }
+            plan.Outcome = $"Setting the radio for {plan.Call}: {plan.Tier}, {plan.Band.TrimEnd('m')} meters, {plan.DialKHz / 1000.0:0.000}. Transmit is off. " +
+                           $"Tune if needed, then press {PreparedReadyKeyText()} to wait for it.";
             return null;
         }
 
-        // Every status from the engine: once the radio is on the prepared band and mode, the
-        // receive-only watch starts (a band or mode change stops every watch, so it cannot be
-        // started before). If the radio never gets there, say so once and forget the station.
+        // The remembered station is ready (the radio is on its band): onto Smart Mode -- or, with
+        // Smart Mode off, listed when heard. Null when done (said = what to tell the operator).
+        private string PreparedSpotBegin(out string said)
+        {
+            said = null;
+            var p = _preparedSpot;
+            if (p == null) return "No station is prepared.";
+            if (!ctrl.smartQsoStartEnabled)
+            {
+                p.ListOnly = true;
+                said = $"Smart Mode is off, so {SC(p.Call)} will not be called for you. It will be listed when it is heard.";
+                DebugOutput($"{Time()} [SPOT] {p.Call}: Smart Mode is off; listed when heard");
+                return null;
+            }
+            string problem = SmartWaitForSpot(p.Call);
+            if (problem != null) return problem;
+            _preparedSpot = null;      // Smart Mode has it now, by its own rules
+            said = $"Waiting to work {SC(p.Call)}. Smart Mode will call it when it is heard and free.";
+            return null;
+        }
+
+        // The Prepared Station Ready key: the operator has the radio (and the antenna) ready on
+        // the band Prepare Station moved to.
+        public void PreparedStationReady()
+        {
+            var p = _preparedSpot;
+            if (p == null) { StatusView.ShowMessage("No station is prepared.", false); return; }
+            if (p.ListOnly) { StatusView.ShowMessage($"{SC(p.Call)} will be listed when it is heard. Smart Mode is off.", false); return; }
+            if (!p.Settled) { StatusView.ShowMessage($"The radio is not on {p.Band.TrimEnd('m')} meters {p.Tier} yet.", false); return; }
+            string problem = PreparedSpotBegin(out string said);
+            // Smart Mode says "Waiting to work ..." itself when it takes a station.
+            if (problem != null) StatusView.ShowMessage(problem, false);
+            else if (p.ListOnly) StatusView.ShowMessage(said, false);
+        }
+
+        // Every status from the engine. While the radio is on its way: once it is on the
+        // prepared band and mode, say so and what to do next -- or, if it never gets there, say
+        // that once and forget the station. Afterwards: forgotten when the radio leaves that
+        // band or mode, or after two hours.
         private void PreparedSpotTick()
         {
             var p = _preparedSpot;
@@ -151,28 +218,37 @@ namespace WSJTX_Controller
                 if (there)
                 {
                     p.Settled = true;
-                    StartOrReplaceStationWatch(p.Call);
-                    DebugOutput($"{Time()} [SPOT] {p.Call}: radio on {p.Band} {p.Tier}; watching, transmit off");
+                    DebugOutput($"{Time()} [SPOT] {p.Call}: radio on {p.Band} {p.Tier}; transmit off; waiting for the operator");
+                    StatusView.ShowMessage($"Radio is on {p.Band.TrimEnd('m')} meters {p.Tier}, transmit off. Tune if needed, then press {PreparedReadyKeyText()} to wait for {SC(p.Call)}.", false);
                 }
                 else if (DateTime.UtcNow - p.PreparedUtc > PreparedSpotSettle)
                 {
                     _preparedSpot = null;
                     Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Prepare station",
-                        $"The radio did not confirm {p.Band.TrimEnd('m')} meters {p.Tier}, so {SC(p.Call)} is not being watched. Transmit is off."));
+                        $"The radio did not confirm {p.Band.TrimEnd('m')} meters {p.Tier}, so {SC(p.Call)} is not prepared. Transmit is off."));
                 }
                 return;
             }
-            // Settled: it ends when the radio leaves that band or mode, or after two hours.
             if (!there && _pendingBandIdx == null && !_tierChangeRequestInFlight) { DebugOutput($"{Time()} [SPOT] {p.Call}: band or mode changed; no longer prepared"); _preparedSpot = null; }
             else if (DateTime.UtcNow - p.PreparedUtc > PreparedSpotLife) _preparedSpot = null;
         }
 
-        // The prepared station, heard now with transmit off: it is listed whatever the list's
-        // filters say. Never with transmit on -- then only the operator's own filters decide
-        // what Jimmy may call.
+        // Smart Mode off: the prepared station, heard now with transmit off, is listed whatever
+        // the list's filters say. Never with transmit on -- then only the operator's own
+        // filters decide what Jimmy may call.
         private bool IsPreparedSpot(string call) =>
-            _preparedSpot != null && _preparedSpot.Settled && !txEnabled && !string.IsNullOrEmpty(call)
+            _preparedSpot != null && _preparedSpot.ListOnly && _preparedSpot.Settled && !txEnabled && !string.IsNullOrEmpty(call)
             && string.Equals(_preparedSpot.Call, call, StringComparison.OrdinalIgnoreCase);
+
+        // ...and the first time that happens, it is said (once).
+        private void PreparedSpotHeard(string call)
+        {
+            var p = _preparedSpot;
+            if (p == null || p.HeardSaid || !string.Equals(p.Call, call, StringComparison.OrdinalIgnoreCase)) return;
+            p.HeardSaid = true;
+            DebugOutput($"{Time()} [SPOT] {p.Call}: heard; in the station list");
+            StatusView.ShowMessage($"{SC(p.Call)} heard. It is in the station list.", false);
+        }
 
         private void PreparedSpotLogged(string call)
         {
@@ -180,8 +256,9 @@ namespace WSJTX_Controller
         }
 
         // Tests.
-        internal void TestSetPreparedSpot(string call, string band, string tier, bool settled) =>
-            _preparedSpot = call == null ? null : new PreparedSpot { Call = call, Band = band, Tier = tier, PreparedUtc = DateTime.UtcNow, Settled = settled };
+        internal void TestSetPreparedSpot(string call, string band, string tier, bool settled, bool listOnly = false) =>
+            _preparedSpot = call == null ? null : new PreparedSpot { Call = call, Band = band, Tier = tier, PreparedUtc = DateTime.UtcNow, Settled = settled, ListOnly = listOnly };
         internal bool TestIsPreparedSpot(string call) => IsPreparedSpot(call);
+        internal string TestPreparedSpotBegin(out string said) => PreparedSpotBegin(out said);
     }
 }

@@ -970,6 +970,10 @@ impl ContestBridge {
             let entrant = tempo_core::contest::CabrilloEntrant {
                 name: operator_name.to_string(),
                 email: contest_email.to_string(),
+                // Nexus 1.18 added club, entry class, operators, transmitter, overlay, band,
+                // mailing address and soapbox. Jimmy has no controls for them yet, so they are
+                // left blank, and a blank one is left out of the file.
+                ..Default::default()
             };
             // freq_khz: 0 -- Cabrillo's own FREQ column is band-derived per row for Field Day
             // (transmitter_column is false for both FD rulesets), so a session-level dial
@@ -1153,10 +1157,14 @@ mod tests {
         let active = test_active_session(); // event "arrlfd", section "MO"
         let nexus_session_1 = ContestBridge::build_session(&active).unwrap();
         let nexus_session_2 = ContestBridge::build_session(&active).unwrap();
+        // (Up to Nexus 1.17 the session had an `id` field holding that key; 1.18 removed the
+        // field. What identifies the session is still only the contest and the year -- nothing
+        // that tells one running from another.)
         assert_eq!(
-            nexus_session_1.id, nexus_session_2.id,
-            "confirms the real behavior this architecture works around: Nexus's own \
-             ContestSession.id collides for two identical entries"
+            (&nexus_session_1.event_id, &nexus_session_1.contest_id, nexus_session_1.rules_year),
+            (&nexus_session_2.event_id, &nexus_session_2.contest_id, nexus_session_2.rules_year),
+            "confirms the real behavior this architecture works around: nothing in Nexus's own \
+             ContestSession tells two identical entries apart"
         );
 
         let jimmy_id_1 = mint_session_instance_id();

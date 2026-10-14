@@ -108,6 +108,7 @@ namespace WSJTX_Controller
             // out would interrupt (null = nothing), and carrying it out (null = started).
             public Func<string, string, double, WsjtxClient.SpotPlan> PlanSpot;
             public Func<string> PrepareWouldInterrupt;
+            public Func<WsjtxClient.SpotPlan, bool> PrepareMovesRadio;   // false: on the band already, nothing to ask
             public Func<WsjtxClient.SpotPlan, string> PrepareSpot;
         }
         private readonly Host _host2;
@@ -414,16 +415,17 @@ namespace WSJTX_Controller
             return page;
         }
 
-        // ── Prepare this station (2026-10-12) ───────────────────────────────────
+        // ── Prepare this station (2026-10-12; redesigned 2026-10-13) ────────────
         // A button, pressed on purpose: selecting a spot, a refresh or an alert never moves the
-        // radio. It says what it will do and asks first; then the radio goes to the spot's band,
-        // mode and frequency with transmit OFF, and the callsign is remembered. The station is
-        // called only by the operator, from the station list, once it is actually decoded
-        // (WsjtxClient.Spots.cs). Enter on a spot does nothing here, as before.
+        // radio. On the spot's band already, the station goes onto Smart Mode at once. If the
+        // radio has to move, it says so and asks first; then the radio goes there with transmit
+        // OFF and the station is remembered, and nothing is called until the operator -- who
+        // may have an antenna to tune -- presses the Prepared Station Ready key or this button
+        // again (WsjtxClient.Spots.cs). Enter on a spot does nothing here, as before.
         private Button MakePrepareButton(Func<(string Call, string Mode, double FreqKhz, string Age)?> selected, TextBox status)
         {
             var btn = new Button { Text = "Prepare Station", AccessibleName = "Prepare this station", Size = new Size(110, 24), Dock = DockStyle.Right };
-            btn.AccessibleDescription = "Sets the radio to the spot's band, mode and frequency and leaves transmit off. The station is listed when it is heard; select it there and press Enter to call.";
+            btn.AccessibleDescription = "On the spot's band already, puts the station on Smart Mode. Otherwise sets the radio to the spot's band, mode and frequency with transmit off; tune if needed, then press this again or the Prepared Station Ready key.";
             btn.Click += (s, e) =>
             {
                 var spot = selected();
@@ -431,19 +433,21 @@ namespace WSJTX_Controller
                 if (_host2.PlanSpot == null || _host2.PrepareSpot == null) { status.Text = "The radio is not available."; return; }
                 var plan = _host2.PlanSpot(spot.Value.Call, spot.Value.Mode, spot.Value.FreqKhz);
                 if (plan == null || !plan.Ok) { status.Text = "Not prepared. " + (plan?.Reason ?? "The spot cannot be used."); return; }
-                string interrupts = _host2.PrepareWouldInterrupt?.Invoke();
-                string question = "Prepare the radio for " + plan.Sentence() + $" Spotted {spot.Value.Age}.\n\n" +
-                    (interrupts != null ? interrupts + "\n\n" : "") +
-                    "Transmit will be off. Nothing is sent. When the station is heard it is in the station list; select it there and press Enter to call it.";
-                if (MessageBox.Show(this, question, "Prepare Station", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
-                        interrupts != null ? MessageBoxDefaultButton.Button2 : MessageBoxDefaultButton.Button1) != DialogResult.Yes)
+                if (_host2.PrepareMovesRadio == null || _host2.PrepareMovesRadio(plan))
                 {
-                    status.Text = "Not prepared. Nothing was changed.";
-                    return;
+                    string interrupts = _host2.PrepareWouldInterrupt?.Invoke();
+                    string question = "Set the radio for " + plan.Sentence() + $" Spotted {spot.Value.Age}.\n\n" +
+                        (interrupts != null ? interrupts + "\n\n" : "") +
+                        "Transmit will be off and nothing is sent. Tune if needed afterwards; the station is called only after you say it is ready.";
+                    if (MessageBox.Show(this, question, "Prepare Station", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                            interrupts != null ? MessageBoxDefaultButton.Button2 : MessageBoxDefaultButton.Button1) != DialogResult.Yes)
+                    {
+                        status.Text = "Not prepared. Nothing was changed.";
+                        return;
+                    }
                 }
                 string problem = _host2.PrepareSpot(plan);
-                status.Text = problem != null ? "Not prepared. " + problem
-                    : $"Setting the radio for {plan.Call}: {plan.Tier}, {plan.Band.TrimEnd('m')} meters, {plan.DialKHz / 1000.0:0.000}. Transmit is off. It will be listed when it is heard.";
+                status.Text = problem != null ? "Not prepared. " + problem : plan.Outcome ?? "Prepared.";
             };
             return btn;
         }

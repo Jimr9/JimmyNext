@@ -59,6 +59,54 @@ stay pinned; do NOT import `main`. What the next stable upgrade needs:
   SET_CLOCK_CHECK uses Nexus's public `apply_settings` + `clear_clock_offset(true)`; ATU_STATUS
   reads PTT with Nexus's `Rig::read_ptt`. Both are public API -- check they still exist.
 
+## Nine-patch re-assessment -- 2026-10-13 (v1.17.0 -> v1.18.0 upgrade)
+
+Pin moved to stable **v1.18.0** (`03ac4c3c`; annotated tag object `1e7e65ae`), nothing taken from
+`main`. Every patch was tried against the pristine v1.18.0 files, and EngineHost was compiled
+against them before anything here changed.
+
+- **Retired: `propagation-solar-wind.patch`.** Upstream #404 is fixed in 1.18.0 (NOAA's real-time
+  feeds); the patch reported itself as already applied.
+- **Retired: `tempo-app-snapshot.patch`, and Jimmy's own Fake-It restore** (the `FakeItRestore`
+  state machine in the service patch, `FakeItShift` in the slot patch,
+  `Engine::set_fake_it_restore_status` in the engine patch). Nexus 1.18 reworked the same code:
+  the dial goes back 100 ms after the unkey, up to three tries, the over's TX dial is no longer
+  taken for an operator QSY, and a restore the radio never took is reported in the CAT status
+  text (`"Fake It split: the radio did not go back to ..."`). The two designs touch the same
+  lines, so upstream's is adopted rather than merged with ours. Jimmy announces that note once
+  while it stands (`WsjtxClient.Direct.cs`, `FakeItNotePrefix`).
+  **What was given up:** our restore read the dial back to confirm it, and kept reconciling after
+  CAT came back; upstream counts the restore done when the radio accepts the command and stops
+  after three tries. **Needs an on-air check on the operator's TS-590SG.**
+- **New, in `tempo-audio-slot.patch` + `tempo-audio-service.patch`: a Fake-It move the radio
+  refuses is not transmitted.** Upstream's `apply_tx_dial_shift` is `let _ = rig.set_freq(tx_dial)`:
+  the answer is ignored and the over is keyed regardless, though the engine has already lowered
+  its audio by the shift -- so it goes out that many Hz below the chosen frequency. Now a failed
+  move halts TX through `Engine::halt_tx_for_refused_key` (the reason reaches Jimmy as
+  `slot_key_refused`, which it already announces) and neither call site keys. The restore is
+  still held. Test: `jimmy_compat_fake_it_move_the_radio_refuses_sends_nothing_and_halts_tx`.
+- **`tempo-audio-service.patch`** is now three things: the refused-move gate at the late-start
+  call site, `Status.tx_message = eng.last_own_tx_text()`, and the "Mode: None" test.
+- **`tempo-audio-slot.patch`** is now two: the Rig-split `dont_set_mode` gate and the refused move.
+- **`tempo-app-engine.patch`: 7 behaviours** (the Fake-It status setter went); re-anchored.
+- **`tempo-app-settings.patch`, `tempo-app-station.patch`:** offsets only, payload identical.
+- **`tempo-core-message.patch`, `tempo-core-inbox.patch`, `tempo-audio-rigctld-test-portability.patch`,
+  `tempo-fast-sys-build.patch`:** apply unchanged; upstream still lacks each.
+- **EngineHost:** one compile error -- `contest::CabrilloEntrant` gained club, entry class,
+  operators, objectives, transmitter, overlay, address, soapbox and band. `contest_bridge::export`
+  leaves them blank (`..Default::default()`); Jimmy has no controls for them yet.
+- **Upstream #399 and #400 are fixed** (LoTW asks from 1900-01-01 with no cursor; a confirmation
+  goes on the contact nearest in time, within 30 minutes, consume-once both ways --
+  `tempo-core/src/reconcile.rs` `pair_report`). Jimmy's own guards are unchanged by this upgrade:
+  it still sends 1900-01-01 itself, and `NexusReportPairing` still holds back ambiguous rows.
+  `NexusReportPairing` can be simplified later, but its removal of STATE/COUNTRY from paired rows
+  must stay: `reconcile::apply_match` still fills a blank logged state or country.
+- **Available, not yet used:** `Engine::contest_remove_last` / `contest_restore`, `contest_edit`,
+  `tempo_app::scp`, `tempo_app::call_history`, the new Cabrillo entrant fields, `reconcile::check`
+  (Check confirmations), `RadioStatus.tx_refusal` / `ptt_refused` / `slot_audio_lost`,
+  `AppSnapshot.late_decodes` (read-only decodes of the period a band change caught; they arrive
+  apart from `recent_decodes`, so Jimmy ignores them).
+
 ## Eleven-patch re-assessment -- 2026-10-12 (v1.16.0 -> v1.17.0 upgrade)
 
 Pin moved to stable **v1.17.0** (`177e0b94`, 364 commits past v1.16.0; annotated tag object
@@ -353,14 +401,14 @@ backoff only changes *when* that funnel runs, not whether it runs. See
 `jimmy_compat_rfpower_write_protection_survives_reopen_and_new_rigs_while_meters_flow` in
 `service.rs`'s test module for the regression proof.
 
-## Current patches (against Nexus `v1.17.0`, commit `177e0b94`)
+## Current patches (against Nexus `v1.18.0`, commit `03ac4c3c`)
 
-Eleven patches -- the ten below, **one source file each**, plus `propagation-solar-wind.patch` (see the 2026-10-12 re-assessment above) -- (`prepare-nexus.ps1` and the `patches/` directory are
+Nine patches since 2026-10-13, **one source file each** (the snapshot and solar-wind patches are retired -- see the v1.18.0 re-assessment above) -- (`prepare-nexus.ps1` and the `patches/` directory are
 the source of truth; the ten are itemised in the `###` sections below). Jimmy's downstream
 behavior these preserve is the **Jimmy Next 2.0.55 operator experience** -- that is the
 compatibility baseline.
 
-### `patches/tempo-app-engine.patch` -- 8 behaviors, `crates/tempo-app/src/engine.rs`
+### `patches/tempo-app-engine.patch` -- 7 behaviors (the Fake-It status setter in the table below was retired 2026-10-13), `crates/tempo-app/src/engine.rs`
 
 | Behavior | Why Jimmy needs it | What's missing / wrong upstream |
 |---|---|---|
@@ -397,7 +445,7 @@ unconditionally).
 **Obsoleted when:** upstream `Settings` gains fields with equivalent meaning.
 **How to check:** `grep -n "ptt_data_source\|dont_set_mode\|disable_rfpower_probe" crates/tempo-app/src/settings.rs`.
 
-### `patches/tempo-app-snapshot.patch` -- Fake-It restore visible to Jimmy, `crates/tempo-app/src/dto.rs` + `src/lib.rs` + `tests/fixtures/*_snapshot.json`
+### RETIRED 2026-10-13 (see the v1.18.0 re-assessment above; kept here as history): `patches/tempo-app-snapshot.patch` -- Fake-It restore visible to Jimmy, `crates/tempo-app/src/dto.rs` + `src/lib.rs` + `tests/fixtures/*_snapshot.json`
 
 Codex correction G (+ Audit #10). Adds `RadioStatus.fake_it_restore_warning: Option<String>`
 **and `fake_it_restore_warning_id: Option<u64>`** (both `#[serde(default)]`), their `None` init
@@ -473,6 +521,9 @@ to forbid RFPOWER drive read/write per rig (or Hamlib #1595 is fixed in the bund
 check is a real compile error, not a false alarm.
 
 ### `patches/tempo-audio-service.patch` -- radio-loop wiring, `crates/tempo-audio/src/service.rs`
+
+**Since 2026-10-13 (v1.18.0) this patch is only: the refused Fake-It move gate at the late-start call site, `Status.tx_message`, and the "Mode: None" test. Everything below about Jimmy's own Fake-It restore is history -- see the v1.18.0 re-assessment above.**
+**How to check (current):** `grep -n "shift_refused\|last_own_tx_text\|jimmy_compat_dont_set_mode" crates/tempo-audio/src/service.rs`.
 
 Since 2026-10-04 (v1.16.0) only the Fake-It restore, `Status.tx_message` and the "Mode: None" test remain; the `ptt_data_source` / `disable_rfpower_probe` threading and RFPOWER gates described below were retired with `tempo-audio-rig.patch`.
 
@@ -554,7 +605,11 @@ exact call for every caller; confirm this fourth site is still present and still
 not a regression) by grepping `read_level("RFPOWER")` across the whole file and hand-checking
 each hit's own gating.
 
-### `patches/tempo-audio-slot.patch` -- Fake-It physical capture + Rig-split do-not-set-mode
+### `patches/tempo-audio-slot.patch` -- refused Fake-It move + Rig-split do-not-set-mode
+
+**Since 2026-10-13 (v1.18.0) this patch is only: `SplitApply.shift_refused` (a Fake-It move the radio refuses halts TX and is not keyed) and the Rig-split `dont_set_mode` gate. The `FakeItShift` physical capture described below is history.**
+**Obsoleted when:** upstream stops keying an over whose Fake-It `set_freq` failed, and honours a do-not-set-mode gate.
+**How to check (current):** `grep -n "shift_refused\|dont_set_mode\|let _ = rig.set_freq(tx_dial)" crates/tempo-audio/src/slot.rs`.
 
 `crates/tempo-audio/src/slot.rs`, `apply_tx_dial_shift` (+ every `SlotAction` builder that
 consumes its result -- as of v1.14.0 there are three inside `slot_tx_phase`: the successful-key

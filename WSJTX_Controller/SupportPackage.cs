@@ -49,6 +49,7 @@ namespace WSJTX_Controller
         {
             "nativeEngineAudioDevice", "nativeEngineAudioOutputDevice",   // sound devices: chosen on each computer
             "activeProfile", "profileSaveFirst", "firstRun", "ResetWindowSize",
+            "logbookId",                                                  // which of this computer's logbooks a profile uses (handoff 33)
             OtherPrograms.EnabledKey, OtherPrograms.TargetsKey,           // which programs run beside Jimmy on this computer
         };
         private static readonly Regex RememberedState = new Regex("Last[A-Z]", RegexOptions.Compiled);   // radioLastBandIdx, LogbookLastQrzRefresh

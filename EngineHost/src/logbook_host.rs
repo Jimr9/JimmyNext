@@ -1282,11 +1282,13 @@ mod tests {
 
         // A LoTW confirmation merged from a report file: LoTW's channel, never a paper card.
         let report = d.0.join("lotw.adi");
+        // The row's time is the contact's own minute (14:13): since Nexus 1.18 a confirmation
+        // lands only on a contact within 30 minutes of it (13:40 matched by day alone before).
         // LoTW's own report shape: Nexus reads QSL_RCVD as LoTW's only under LoTW's header
         // (`lotw_channel_fixup`) -- Jimmy must hand over the download exactly as received.
         std::fs::write(&report, "ARRL Logbook of the World Status Report\n<PROGRAMID:4>LoTW\n\
             <APP_LoTW_NUMREC:1>1\n<eoh>\n<CALL:4>W1AW <BAND:3>20m <MODE:3>FT8 <QSO_DATE:8>20260921 \
-            <TIME_ON:6>134000 <QSL_RCVD:1>Y <eor>\n").unwrap();
+            <TIME_ON:6>141300 <QSL_RCVD:1>Y <eor>\n").unwrap();
         let m = log_merge(&host, &eng, LogFileArgs { path: report.display().to_string(), kind: "lotw".into() });
         assert_eq!(m.state, "saved", "{m:?}");
         let after = first_row(&eng);

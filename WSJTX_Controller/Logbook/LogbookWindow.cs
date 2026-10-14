@@ -1427,11 +1427,15 @@ namespace WSJTX_Controller
                 sources = sourceDlg.SelectedSources;
             }
 
+            // Handoff 33: the logbook in use is named in the title and the file name, so an event
+            // log is not mistaken for the personal one.
+            var book = LogbookBooks.Active;
+            string stem = book.Id.Length == 0 ? "jimmy_export" : new string(book.Name.Select(c => char.IsLetterOrDigit(c) ? c : '_').ToArray()) + "_export";
             using (var dlg = new SaveFileDialog
             {
-                Title    = "Export ADIF File",
+                Title    = $"Export ADIF File, {book.Name}",
                 Filter   = "ADIF files (*.adi)|*.adi|All files (*.*)|*.*",
-                FileName = $"jimmy_export_{DateTime.Now:yyyyMMdd_HHmmss}.adi",
+                FileName = $"{stem}_{DateTime.Now:yyyyMMdd_HHmmss}.adi",
             })
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
@@ -1439,10 +1443,50 @@ namespace WSJTX_Controller
                 {
                     // Nexus's own exporter writes the records.
                     var (written, note) = ((NexusLogbookService)_db).ExportAdif(ids, sources, dlg.FileName);
-                    SetStatus($"Exported {written:N0} QSO(s) to {dlg.FileName}." + (note != null ? " " + note : ""));
+                    // What went into the file, read back from it: how many, the UTC range and the
+                    // station call(s). Exporting never marks anything as uploaded.
+                    string summary = ExportSummary(dlg.FileName);
+                    SetStatus($"Exported {written:N0} QSO(s) from {book.Name}{(summary.Length > 0 ? ", " + summary : "")}, to {dlg.FileName}." + (note != null ? " " + note : ""));
                 }
                 catch (Exception ex) { SetStatus("Export error: " + ex.Message); }
             }
+        }
+
+        // "from 2026-10-15 00:12 to 2026-10-25 23:40 UTC, station call K4B" -- from the file itself.
+        internal static string ExportSummary(string adifPath)
+        {
+            try
+            {
+                string text = File.ReadAllText(adifPath);
+                var times = new List<string>();
+                var calls = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+                var field = new System.Text.RegularExpressions.Regex(@"<([A-Za-z_]+):(\d+)(?::[A-Za-z])?>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                int eoh = text.IndexOf("<eoh>", StringComparison.OrdinalIgnoreCase);
+                foreach (var rec in text.Substring(eoh < 0 ? 0 : eoh + 5).Split(new[] { "<eor>", "<EOR>", "<Eor>" }, StringSplitOptions.None))
+                {
+                    string date = null, time = null;
+                    foreach (System.Text.RegularExpressions.Match m in field.Matches(rec))
+                    {
+                        int len = int.Parse(m.Groups[2].Value);
+                        int at = m.Index + m.Length;
+                        if (at + len > rec.Length) continue;
+                        string v = rec.Substring(at, len).Trim();
+                        switch (m.Groups[1].Value.ToUpperInvariant())
+                        {
+                            case "QSO_DATE": date = v; break;
+                            case "TIME_ON": time = v; break;
+                            case "STATION_CALLSIGN": if (v.Length > 0) calls.Add(v.ToUpperInvariant()); break;
+                        }
+                    }
+                    if (date != null && date.Length == 8) times.Add(date + ((time ?? "") + "0000").Substring(0, 4));
+                }
+                if (times.Count == 0) return "";
+                times.Sort(StringComparer.Ordinal);
+                string Show(string t) => $"{t.Substring(0, 4)}-{t.Substring(4, 2)}-{t.Substring(6, 2)} {t.Substring(8, 2)}:{t.Substring(10, 2)}";
+                string callText = calls.Count == 0 ? "no station call recorded" : (calls.Count == 1 ? "station call " : "station calls ") + string.Join(", ", calls);
+                return $"from {Show(times[0])} to {Show(times[times.Count - 1])} UTC, {callText}";
+            }
+            catch { return ""; }
         }
 
         // ── Navigation ────────────────────────────────────────────────────────────
@@ -2145,6 +2189,8 @@ namespace WSJTX_Controller
 
         private async void QrzRefreshBtn_Click(object sender, EventArgs e)
         {
+            // Handoff 33: an export-only logbook downloads nothing.
+            if (LogbookBooks.UploadsBlocked) { SetStatus(LogbookBooks.UploadsBlockedMessage); return; }
             if (_db == null) { SetStatus("Database not available."); return; }
             if (string.IsNullOrWhiteSpace(_qrzApiKey())) { SetStatus("QRZ API key not configured."); return; }
 
@@ -2190,6 +2236,8 @@ namespace WSJTX_Controller
         // DownloadLotwConfirmations for the rules that keep it from missing one.
         private async void RunLotwDownload(bool full)
         {
+            // Handoff 33: an export-only logbook downloads nothing.
+            if (LogbookBooks.UploadsBlocked) { SetStatus(LogbookBooks.UploadsBlockedMessage); return; }
             if (_db == null) { SetStatus("Database not available."); return; }
             if (string.IsNullOrWhiteSpace(_lotwUser())) { SetStatus("LoTW credentials not configured."); return; }
 
@@ -2226,6 +2274,8 @@ namespace WSJTX_Controller
 
         private async void ClubLogRefreshBtn_Click(object sender, EventArgs e)
         {
+            // Handoff 33: an export-only logbook downloads nothing.
+            if (LogbookBooks.UploadsBlocked) { SetStatus(LogbookBooks.UploadsBlockedMessage); return; }
             if (_db == null) { SetStatus("Database not available."); return; }
             if (string.IsNullOrWhiteSpace(_clubLogEmail()) || string.IsNullOrWhiteSpace(_clubLogPassword()) || string.IsNullOrWhiteSpace(_clubLogCallsign()))
             {
@@ -2278,6 +2328,8 @@ namespace WSJTX_Controller
         // full: the whole eQSL inbox (no since date), as a first run does.
         private async void RunEqslDownload(bool full)
         {
+            // Handoff 33: an export-only logbook downloads nothing.
+            if (LogbookBooks.UploadsBlocked) { SetStatus(LogbookBooks.UploadsBlockedMessage); return; }
             if (_db == null) { SetStatus("Database not available."); return; }
             if (string.IsNullOrWhiteSpace(_eqslUsername()) || string.IsNullOrWhiteSpace(_eqslPassword()))
             {

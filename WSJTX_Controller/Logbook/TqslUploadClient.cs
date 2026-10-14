@@ -108,6 +108,12 @@ namespace WSJTX_Controller
         {
             LastError = null;
             LastUploadedCount = null;
+            // Handoff 33: an export-only logbook is never signed or uploaded.
+            if (LogbookBooks.UploadsBlocked)
+            {
+                LastError = LogbookBooks.UploadsBlockedMessage;
+                return false;
+            }
             if (TestModeGuard.IsTestMode)
             {
                 LastError = "Blocked: JIMMY_TEST_DB_PATH is set (test mode) -- no real TQSL invocation allowed.";

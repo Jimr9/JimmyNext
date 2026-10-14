@@ -8205,6 +8205,136 @@ namespace WSJTX_Controller
             };
             importAllButton.Click += (s, e) => ctrl.ImportEverything_Click();
             profilesPanel.Controls.Add(importAllButton);
+
+            BuildProfileLogbookGroup(font, 404);
+        }
+
+        // ── The logbook this profile keeps its contacts in (handoff 33) ──────────
+        // The main logbook, or a separate one (a special event station's, say), which may be export
+        // only. Choosing another reopens Jimmy Next on it. Keyboard: the logbook list, then Use for
+        // This Profile, New Logbook, and the Export only box for the logbook selected in the list.
+        private void BuildProfileLogbookGroup(System.Drawing.Font font, int y)
+        {
+            var group = new System.Windows.Forms.GroupBox
+            {
+                Text = "Logbook", Location = new System.Drawing.Point(8, y), Size = new System.Drawing.Size(560, 176),
+                Font = font, TabIndex = 9,
+            };
+            profilesPanel.Controls.Add(group);
+            var current = new System.Windows.Forms.TextBox
+            {
+                ReadOnly = true, BorderStyle = System.Windows.Forms.BorderStyle.None, BackColor = profilesPanel.BackColor,
+                Location = new System.Drawing.Point(10, 20), Size = new System.Drawing.Size(540, 18), Font = font, TabIndex = 0,
+                AccessibleName = "Logbook in use",
+                Text = $"In use: {LogbookBooks.Active.Name}{(LogbookBooks.Active.ExportOnly ? ", export only" : "")}.",
+            };
+            group.Controls.Add(current);
+            group.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Logbook for this profile:", AutoSize = true, Location = new System.Drawing.Point(10, 47), Font = font, TabStop = false,
+            });
+            var list = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(160, 44), Size = new System.Drawing.Size(250, 22), Font = font, TabIndex = 1,
+                AccessibleName = "Logbook for this profile",
+            };
+            group.Controls.Add(list);
+            var useButton = new System.Windows.Forms.Button
+            {
+                Text = "Use for This Profile", Location = new System.Drawing.Point(160, 74), Size = new System.Drawing.Size(150, 26),
+                Font = font, TabIndex = 2, AccessibleName = "Use this logbook for this profile",
+            };
+            group.Controls.Add(useButton);
+            var newButton = new System.Windows.Forms.Button
+            {
+                Text = "New Logbook...", Location = new System.Drawing.Point(320, 74), Size = new System.Drawing.Size(120, 26),
+                Font = font, TabIndex = 3, AccessibleName = "New logbook",
+            };
+            group.Controls.Add(newButton);
+            var exportOnly = new System.Windows.Forms.CheckBox
+            {
+                Text = "Export only: no uploads or downloads for this logbook", AutoSize = true,
+                Location = new System.Drawing.Point(10, 108), Font = font, TabIndex = 4,
+                AccessibleName = "Export only, no uploads or downloads, for the logbook selected",
+            };
+            group.Controls.Add(exportOnly);
+            group.Controls.Add(new System.Windows.Forms.TextBox
+            {
+                ReadOnly = true, Multiline = true, BorderStyle = System.Windows.Forms.BorderStyle.None, BackColor = profilesPanel.BackColor,
+                Location = new System.Drawing.Point(10, 132), Size = new System.Drawing.Size(540, 40), Font = font, TabIndex = 5,
+                AccessibleName = "About logbooks",
+                Text = "A separate logbook has its own contacts and its own worked-before. A new one starts empty and export only. " +
+                       "Profiles can share a logbook. Deleting a profile never deletes a logbook.",
+            });
+
+            bool filling = false;
+            void Fill(string select)
+            {
+                filling = true;
+                var books = LogbookBooks.All();
+                list.Items.Clear();
+                foreach (var b in books) list.Items.Add(b.Name);
+                int i = books.FindIndex(b => string.Equals(b.Id, select, System.StringComparison.OrdinalIgnoreCase));
+                list.SelectedIndex = i < 0 ? 0 : i;
+                list.Tag = books;
+                filling = false;
+                ShowSelected();
+            }
+            LogbookBooks.Book Selected() =>
+                list.Tag is System.Collections.Generic.List<LogbookBooks.Book> books && list.SelectedIndex >= 0 ? books[list.SelectedIndex] : null;
+            void ShowSelected()
+            {
+                var b = Selected();
+                filling = true;
+                exportOnly.Checked = b != null && b.ExportOnly;
+                exportOnly.Enabled = b != null && b.Id.Length > 0;   // the main logbook's uploads are set in Options, as always
+                filling = false;
+            }
+            list.SelectedIndexChanged += (s2, e2) => { if (!filling) ShowSelected(); };
+            exportOnly.CheckedChanged += (s2, e2) =>
+            {
+                if (filling) return;
+                var b = Selected();
+                if (b == null || b.Id.Length == 0) return;
+                LogbookBooks.SetExportOnly(b.Id, exportOnly.Checked);
+                if (string.Equals(b.Id, LogbookBooks.ActiveId, System.StringComparison.OrdinalIgnoreCase))
+                    current.Text = $"In use: {b.Name}{(exportOnly.Checked ? ", export only" : "")}.";
+                Fill(b.Id);
+            };
+            newButton.Click += (s2, e2) =>
+            {
+                using (var prompt = new TextPromptDlg("New Logbook", "Name for the new logbook (for example K4B 2026):", "", "New logbook name"))
+                {
+                    if (prompt.ShowDialog(this) != System.Windows.Forms.DialogResult.OK) return;
+                    try
+                    {
+                        var b = LogbookBooks.Create(prompt.Value);
+                        Fill(b.Id);
+                        System.Windows.Forms.MessageBox.Show(this, $"{b.Name} is ready: empty and export only. Press Use for This Profile to log into it.",
+                            "New Logbook", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information);
+                        list.Focus();
+                    }
+                    catch (System.Exception ex)
+                    {
+                        System.Windows.Forms.MessageBox.Show(this, "The logbook was not made. " + ex.Message, "New Logbook",
+                            System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Warning);
+                    }
+                }
+            };
+            useButton.Click += (s2, e2) =>
+            {
+                var b = Selected();
+                if (b == null) return;
+                if (string.Equals(b.Id, LogbookBooks.ActiveId, System.StringComparison.OrdinalIgnoreCase))
+                {
+                    System.Windows.Forms.MessageBox.Show(this, $"This profile already uses {b.Name}.", "Logbook",
+                        System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information);
+                    return;
+                }
+                ctrl.UseLogbookForThisProfile(b.Id, this);
+            };
+            Fill(LogbookBooks.ActiveId);
         }
 
         // Tests QRZ.com login (username/password) as before, and -- if a Logbook API key

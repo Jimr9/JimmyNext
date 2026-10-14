@@ -192,6 +192,9 @@ namespace WSJTX_Controller
                 _debugLog($"ImportLiveLoggedQso notifyImported callback error for {dxCall}: {ex.Message}");
             }
 
+            // Handoff 33: an export-only logbook keeps the contact and uploads it nowhere.
+            if (LogbookBooks.UploadsBlocked) return true;
+
             Task uploadTask = null;
             uploadTask = Task.Run(async () =>
             {

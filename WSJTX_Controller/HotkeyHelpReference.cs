@@ -76,6 +76,7 @@ namespace WSJTX_Controller
             {
                 new Item(HotkeyAction.ToggleStationWatch,    "Start or stop watching the selected station (receive-only; never transmits)."),
                 new Item(HotkeyAction.WorkWatchedStationNow, "Work the watched station now, using its most recent decode."),
+                new Item(HotkeyAction.PreparedStationReady,  "After Prepare Station changed the band and you have tuned: put the prepared station on Smart Mode."),
             }),
 
             new Section("Radio and audio controls", new[]

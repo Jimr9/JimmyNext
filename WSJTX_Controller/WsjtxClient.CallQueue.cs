@@ -195,8 +195,8 @@ namespace WSJTX_Controller
                 // and already bypass every other automatic filter below (see isAdmitted override),
                 // so this bypasses the same way. Never suppress the station we're actively working --
                 // SNR can dip on a final RR73/73 and we must not drop a QSO in progress.
-                // A station prepared from a spot (WsjtxClient.Spots.cs), heard with transmit off:
-                // listed whatever the filters below say -- it was asked for by name. Only the
+                // A station prepared from a spot with Smart Mode off (WsjtxClient.Spots.cs), heard
+                // with transmit off: listed whatever the filters below say -- it was asked for by name. Only the
                 // weak-signal, unwanted-CQ, already-worked and category filters are passed over;
                 // a blocked call, the wrong time period and a call just logged still apply.
                 bool preparedSpot = IsPreparedSpot(deCall);
@@ -341,6 +341,7 @@ namespace WSJTX_Controller
                         break;
                 }
                 if (!emsg.AutoGen || preparedSpot) isAdmitted = true;
+                if (preparedSpot && isAdmitted) PreparedSpotHeard(deCall);   // said once
 
                 if (isAdmitted)
                 {

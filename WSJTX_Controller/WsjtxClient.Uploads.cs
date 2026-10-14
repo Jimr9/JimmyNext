@@ -79,9 +79,18 @@ namespace WSJTX_Controller
         // attempted. LoTW's gate (ctrl.lotwUploadEnabled, default true) exists for operators who
         // don't use LoTW at all -- TQSL reports an error on this command when it has no LoTW
         // certificate/Station Location setup of its own.
+        // Handoff 33: the logbook is about to change -- what the operator sees as "in progress",
+        // and transmit stopped before the engine on this logbook is stopped.
+        internal string CallInProgress => callInProg;
+        internal void HaltTxForLogbookChange() => HaltAndDisableTx();
+
         public bool UploadLotw()
         {
             HaltTuning();
+            // Handoff 33: an export-only logbook sends nothing anywhere, and says so. It does not
+            // go looking in other logbooks either.
+            string blocked = LogbookBooks.UploadsBlockedMessage;
+            if (blocked != null) { StatusView.ShowMessage(blocked, false); return true; }
             if (ctrl.lotwUploadEnabled) RunTqslUpload();
             RunUploadCatchUp();
             return true;
@@ -160,6 +169,7 @@ namespace WSJTX_Controller
         // WSJT-X performs its upload asynchronously on its own too.
         private void RunUploadCatchUp()
         {
+            if (LogbookBooks.UploadsBlocked) return;   // handoff 33: export only
             Task.Run(async () =>
             {
                 try

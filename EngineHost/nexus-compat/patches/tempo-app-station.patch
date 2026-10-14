@@ -1,8 +1,8 @@
 diff --git a/src/station.rs b/src/station.rs
-index 36954aae1..147cc6fb1 100644
+index 20a1420..4d6c503 100644
 --- a/src/station.rs
 +++ b/src/station.rs
-@@ -1744,6 +1744,14 @@ pub struct StationCore {
+@@ -2067,6 +2067,14 @@ pub struct StationCore {
      #[allow(clippy::type_complexity)]
      pub(crate) state_resolve:
          Option<Box<dyn Fn(&str, Option<&str>) -> Option<String> + Send + Sync>>,
@@ -17,7 +17,7 @@ index 36954aae1..147cc6fb1 100644
      /// Grid → rarity tier (0–3) resolver, injected by the command layer (which
      /// owns the geography table in the propagation crate) — same pattern as
      /// [`Self::set_dxcc_resolver`]. `None` in headless tests (gems stay off).
-@@ -1886,6 +1894,7 @@ impl StationCore {
+@@ -2209,6 +2217,7 @@ impl StationCore {
              journals: Default::default(),
              dxcc_resolve: None,
              state_resolve: None,
@@ -25,7 +25,7 @@ index 36954aae1..147cc6fb1 100644
              grid_rarity_resolve: None,
              lotw_resolve: None,
              hunted_parks_import: HashSet::new(),
-@@ -2420,7 +2429,9 @@ impl StationCore {
+@@ -2743,7 +2752,9 @@ impl StationCore {
              match (before, after) {
                  (None, Some(row)) => {
                      let mut row = QsoRecord::clone(&row);
@@ -36,7 +36,7 @@ index 36954aae1..147cc6fb1 100644
                      if row.id.is_none() {
                          row.id = Some(self.minter.mint());
                      }
-@@ -3489,7 +3500,7 @@ impl StationCore {
+@@ -3812,7 +3823,7 @@ impl StationCore {
      /// station's resolver when the edit carries none (the edit form never does), which the edit
      /// then keeps over the stored one.
      pub(crate) fn edit_op(&self, id: RecordId, mut rec: QsoRecord) -> LogOp {
@@ -45,7 +45,7 @@ index 36954aae1..147cc6fb1 100644
              if let Some(resolve) = &self.dxcc_resolve {
                  rec.country = resolve(&rec.call);
              }
-@@ -3541,7 +3552,9 @@ impl StationCore {
+@@ -3864,7 +3875,9 @@ impl StationCore {
          let card = edit.qsl_card_change(stored);
          let mut rec = edit.record(stored);
          // Keep country populated on edits, as `update_qso` does: the form does not carry it.

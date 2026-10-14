@@ -72,6 +72,7 @@ namespace WSJTX_Controller
 
         public async Task RunDueSyncsAsync()
         {
+            if (LogbookBooks.UploadsBlocked) return;   // handoff 33: an export-only logbook downloads nothing
             bool qrzDue = QrzAutoSyncEnabled && !string.IsNullOrWhiteSpace(_qrzApiKey())
                 && IsDue("LogbookLastQrzRefresh", QrzRefreshDays);
             bool lotwDue = LotwAutoSyncEnabled && !string.IsNullOrWhiteSpace(_lotwUser())

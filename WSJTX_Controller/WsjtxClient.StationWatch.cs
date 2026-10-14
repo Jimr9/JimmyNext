@@ -393,6 +393,39 @@ namespace WSJTX_Controller
             return true;
         }
 
+        // A station prepared from a spot (WsjtxClient.Spots.cs) goes onto Smart Mode the way a
+        // station picked from the list does (TryCaptureSmartStart above) -- but it may not have
+        // been heard yet. Its monitor then starts with nothing and waits for a live decode
+        // before anything can be sent, as it does for a stale selection. If it IS in the list,
+        // its decode is the seed, as for Enter. Null when taken; else why not.
+        private string SmartWaitForSpot(string call)
+        {
+            if (string.IsNullOrEmpty(call)) return "No station is prepared.";
+            if (IsSmartModeWaitingOn(call)) return $"Smart Mode is already waiting for {SC(call)}.";
+            callDict.TryGetValue(call, out EnqueueDecodeMessage seed);
+            _smartStart.SilenceThreshold = ctrl.smartStartSilencePeriods;
+            _smartStart.BusySilenceThreshold = ctrl.smartStartBusyQuietPeriods;
+            if (SmartStationCount > 0 && SmartModeMaxStations > 1)
+            {
+                if (SmartStationCount >= SmartModeMaxStations)
+                    return Wording.Fill("Msg.SmartListFull", ("Call", SC(call)), ("Count", SmartStationCount.ToString()));
+                AddSmartStation(call, seed);
+                return null;
+            }
+            _smartEscapeTookOne = false;
+            _smartStart.Start(call, CurrentBandStr, mode, _directExpectedSessionToken);   // "Waiting to work ..."
+            if (seed != null)
+            {
+                _smartStartSeeding = true;
+                try { _smartStart.SeedSelectedDecode(seed, DateTime.UtcNow, myCall); }
+                finally { _smartStartSeeding = false; }
+            }
+            TakeOffListForSmartMode(call);
+            if (_smartStart.ConsumeReadyToStart())
+                ArmPendingAutoStart(_smartStart);
+            return null;
+        }
+
         // ── Shared feed points, called from the Direct decode loop ──────────────────────────────
 
         // Called for every processed decode (WsjtxClient.Direct.cs), regardless of whether it
@@ -458,9 +491,12 @@ namespace WSJTX_Controller
             _smartMore.Add(m);
             m.Start(call, CurrentBandStr, mode, _directExpectedSessionToken);   // "Also waiting for ..."
             DebugOutput($"{Time()} [SMART] {call} added to the waiting list ({SmartStationCount} waiting)");
-            _smartStartSeeding = true;
-            try { m.SeedSelectedDecode(dmsg, DateTime.UtcNow, myCall); }
-            finally { _smartStartSeeding = false; }
+            if (dmsg != null)   // null: taken from a spot, not heard yet (SmartWaitForSpot)
+            {
+                _smartStartSeeding = true;
+                try { m.SeedSelectedDecode(dmsg, DateTime.UtcNow, myCall); }
+                finally { _smartStartSeeding = false; }
+            }
             TakeOffListForSmartMode(call);
             if (CanMakeCurrent && m.ConsumeReadyToStart() && CallableNow(m) && MakeCurrent(m))
                 ArmPendingAutoStart(_smartStart);

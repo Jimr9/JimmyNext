@@ -652,8 +652,17 @@ namespace WSJTX_Controller
 
         // HRDLog included: its upload time is kept on each contact (APP_JIMMY_HRDLOG_UL, the read
         // copy's hrdlog_uploaded_at), recorded by Nexus's LOG_UPLOAD.
-        public List<LogbookDb.PendingUploadQso> GetPendingUploads(string service, int limit = 1000) =>
-            R(db => db.GetPendingUploads(service, limit), new List<LogbookDb.PendingUploadQso>());
+        // Handoff 33: nothing at all for an export-only logbook, and only contacts made as the
+        // station call this profile uses now (LogbookBooks.MayUpload). The others stay pending --
+        // never marked as sent -- and are counted for Alt+U's result.
+        public List<LogbookDb.PendingUploadQso> GetPendingUploads(string service, int limit = 1000)
+        {
+            if (LogbookBooks.UploadsBlocked) { LogbookBooks.LastHeldForOtherCall = 0; return new List<LogbookDb.PendingUploadQso>(); }
+            var all = R(db => db.GetPendingUploads(service, limit), new List<LogbookDb.PendingUploadQso>());
+            var mine = all.Where(q => LogbookBooks.MayUpload(q.StationCall)).ToList();
+            LogbookBooks.LastHeldForOtherCall = all.Count - mine.Count;
+            return mine;
+        }
 
         // The Nexus id of the contact Jimmy knows by its dedup key: from the read copy, or -- for a
         // live contact not in it yet -- the id its logging request deterministically carries.

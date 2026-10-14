@@ -247,6 +247,9 @@ static class JimmyTests
     // as received (what Nexus does on its own) and once through NexusReportPairing. The guarded
     // result must put every confirmation on the contact at its minute, or change nothing and
     // report the row.
+    // Nexus 1.18 (2026-10-13): its merge pairs by nearest time, so the order contacts are stored in
+    // no longer holds rows back (cases 1, 4, 15); and a QRZ download carries QRZ's own confirmation
+    // only, never QRZ's copy of LoTW's (cases 3, 5, 6 -- LoTW's comes from a LoTW download).
     static void NexusPairingTests(string engineExe, string work)
     {
         Console.WriteLine("\n--- NexusPairingTests ---");
@@ -269,8 +272,8 @@ static class JimmyTests
         {
             ("1 LoTW confirms a LATER contact, the earlier is unconfirmed",
                 new[] { ("20260901", "0010"), ("20260901", "0020") }, "lotw",
-                c => Lotw + Rec(c, "20260901", "0020", "Y", null), 1,
-                E(new[] { ("0010", false, false), ("0020", false, false) }), 0),
+                c => Lotw + Rec(c, "20260901", "0020", "Y", null), 0,
+                E(new[] { ("0010", false, false), ("0020", true, false) }), 0),
             ("2 LoTW confirms the EARLIER contact of two",
                 new[] { ("20260901", "0010"), ("20260901", "0020") }, "lotw",
                 c => Lotw + Rec(c, "20260901", "0010", "Y", null), 0,
@@ -278,19 +281,19 @@ static class JimmyTests
             ("3 log order differs from time order, QRZ lists both in time order",
                 new[] { ("20260901", "0020"), ("20260901", "0010") }, "qrz",
                 c => QrzRec(c, "20260901", "0010", "N", "C") + QrzRec(c, "20260901", "0020", "Y", "C"), 0,
-                E(new[] { ("0010", false, true), ("0020", true, true) }), 0),
+                E(new[] { ("0010", false, true), ("0020", false, true) }), 0),
             ("4 a row missing for the earliest of three contacts",
                 new[] { ("20260901", "0010"), ("20260901", "0020"), ("20260901", "0030") }, "qrz",
-                c => QrzRec(c, "20260901", "0020", "N", "C") + QrzRec(c, "20260901", "0030", "Y", "C"), 2,
-                E(new[] { ("0010", false, false), ("0020", false, false), ("0030", false, false) }), 0),
+                c => QrzRec(c, "20260901", "0020", "N", "C") + QrzRec(c, "20260901", "0030", "Y", "C"), 0,
+                E(new[] { ("0010", false, false), ("0020", false, true), ("0030", false, true) }), 0),
             ("5 three same-day contacts, rows shuffled, all present",
                 new[] { ("20260901", "0010"), ("20260901", "0020"), ("20260901", "0030") }, "qrz",
                 c => QrzRec(c, "20260901", "0030", "Y", null) + QrzRec(c, "20260901", "0010", "N", null) + QrzRec(c, "20260901", "0020", null, "C"), 0,
-                E(new[] { ("0010", false, false), ("0020", false, true), ("0030", true, false) }), 0),
+                E(new[] { ("0010", false, false), ("0020", false, true), ("0030", false, false) }), 0),
             ("6 later contact confirmed, earlier not, both rows present",
                 new[] { ("20260901", "0010"), ("20260901", "0020") }, "qrz",
                 c => QrzRec(c, "20260901", "0010", "N", null) + QrzRec(c, "20260901", "0020", "Y", "C"), 0,
-                E(new[] { ("0010", false, false), ("0020", true, true) }), 0),
+                E(new[] { ("0010", false, false), ("0020", false, true) }), 0),
             ("7 QRZ has a contact the log lacks, the day after a logged one",
                 new[] { ("20260901", "0010") }, "qrz",
                 c => QrzRec(c, "20260902", "0100", null, "C"), 1,
@@ -320,6 +323,18 @@ static class JimmyTests
                 new[] { ("20260901", "2359") }, "eqsl",
                 c => EqslRec(c, "20260902", "0001"), 0,
                 E(new[] { ("2359", false, true) }), 0),
+            ("14 eQSL row three hours off the only contact that day (the other station's clock)",
+                new[] { ("20260901", "0010") }, "eqsl",
+                c => EqslRec(c, "20260901", "0310"), 0,
+                E(new[] { ("0010", false, true) }), 0),
+            ("15 LoTW confirms both, log order differs from time order, rows newest first",
+                new[] { ("20260901", "0020"), ("20260901", "0010") }, "lotw",
+                c => Lotw + Rec(c, "20260901", "0020", "Y", null) + Rec(c, "20260901", "0010", "Y", null), 0,
+                E(new[] { ("0010", true, false), ("0020", true, false) }), 0),
+            ("16 two contacts 40 seconds apart across a minute, a row nearer the other one",
+                new[] { ("20260901", "001030"), ("20260901", "001110") }, "lotw",
+                c => Lotw + Rec(c, "20260901", "001059", "Y", null), 1,
+                E(new[] { ("0010", false, false), ("0011", false, false) }), 0),
         };
 
         Directory.CreateDirectory(work);
@@ -343,7 +358,7 @@ static class JimmyTests
                 var rows = client.Rows().Rows;
                 var inOrder = rows.Where(r => r.Call == guardCall).Select(r => DateTimeOffset.FromUnixTimeSeconds((long)r.WhenUnix).UtcDateTime.ToString("HHmm")).ToList();
                 if (cs.Log.Length > 1 && cs.Log.Select(x => x.Time.Substring(0, 4)).Distinct().Count() == cs.Log.Length)
-                    Check($"case {n}: LOG_ROWS keeps the order the contacts were added", inOrder.SequenceEqual(cs.Log.Select(x => x.Time)), true);
+                    Check($"case {n}: LOG_ROWS keeps the order the contacts were added", inOrder.SequenceEqual(cs.Log.Select(x => x.Time.Substring(0, 4))), true);
 
                 // As received: what Nexus does on its own.
                 string rawFile = Path.Combine(work, $"raw-{n}.adi");
@@ -409,8 +424,10 @@ static class JimmyTests
                 Console.WriteLine($"  LoTW received -- Nexus alone: 0010 {St("KECHORAW", "0010")}, 0020 {St("KECHORAW", "0020")}; " +
                                   $"guarded: 0010 {St("KECHOGRD", "0010")}, 0020 {St("KECHOGRD", "0020")}; single: {St("KECHO3", "0100")}; promoted {promoted} {why}");
                 Check("LoTW received (guarded): a never-uploaded same-day contact is never marked received", St("KECHOGRD", "0010") == "none", true);
-                Check("LoTW received (guarded): the uploaded one is left pending rather than guessed", St("KECHOGRD", "0020") == "pending", true);
-                Check("LoTW received: a single pending contact LoTW holds is promoted to accepted", St("KECHO3", "0100") == "accepted" && promoted == 1, true);
+                // Nexus 1.18 pairs LoTW's record with the contact at its time, so the uploaded one --
+                // the later of the two -- is promoted, where the 1.17 guard had to leave it pending.
+                Check("LoTW received (guarded): the uploaded one, the later of two that day, is promoted", St("KECHOGRD", "0020") == "accepted", true);
+                Check("LoTW received: a single pending contact LoTW holds is promoted to accepted", St("KECHO3", "0100") == "accepted" && promoted == 2, true);
             }
             finally { NexusLogbook.TestPortOverride = null; NexusLogbook.TestFolderOverride = null; NexusLogbook.Reset(); }
             client.Shutdown(token);
@@ -1042,8 +1059,15 @@ static class JimmyTests
                     string exp = Path.Combine(work, "export.adi");
                     client.Export(exp);
                     string expText = File.ReadAllText(exp);
-                    int at = expText.IndexOf("<CALL:5>K7PRK", StringComparison.OrdinalIgnoreCase);
-                    string expRec = at < 0 ? "" : expText.Substring(at, expText.IndexOf("<eor>", at, StringComparison.OrdinalIgnoreCase) - at);
+                    // The park contact's own record (21:30), wherever it is in the file: the two K7PRK
+                    // contacts are not always stored in the order they were added (seen with Nexus 1.18).
+                    string expRec = "";
+                    for (int at = expText.IndexOf("<CALL:5>K7PRK", StringComparison.OrdinalIgnoreCase); at >= 0;
+                         at = expText.IndexOf("<CALL:5>K7PRK", at + 1, StringComparison.OrdinalIgnoreCase))
+                    {
+                        string one = expText.Substring(at, expText.IndexOf("<eor>", at, StringComparison.OrdinalIgnoreCase) - at);
+                        if (one.IndexOf("<TIME_ON:6>213000", StringComparison.OrdinalIgnoreCase) >= 0) { expRec = one; break; }
+                    }
                     Check("export: the saved park and location go out as saved",
                         expRec.IndexOf("<SIG_INFO:7>US-2222", StringComparison.OrdinalIgnoreCase) >= 0 && expRec.IndexOf("<MY_SIG_INFO:7>US-1111", StringComparison.OrdinalIgnoreCase) >= 0
                         && expRec.IndexOf("<MY_STATE:2>ID", StringComparison.OrdinalIgnoreCase) >= 0 && expRec.IndexOf("<STATE:2>ID", StringComparison.OrdinalIgnoreCase) >= 0, true);
@@ -1676,6 +1700,7 @@ static class JimmyTests
         SpotRowsTests();
         SpotPrepareTests();
         AppLookTests();
+        ProfileLogbookTests();
         SharedSettingsTests();
         AlertRegionsAndNewGridTests();
         QsoTimeOnIsStartOfContactTests();
@@ -18498,14 +18523,13 @@ static class JimmyTests
         }
     }
 
-    // ── JIMMY COMPAT (nexus-compat): the Fake-It unresolved-restore warning is announced ONCE
-    // PER EPISODE, and that identity survives a Direct transport reconnect (Codex Audit #10) ──
-    // The engine sets RadioStatus.fake_it_restore_warning + .fake_it_restore_warning_id while a
-    // Fake-It dial restore is UNRESOLVED and clears both (null) when it reconciles.
-    // DirectApplyStatus dedups on (episode id + snapshot SessionToken) -- NOT message text --
-    // and does NOT reset that identity on a reconnect, so the SAME still-unresolved episode is
-    // announced only once total. A genuinely new episode (higher id, or a new EngineHost's new
-    // token) announces again even with identical wording. The clearing is silent.
+    // ── Fake It split: "the radio did not go back" is announced ONCE while it stands, and that
+    // survives a Direct transport reconnect ──
+    // Nexus 1.18 reports it in the CAT status text ("Fake It split: the radio did not go back to
+    // ..."), with CAT still up. DirectApplyStatus announces that note once, remembers it with the
+    // snapshot's SessionToken, and does NOT forget it on a reconnect. The note going away is
+    // silent and clears it, so the same failure later is announced again; a new EngineHost (new
+    // token) showing the same note announces too. Any other CAT status text announces nothing here.
     static void FakeItRestoreWarningSurfacesOnceThenClearsSilentlyTests()
     {
         Console.WriteLine("\n── Fake It: unresolved-restore warning is once-per-episode across a Direct reconnect ──");
@@ -18524,67 +18548,67 @@ static class JimmyTests
             wc.ConnectDirectEngine(myCall, myGrid);
             wc.TestSetMode("FT8");
 
-            const string warn = "Fake It could not confirm your dial was put back to 14.074 MHz -- check your VFO frequency";
+            const string note = "Fake It split: the radio did not go back to 14.0740 MHz after the over (RPRT -1, 3 tries); it may still be on its TX frequency, 14.0750 MHz";
 
-            // fakeItId == null / warn == null => a healthy or absent restore (no id emitted).
-            DirectSnapshot Snap(ulong slot, string fakeItWarn, long? fakeItId, string token) =>
+            // catDetail == null => CAT status says something ordinary.
+            DirectSnapshot Snap(ulong slot, string catDetail, string token) =>
                 ParseDirectSnapshot(@"{
                     ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
                     " + (token == null ? "" : @"""sessionToken"": """ + token + @""", ") + @"
                     ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": " + slot +
-                        (fakeItWarn == null ? "" : @", ""fakeItRestoreWarning"": """ + fakeItWarn + @"""") +
-                        (fakeItId == null ? "" : @", ""fakeItRestoreWarningId"": " + fakeItId.Value) + @" },
+                        @", ""catOk"": true, ""catDetail"": """ + (catDetail ?? "CAT confirmed -- rig accepted a command") + @""" },
                     ""recentDecodes"": [] }");
 
-            // 7. Healthy / no restore -> nothing announced.
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1, null, null, "A"));
+            // Ordinary CAT status -> nothing announced.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1, null, "A"));
             int c = notify.AnnounceCount;
 
-            // Episode #1 becomes unresolved -> announced ONCE.
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(2, warn, 1, "A"));
-            Check("unresolved episode #1 raises an accessible warning", notify.AnnounceCount == c + 1, true);
-            Check("...with the engine's operator wording",
-                  notify.LastText != null && notify.LastText.Contains("check your VFO frequency"), true);
+            // The radio did not go back -> announced ONCE.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(2, note, "A"));
+            Check("the radio not going back raises an accessible warning", notify.AnnounceCount == c + 1, true);
+            Check("...with the engine's own words and what to do",
+                  notify.LastText != null && notify.LastText.Contains("did not go back to 14.0740 MHz") && notify.LastText.Contains("Check your VFO frequency"), true);
 
-            // 1. Same episode, repeated snapshots -> not re-announced.
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(3, warn, 1, "A"));
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(4, warn, 1, "A"));
-            Check("repeated snapshots of the SAME episode do not re-announce", notify.AnnounceCount == c + 1, true);
+            // The note still standing -> not re-announced.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(3, note, "A"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(4, note, "A"));
+            Check("the same note still standing is not announced again", notify.AnnounceCount == c + 1, true);
 
-            // 2. Direct transport reconnect, SAME episode still unresolved -> STILL only once total.
+            // Direct transport reconnect, the note still standing -> STILL only once total.
             Reconnect(); // simulated reconnect: DisconnectDirectEngine + ConnectDirectEngine (full reset)
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(5, warn, 1, "A"));
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(6, warn, 1, "A"));
-            Check("THE FIX: a Direct reconnect does NOT re-announce the same still-unresolved episode",
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(5, note, "A"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(6, note, "A"));
+            Check("a Direct reconnect does NOT re-announce the note that is still standing",
                   notify.AnnounceCount == c + 1, true);
 
-            // 3. Same wording + same target frequency, but a genuinely NEW episode (id bumped).
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(7, warn, 2, "A"));
-            Check("a genuinely NEW episode with identical wording announces again", notify.AnnounceCount == c + 2, true);
-
-            // 4. Episode #2 resolves -> clears SILENTLY.
+            // The dial is back -> the note goes away SILENTLY.
             int beforeClear = notify.AnnounceCount;
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(8, null, null, "A"));
-            Check("a resolved episode clears the warning silently", notify.AnnounceCount == beforeClear, true);
-            // ...and a reconnect after the clear does not resurrect it.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(7, null, "A"));
+            Check("the note going away is silent", notify.AnnounceCount == beforeClear, true);
             Reconnect();
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(9, null, null, "A"));
-            Check("a reconnect after resolution stays silent", notify.AnnounceCount == beforeClear, true);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(8, null, "A"));
+            Check("a reconnect after that stays silent", notify.AnnounceCount == beforeClear, true);
 
-            // 5. A later new episode after resolution -> announces once.
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(10, warn, 3, "A"));
-            Check("a later new unresolved episode announces once", notify.AnnounceCount == beforeClear + 1, true);
+            // It happens again later, same words -> announced again, once.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(9, note, "A"));
+            Check("the same failure happening again later is announced again", notify.AnnounceCount == beforeClear + 1, true);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(10, note, "A"));
+            Check("...once", notify.AnnounceCount == beforeClear + 1, true);
 
-            // 6. New EngineHost / session (different SessionToken) reports an episode whose local
-            //    id (3) COLLIDES with the last one announced -> treated as NEW, announces.
+            // A new EngineHost / session (different SessionToken) showing the same note -> announces.
             int beforeSessionChange = notify.AnnounceCount;
             Reconnect();
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(11, warn, 3, "B"));
-            Check("a colliding episode id from a DIFFERENT session token announces (not suppressed)",
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(11, note, "B"));
+            Check("the same note from a DIFFERENT session token announces (not suppressed)",
                   notify.AnnounceCount == beforeSessionChange + 1, true);
-            // ...and that one is then also once-per-episode.
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(12, warn, 3, "B"));
-            Check("the new-session episode is itself announced only once", notify.AnnounceCount == beforeSessionChange + 1, true);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(12, note, "B"));
+            Check("...and only once", notify.AnnounceCount == beforeSessionChange + 1, true);
+
+            // Any other CAT status text is not this warning.
+            int beforeOther = notify.AnnounceCount;
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(13, "CAT confirmed -- rig accepted a command", "B"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(14, "Split: the radio is in split", "B"));
+            Check("other CAT status text announces nothing here", notify.AnnounceCount == beforeOther, true);
 
             wc.DisconnectDirectEngine(); // stop the poll timer this test started
         }
@@ -21984,6 +22008,110 @@ static class JimmyTests
     // heard even where a filter would hide it, while transmit stays off and nothing is called.
     // Handoff 31 (2026-10-12): the look shared by every window (AppLook.cs) -- theme, text size,
     // row spacing, list colours -- its settings, and remembered window places.
+    // Handoff 33 (2026-10-14): a profile's own logbook, export only, and uploads only for the
+    // station call in use. Temporary folders only; nothing reaches a real log or service.
+    static void ProfileLogbookTests()
+    {
+        Console.WriteLine("\n── Profile logbooks: separate, export only, station call ──");
+        string root = Path.Combine(Path.GetTempPath(), "JimmyTest_Books_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            LogbookBooks.ResetForTests();
+            LogbookBooks.TestRoot = root;
+            NexusLogbook.TestFolderOverride = null;
+
+            Check("only the main logbook at first", LogbookBooks.All().Count == 1 && LogbookBooks.All()[0].Id == "", true);
+            CheckStr("the main logbook is the folder every install already has", LogbookBooks.ActiveFolder, Path.Combine(root, "NexusLog"));
+            Check("the main logbook uploads as set in Options", LogbookBooks.UploadsBlocked, false);
+
+            var k4b = LogbookBooks.Create("K4B 2026");
+            Check("a new logbook: its own folder, empty, with the marker that stops the old log being moved into it",
+                Directory.Exists(LogbookBooks.FolderOf(k4b.Id)) && File.Exists(Path.Combine(LogbookBooks.FolderOf(k4b.Id), "ACTIVE"))
+                && Directory.GetFiles(LogbookBooks.FolderOf(k4b.Id)).Length == 1, true);
+            Check("...and export only", k4b.ExportOnly && LogbookBooks.Find(k4b.Id).ExportOnly, true);
+            Check("...listed beside the main one, by name", LogbookBooks.All().Select(b => b.Name).SequenceEqual(new[] { "Main logbook", "K4B 2026" }), true);
+            bool dupRefused = false;
+            try { LogbookBooks.Create("k4b 2026"); } catch (ArgumentException) { dupRefused = true; }
+            Check("a second logbook with the same name is refused", dupRefused, true);
+            bool blankRefused = false;
+            try { LogbookBooks.Create("  "); } catch (ArgumentException) { blankRefused = true; }
+            Check("a logbook with no name is refused", blankRefused, true);
+
+            // The profile chooses it: everything of the logbook follows.
+            LogbookBooks.Use(k4b.Id);
+            Check("in use: the logbook's own folder", LogbookBooks.ActiveFolder == LogbookBooks.FolderOf(k4b.Id), true);
+            Check("Nexus's folder, outbox and read copy follow it", NexusLogbook.Folder == LogbookBooks.FolderOf(k4b.Id)
+                && NexusLogbook.OutboxPath.StartsWith(LogbookBooks.FolderOf(k4b.Id)) && NexusLogbook.ProjectionFolder.StartsWith(LogbookBooks.FolderOf(k4b.Id)), true);
+            CheckStr("what is said about it", LogbookBooks.Describe("K4B"), "Profile K4B, K4B 2026, export only.");
+
+            // Export only blocks every way out.
+            Check("export only: uploads blocked, with the reason", LogbookBooks.UploadsBlocked && LogbookBooks.UploadsBlockedMessage.Contains("export only"), true);
+            LogbookBooks.StationCallNow = () => "K4B";
+            Check("export only: not even a K4B contact may be uploaded", LogbookBooks.MayUpload("K4B"), false);
+            var tqsl = new TqslUploadClient();
+            bool tqslOk = tqsl.UploadPendingAsync("Home", null).GetAwaiter().GetResult();
+            Check("export only: LoTW (TQSL) is not run, and says why", !tqslOk && (tqsl.LastError ?? "").Contains("export only"), true);
+
+            TabOrderWalker.OnSTA(() =>
+            {
+                var ctrl = NewMinimalCtrl();
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.UploadLotw();
+                Check("export only: Alt+U says uploads are off, and starts nothing", (ctrl.statusText.Text ?? "").Contains("export only"), true);
+            });
+
+            // Uploads on: only contacts made as the station call in use.
+            LogbookBooks.SetExportOnly(k4b.Id, false);
+            Check("export only can be turned off for a logbook", !LogbookBooks.Find(k4b.Id).ExportOnly && !LogbookBooks.UploadsBlocked, true);
+            Check("a K4B contact may be uploaded by the K4B profile", LogbookBooks.MayUpload("k4b"), true);
+            Check("a contact made as another call is not", LogbookBooks.MayUpload("KB0UZT"), false);
+            Check("in a separate logbook, a contact with no station call recorded is held", LogbookBooks.MayUpload(""), false);
+            LogbookBooks.StationCallNow = () => null;
+            Check("no station call set: nothing is uploaded", LogbookBooks.MayUpload("K4B"), false);
+
+            LogbookBooks.Use("");
+            LogbookBooks.StationCallNow = () => "KB0UZT";
+            Check("main logbook: the owner's contacts are uploaded", LogbookBooks.MayUpload("KB0UZT"), true);
+            Check("main logbook: a K4B contact in it is not uploaded as KB0UZT", LogbookBooks.MayUpload("K4B"), false);
+            Check("main logbook: a contact from before station calls were recorded is the owner's", LogbookBooks.MayUpload(""), true);
+            LogbookBooks.SetExportOnly("", true);
+            Check("the main logbook cannot be made export only here (its uploads are set in Options)", LogbookBooks.UploadsBlocked, false);
+
+            // A profile's choice, read from its settings file; a vanished logbook.
+            string ini = Path.Combine(root, "K4B.ini");
+            new IniFile(ini).Write("logbookId", k4b.Id);
+            CheckStr("the logbook a profile's settings file names", Controller.ProfileLogbookId(ini), k4b.Id);
+            CheckStr("a profile that names none uses the main logbook", Controller.ProfileLogbookId(Path.Combine(root, "none.ini")), "");
+            LogbookBooks.Use("gone-123456");
+            CheckStr("a logbook that is neither listed nor on disk: the main logbook", LogbookBooks.ActiveId, "");
+            Directory.CreateDirectory(LogbookBooks.FolderOf("copied-654321"));
+            LogbookBooks.Use("copied-654321");
+            Check("a logbook folder that is there but not listed is still used, export only (never the wrong log)",
+                LogbookBooks.ActiveId == "copied-654321" && LogbookBooks.UploadsBlocked, true);
+
+            // Never sent in a support package or customization file.
+            Check("the profile's logbook choice is never sent to anyone else", SupportPackage.Travels("logbookId"), false);
+
+            // What an export holds, read back from the file.
+            string adi = Path.Combine(root, "x.adi");
+            File.WriteAllText(adi, "Nexus\n<EOH>\n<CALL:4>W1AW<QSO_DATE:8>20261015<TIME_ON:6>001200<STATION_CALLSIGN:3>K4B<EOR>\n" +
+                                   "<CALL:4>K1ABC<QSO_DATE:8>20261025<TIME_ON:4>2340<STATION_CALLSIGN:3>K4B<OPERATOR:6>KB0UZT<EOR>\n");
+            CheckStr("the export says how far it runs and as which station call", LogbookWindow.ExportSummary(adi),
+                "from 2026-10-15 00:12 to 2026-10-25 23:40 UTC, station call K4B");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  ProfileLogbookTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            LogbookBooks.ResetForTests();
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
     static void AppLookTests()
     {
         Console.WriteLine("\n── The shared look: theme, text size, row spacing, window places ──");
@@ -22213,9 +22341,13 @@ static class JimmyTests
                 InsertQso(db, "W9OLD", "", dxcc: 291, zone: 5, band: "20m", lotwRcvd: "Y");
                 InsertQso(db, "K4YT", "", dxcc: 291, zone: 5, band: "20m", lotwRcvd: "Y");
             }
-            WsjtxClient MakeClient()
+            Controller lastCtrl = null;
+            WsjtxClient MakeClient(bool smartMode = false)
             {
                 var ctrl = NewMinimalCtrl();
+                lastCtrl = ctrl;
+                ctrl.smartQsoStartEnabled = smartMode;
+                ctrl.hotkeyConfig = new HotkeyConfig();
                 ctrl.anyMsgRadioButton.Checked = true;
                 ctrl.replyDxCheckBox.Checked = true;
                 ctrl.replyLocalCheckBox.Checked = true;
@@ -22241,28 +22373,80 @@ static class JimmyTests
             var plain = MakeClient();
             Check("premise: a station already worked on this band is not listed", Hear(plain, "W9OLD"), false);
 
+            // Smart Mode off: Jimmy never calls for you. The station is listed when heard.
             var wc1 = MakeClient();
             wc1.TestSetPreparedSpot("W9OLD", "20m", "FT8", settled: true);
-            Check("prepared and heard: it is in the station list, though worked before", Hear(wc1, "W9OLD"), true);
+            Check("Smart Mode off: taking the prepared station says it will only be listed",
+                wc1.TestPreparedSpotBegin(out string saidOff) == null && saidOff.Contains("Smart Mode is off") && saidOff.Contains("listed when it is heard"), true);
+            Check("...and Smart Mode is not waiting for it", wc1.IsSmartModeWaitingOn("W9OLD"), false);
+            Check("heard: it is in the station list, though worked before", Hear(wc1, "W9OLD"), true);
             Check("...and hearing it did not turn transmit on", wc1.TestTxEnabled, false);
             Hear(wc1, "W9OLD", "K1ZZZ W9OLD -05");   // now busy with someone else
             Hear(wc1, "W9OLD");                         // and free again
             Hear(wc1, "W9OLD");
             Check("heard again, busy and free again: transmit is still off, and nothing was called", !wc1.TestTxEnabled && string.IsNullOrEmpty(wc1.TestCallInProg), true);
+            Check("no Station Watch was started (it would hold back Jimmy's routine speech)", wc1.StationWatchActive, false);
             Check("another station is not let past the filters by it", Hear(wc1, "K4YT"), false);
             CheckStr("it stays prepared while the radio stays on that band and mode", wc1.PreparedSpotCall, "W9OLD");
             wc1.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
                 ""radio"": { ""dialMhz"": 7.074, ""transmitting"": false, ""slot"": 5000 }, ""recentDecodes"": [] }"));
             Check("the radio moved to another band: it is no longer prepared", wc1.PreparedSpotCall == null, true);
 
-            var wc2 = MakeClient();
+            // The radio had to move: remembered only. Nothing is listed, called or armed until
+            // the operator says it is ready.
+            var wc2 = MakeClient(smartMode: true);
             wc2.TestSetPreparedSpot("W9OLD", "40m", "FT8", settled: false);   // the radio is still on 20m
-            Check("not yet on the band: nothing is passed over", Hear(wc2, "W9OLD"), false);
+            Check("radio not on the band yet: the station is not let past the filters", Hear(wc2, "W9OLD"), false);
+            wc2.PreparedStationReady();
+            Check("...and the ready key does not start anything yet", !wc2.IsSmartModeWaitingOn("W9OLD") && wc2.PreparedSpotCall == "W9OLD" && !wc2.TestTxEnabled, true);
 
-            var wc3 = MakeClient();
+            var wc3 = MakeClient(smartMode: true);
+            Hear(wc3, "K4YT");   // the radio is on 20m FT8
             wc3.TestSetPreparedSpot("W9OLD", "20m", "FT8", settled: true);
-            wc3.TestSetTxEnabled(true);
-            Check("with transmit on, only the operator's own filters decide what may be called", wc3.TestIsPreparedSpot("W9OLD"), false);
+            Hear(wc3, "K4YT");
+            Hear(wc3, "K4YT");
+            Check("on the band, tuned or not, nothing happens until the operator says ready",
+                !wc3.IsSmartModeWaitingOn("W9OLD") && wc3.PreparedSpotCall == "W9OLD" && !wc3.TestTxEnabled && string.IsNullOrEmpty(wc3.TestCallInProg), true);
+            wc3.PreparedStationReady();
+            Check("the ready key: Smart Mode now waits for the station", wc3.IsSmartModeWaitingOn("W9OLD"), true);
+            Check("...Smart Mode has it, so nothing is left remembered", wc3.PreparedSpotCall == null, true);
+            Check("...transmit is still off: the station has not been heard", !wc3.TestTxEnabled && string.IsNullOrEmpty(wc3.TestCallInProg), true);
+            Check("...and no Station Watch was started", wc3.StationWatchActive, false);
+            Hear(wc3, "K4YT");
+            Check("another station being heard does not start a call", !wc3.TestTxEnabled && string.IsNullOrEmpty(wc3.TestCallInProg), true);
+            wc3.PreparedStationReady();
+            Check("the ready key with nothing prepared does nothing", wc3.IsSmartModeWaitingOn("W9OLD") && wc3.PreparedSpotCall == null, true);
+
+            // A second station goes onto the same waiting list.
+            wc3.TestSetPreparedSpot("K9NEW", "20m", "FT8", settled: true);
+            wc3.PreparedStationReady();
+            Check("a second prepared station joins Smart Mode's list beside the first",
+                wc3.IsSmartModeWaitingOn("W9OLD") && wc3.IsSmartModeWaitingOn("K9NEW"), true);
+            wc3.TestSetPreparedSpot("W9OLD", "20m", "FT8", settled: true);
+            Check("one Smart Mode already waits for is not taken twice",
+                (wc3.TestPreparedSpotBegin(out _) ?? "").Contains("already waiting"), true);
+
+            var wc5 = MakeClient(smartMode: false);
+            wc5.TestSetPreparedSpot("W9OLD", "20m", "FT8", settled: true, listOnly: true);
+            wc5.TestSetTxEnabled(true);
+            Check("with transmit on, only the operator's own filters decide what may be called", wc5.TestIsPreparedSpot("W9OLD"), false);
+
+            // The key.
+            var hk = new HotkeyConfig();
+            Check("Prepared Station Ready is Alt+Shift+P by default, and clashes with no other key",
+                hk[HotkeyAction.PreparedStationReady] == (System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.P)
+                && hk.FindConflict(hk[HotkeyAction.PreparedStationReady], HotkeyAction.PreparedStationReady) == null
+                && HotkeyConfig.OptionalActions.Contains(HotkeyAction.PreparedStationReady), true);
+
+            // Smart Mode's own messages while a Station Watch holds routine speech back (2026-10-12:
+            // "not heard after 10 calls; Smart Mode stopped" was thrown away by the speech queue).
+            var wc6 = MakeClient(smartMode: true);
+            typeof(Controller).GetField("wsjtxClient", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic).SetValue(lastCtrl, wc6);
+            lastCtrl.queueSpeechExperiment = true;
+            wc6.Notify.SetStationWatchActive(true);
+            lastCtrl.ShowMsg("C 6 A V D not heard after 10 calls; Smart Mode stopped", false);
+            CheckStr("a message of Jimmy's own is still said while a Station Watch is on",
+                lastCtrl.statusText.Text, "C 6 A V D not heard after 10 calls; Smart Mode stopped");
 
             var wc4 = MakeClient();
             Check("with no engine connected, preparing does nothing and says why",

@@ -30,7 +30,9 @@ namespace WSJTX_Controller
         internal static string TestFolderOverride;
         internal static int? TestPortOverride;
 
-        public static string Folder => TestFolderOverride ?? Path.Combine(LookupManager.DataRoot, "NexusLog");
+        // The logbook in use (LogbookBooks): the main one, DataRoot\NexusLog, unless the profile
+        // chose a separate one (handoff 33).
+        public static string Folder => TestFolderOverride ?? LogbookBooks.ActiveFolder;
         public static string ActiveMarker => Path.Combine(Folder, "ACTIVE");
         public static bool Active => TestForceActive ?? !TestModeGuard.IsTestMode;
         public static bool Moved => File.Exists(ActiveMarker);

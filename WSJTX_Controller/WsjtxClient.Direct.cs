@@ -749,18 +749,16 @@ namespace WSJTX_Controller
         // NOT observable here without changing Nexus. This timestamp bounds the total only.
         private DateTime? _catLostAtUtc;
 
-        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): identity of the LAST-ANNOUNCED
-        // unresolved Fake-It restore episode, so the SAME episode is announced only once even
-        // across a Direct transport reconnect (the engine keeps the episode alive; the C#
-        // connection restarting is not a new episode). Identity is the engine's monotonic
-        // episode id (radio.fakeItRestoreWarningId) PAIRED with that snapshot's per-launch
-        // SessionToken -- so a *new* EngineHost whose id happens to collide numerically is
-        // still a new episode. A genuinely new episode (higher id, or new token) announces
-        // again even with identical wording. `_lastAnnouncedFakeItEpisodeId == null` = nothing
-        // announced yet. These are DELIBERATELY NOT reset on a Direct reconnect (see
-        // ConnectDirectEngine); a resolved episode leaves the id in place, harmlessly, since
-        // the next real episode's id differs.
-        private long? _lastAnnouncedFakeItEpisodeId;
+        // Fake It split (Nexus 1.18): when the radio does not go back to the operating frequency
+        // after an over, the engine says so in the CAT status text ("Fake It split: the radio
+        // did not go back to ..."), with the CAT link itself still up. That note is announced
+        // ONCE while it stands. What was announced is remembered as the note's own text PAIRED
+        // with the snapshot's per-launch SessionToken, and is DELIBERATELY NOT reset on a Direct
+        // reconnect (see ConnectDirectEngine): the C# connection restarting is not a new
+        // failure. The note going away (the engine got the dial back, or CAT status moved on)
+        // clears it, so the same thing happening again later is announced again.
+        internal const string FakeItNotePrefix = "Fake It split:";
+        private string _lastAnnouncedFakeItNote;
         private string _lastAnnouncedFakeItEpisodeToken;
 
         // Starts polling the engine host's control port directly. Call once the engine host
@@ -829,7 +827,7 @@ namespace WSJTX_Controller
             // transport reconnect does not un-happen an earlier real CAT outage, and the
             // operator is still owed the "Radio CAT link restored" announcement once CAT comes
             // back. See that field's own comment.
-            // NOTE: _lastAnnouncedFakeItEpisodeId / _lastAnnouncedFakeItEpisodeToken are
+            // NOTE: _lastAnnouncedFakeItNote / _lastAnnouncedFakeItEpisodeToken are
             // DELIBERATELY NOT reset here -- a Direct transport reconnect is not a new Fake-It
             // restore episode, and the engine keeps the same unresolved episode (same id +
             // session token) alive across it. Resetting them would re-announce the SAME
@@ -1340,29 +1338,22 @@ namespace WSJTX_Controller
             // TestApplyCatHealth / ApplyCatHealthNotification).
             ApplyCatHealthNotification(radio.CatOk, radio.CatDetail);
 
-            // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): a Fake-It dial restore the
-            // engine could not confirm (CAT failed after a temporary Fake-It shift). The engine
-            // sets radio.fakeItRestoreWarning (+ radio.fakeItRestoreWarningId) while it stays
-            // unresolved and clears both (null) the moment it reconciles the dial. Announced
-            // ONCE per EPISODE -- identity is the engine's monotonic episode id PAIRED with the
-            // snapshot's per-launch SessionToken, remembered across a Direct reconnect (which is
-            // not a new episode). The clearing is silent -- a resolved dial isn't news. Goes
-            // through the normal accessible notification path; does not steal focus.
-            string fakeItWarn = radio.FakeItRestoreWarning;
-            long? fakeItId = radio.FakeItRestoreWarningId;
-            if (!string.IsNullOrEmpty(fakeItWarn) && fakeItId.HasValue)
+            // Fake It split: the radio did not go back to the operating frequency after an over
+            // (Nexus 1.18 reports it in the CAT status text, CAT itself still up -- so the CAT
+            // health notification above says nothing). Announced once while the note stands;
+            // see _lastAnnouncedFakeItNote. Its going away is silent -- a dial that is back is
+            // not news. Goes through the normal accessible notification path; does not steal focus.
+            string fakeItNote = radio.CatDetail != null && radio.CatDetail.StartsWith(FakeItNotePrefix, StringComparison.Ordinal)
+                ? radio.CatDetail : null;
+            if (fakeItNote == null)
+                _lastAnnouncedFakeItNote = null;
+            else if (!(string.Equals(fakeItNote, _lastAnnouncedFakeItNote, StringComparison.Ordinal)
+                       && string.Equals(snap.SessionToken ?? "", _lastAnnouncedFakeItEpisodeToken ?? "", StringComparison.Ordinal)))
             {
-                bool sameEpisode = _lastAnnouncedFakeItEpisodeId.HasValue
-                                   && fakeItId.Value == _lastAnnouncedFakeItEpisodeId.Value
-                                   && string.Equals(snap.SessionToken ?? "",
-                                                    _lastAnnouncedFakeItEpisodeToken ?? "",
-                                                    StringComparison.Ordinal);
-                if (!sameEpisode)
-                {
-                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Fake It dial not restored", fakeItWarn));
-                    _lastAnnouncedFakeItEpisodeId = fakeItId.Value;
-                    _lastAnnouncedFakeItEpisodeToken = snap.SessionToken;
-                }
+                Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Fake It dial not restored",
+                    fakeItNote + ". Check your VFO frequency."));
+                _lastAnnouncedFakeItNote = fakeItNote;
+                _lastAnnouncedFakeItEpisodeToken = snap.SessionToken;
             }
             // Nexus 1.17: the radio refused the key, or the unkey, of an over. The engine stopped
             // transmitting on its own (radio.TxEnabled, reconciled below, turns Jimmy's side
@@ -4514,18 +4505,6 @@ namespace WSJTX_Controller
         // Human-readable detail paired with CatOk above (tempo-app/src/dto.rs: RadioStatus.
         // cat_detail), e.g. "rigctld not reachable..." -- used as the failure reason text.
         public string CatDetail { get; set; }
-        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): non-null while a Fake-It dial
-        // restore is UNRESOLVED -- CAT failed after a temporary Fake-It shift and the engine's
-        // radio loop cannot confirm the operating dial was put back (tempo-app/src/dto.rs:
-        // RadioStatus.fake_it_restore_warning). A concise operator string; null in normal
-        // operation (a healthy immediate restore is silent). DirectApplyStatus edge-triggers a
-        // one-per-episode accessible warning off it.
-        public string FakeItRestoreWarning { get; set; }
-        // Monotonic id for the CURRENT unresolved Fake-It episode (tempo-app/src/dto.rs:
-        // RadioStatus.fake_it_restore_warning_id) -- non-null iff FakeItRestoreWarning is.
-        // DirectApplyStatus dedups per EPISODE (this id + snap.SessionToken) so the SAME
-        // still-unresolved episode is announced only once even across a Direct reconnect.
-        public long? FakeItRestoreWarningId { get; set; }
         // T17 fix, 2026-08-23 (PARTIAL/CONFIRMED -- radio ended up in LSB on 30m FT4, reported
         // 2026-08-21): the rig's own CAT-reported mode readback (tempo-app/src/dto.rs:
         // RadioStatus.rig_mode -- "the rig's actual mode read back over CAT... Display-only --

@@ -235,6 +235,9 @@ namespace WSJTX_Controller
                         var main = new Controller(given);
                         Application.Run(main);
                         handoff = main.ReopenForProfile ? main.EngineHandoffOut : null;
+                        // Another logbook (handoff 33): nothing cached from the one just left -- its
+                        // read copy, outbox and worker -- is carried into the next window.
+                        if (main.ReopenForProfile && main.LogbookChangingOnReopen) NexusLogbook.Reset();
                         // The engine handed to this window, unless it is being handed on again: stopped
                         // here if the window never took it over (stopping one already stopped does nothing).
                         if (given != null && !ReferenceEquals(handoff?.Client, given.Client))

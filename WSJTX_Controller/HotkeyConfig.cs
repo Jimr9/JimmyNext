@@ -80,6 +80,9 @@ namespace WSJTX_Controller
         StationWatchStatus,
         // The Smart Mode stations window (operator, 2026-10-04). No default key.
         OpenSmartModeWindow,
+        // Prepare Station moved the radio; the operator has tuned and is ready for the station
+        // to go onto Smart Mode (operator, 2026-10-13; WsjtxClient.Spots.cs).
+        PreparedStationReady,
     }
 
     public class HotkeyConfig
@@ -180,6 +183,8 @@ namespace WSJTX_Controller
             [HotkeyAction.SmartStartStatus]       = Keys.None,
             [HotkeyAction.OpenSmartModeWindow]    = Keys.None,
             [HotkeyAction.StationWatchStatus]     = Keys.None,
+            // Beside Alt+Shift+T, the tune key it follows.
+            [HotkeyAction.PreparedStationReady]   = Keys.Alt | Keys.Shift | Keys.P,
         };
 
         public static readonly Dictionary<HotkeyAction, string> DisplayNames = new Dictionary<HotkeyAction, string>
@@ -243,6 +248,7 @@ namespace WSJTX_Controller
             [HotkeyAction.SmartStartStatus]      = "Report Smart Mode Status",
             [HotkeyAction.OpenSmartModeWindow]   = "Open Smart Mode Stations",
             [HotkeyAction.StationWatchStatus]    = "Report Station Watch Status",
+            [HotkeyAction.PreparedStationReady]  = "Prepared Station Ready",
         };
 
         // Actions that may be left unassigned (Keys.None) without triggering a validation error.
@@ -286,6 +292,8 @@ namespace WSJTX_Controller
             HotkeyAction.SmartStartStatus,
             HotkeyAction.StationWatchStatus,
             HotkeyAction.OpenSmartModeWindow,
+            // Has a default, but may be left unassigned: Prepare Station again does the same.
+            HotkeyAction.PreparedStationReady,
         };
 
         private static readonly HashSet<Keys> ReservedKeys = new HashSet<Keys>
@@ -320,6 +328,8 @@ namespace WSJTX_Controller
             HotkeyAction.ToggleHound,
             // 2026-09-29 -- same protection for Alt+Shift+T.
             HotkeyAction.AntennaTuner,
+            // 2026-10-13 -- same protection for Alt+Shift+P.
+            HotkeyAction.PreparedStationReady,
         };
 
         // Populated by LoadFromIni: newer actions that were left unassigned because this

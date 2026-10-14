@@ -6,13 +6,18 @@
 # pin, and its "Checking a patch against a newer Nexus" section for what to do when this pin
 # is updated.
 #
-# This integration pins the newest official STABLE release tag, v1.17.0 (2026-10-07), by its
+# This integration pins the newest official STABLE release tag, v1.18.0 (2026-10-13), by its
 # exact commit. NEXUS_COMMIT is the real lock; NEXUS_TAG is the honest human reference.
 # prepare-nexus.ps1 clones --branch NEXUS_TAG --single-branch and then verifies the resolved
-# HEAD equals NEXUS_COMMIT exactly. v1.17.0 is an ANNOTATED tag (tag object 5646d2dd); the
+# HEAD equals NEXUS_COMMIT exactly. v1.18.0 is an ANNOTATED tag (tag object 1e7e65ae); the
 # commit below is the peeled commit it points at, which is what HEAD resolves to.
 #
-# Upgraded 2026-10-12 from v1.16.0 (21ac4c13): all ten patches kept (same code, new offsets; the slot
+# Upgraded 2026-10-13 from v1.17.0 (177e0b94): nine patches. propagation-solar-wind.patch retired
+# (#404 is fixed upstream) and tempo-app-snapshot.patch retired with Jimmy's own Fake-It restore:
+# Nexus 1.18 restores the dial itself after every over and reports a failure in the CAT status
+# text, which Jimmy now announces. The service and slot patches shrank to Status.tx_message, the
+# "Mode: None" gate and test, and one new piece: a Fake-It move the radio refuses is not transmitted.
+# Earlier: upgraded 2026-10-12 from v1.16.0 (21ac4c13): all ten patches kept (same code, new offsets; the slot
 # patch's test hunk re-anchored for slot_tx_phase's new argument), and propagation-solar-wind.patch
 # added -- upstream main's bdb832e4, NOAA's real-time solar wind feeds (the old ones return 404).
 # Earlier: upgraded 2026-10-04 from v1.15.0 (f47d43cc): tempo-audio-rig.patch retired -- Nexus #381's native
@@ -22,10 +27,11 @@
 # re-assessment.
 
 NEXUS_REPO=https://github.com/kd9taw/Nexus.git
-NEXUS_TAG=v1.17.0
-NEXUS_COMMIT=177e0b94cfff040d5efae9adbbd633b27257f2c9
+NEXUS_TAG=v1.18.0
+NEXUS_COMMIT=03ac4c3c0035384dc24d18d6ad299de59bea506f
 
-# DISPOSITION: 2026-10-12 -- pinned AT stable v1.17.0 plus one named fix from main (solar wind, bdb832e4);
+# DISPOSITION: 2026-10-13 -- pinned AT stable v1.18.0 (operator approved the upgrade), nothing from main.
+# Was: 2026-10-12 -- pinned AT stable v1.17.0 plus one named fix from main (solar wind, bdb832e4);
 # main reviewed at 592 commits past 1.17.0 (4b72d5a2), not imported. Was: 2026-10-04 -- pinned AT stable v1.16.0 (operator approved the upgrade). Was: 2026-09-29 -- stay pinned AT stable v1.15.0 (main reviewed at 191 commits past it;
 # see README.md "Next upgrade readiness"). Was: 2026-09-28 -- pinned AT the current stable tag v1.15.0. Re-review with
 # scripts/nexus-status.ps1 at the next Nexus STABLE tag. Update this line (date + decision) at

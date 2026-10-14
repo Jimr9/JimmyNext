@@ -676,6 +676,10 @@ namespace WSJTX_Controller
                 if (!Directory.Exists(path)) Directory.CreateDirectory(path);
                 iniFile = new IniFile(pathFileNameExt);
                 AttachSharedSettings(iniFile, path);
+                // Handoff 33: the logbook this profile keeps its contacts in -- chosen before
+                // anything opens the logbook or starts the engine (which is given its folder).
+                if (!TestModeGuard.IsTestMode) LogbookBooks.Use(iniFile.Read(LogbookIdKey));
+                LogbookBooks.StationCallNow = () => wsjtxClient?.myCall;
                 hotkeyConfig.LoadFromIni(iniFile);
                 RefreshHotkeyAccessibleNames();
                 // Parse optional row-order settings from INI (INI-only settings). Stored in
@@ -1417,6 +1421,19 @@ namespace WSJTX_Controller
             NexusLogbookService.OurLocationFields = OurLocationNow;
             DisplayTime.Configure(() => Station?.DisplayTimeZone, () => displayInSelectedTimeZone);
             NexusLogbookService.OurPark = () => Station?.MyPark;
+            // A profile with a logbook of its own says which, once, after the startup greeting
+            // (handoff 33): "Profile K4B, K4B 2026, export only."
+            if (LogbookBooks.ActiveId.Length > 0 && !TestModeGuard.IsTestMode)
+            {
+                var bookTimer = new System.Windows.Forms.Timer { Interval = 6000 };
+                bookTimer.Tick += (s, e) =>
+                {
+                    bookTimer.Stop();
+                    bookTimer.Dispose();
+                    ShowMsg(LogbookBooks.Describe(ActiveProfileDisplayName()), false);
+                };
+                bookTimer.Start();
+            }
             // The automatic logbook move at startup (Program.RunAutoMoveWithProgress) says what it
             // did, a few seconds in so it follows the startup greeting instead of cutting it off.
             if (NexusLogbookMigration.AutoMoveMessage != null)
@@ -2337,6 +2354,18 @@ namespace WSJTX_Controller
 
             string currentActive = SafeReadBaseIniKey("activeProfile");
             bool isDefaultChoice = string.Equals(chosen, DefaultProfileDisplayName, StringComparison.OrdinalIgnoreCase);
+            // Handoff 33: a profile on another logbook is not loaded mid-contact or mid-contest.
+            string chosenIni = isDefaultChoice ? BaseIniFilePath() : Path.Combine(ProfilesDirectory(), chosen + ".ini");
+            if (!string.Equals(ProfileLogbookId(chosenIni), LogbookBooks.ActiveId, StringComparison.OrdinalIgnoreCase))
+            {
+                string blocked = LogbookChangeBlocked();
+                if (blocked != null)
+                {
+                    MessageBox.Show(this, $"'{chosen}' uses another logbook. {blocked}", "Load Profile",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+            }
             bool alreadyActive = isDefaultChoice
                 ? string.IsNullOrWhiteSpace(currentActive)
                 : string.Equals(chosen, currentActive, StringComparison.OrdinalIgnoreCase);
@@ -2914,9 +2943,64 @@ namespace WSJTX_Controller
         private void SwitchProfileInPlace()
         {
             ReopenForProfile = true;
-            if (!TestModeGuard.IsTestMode && nativeEngineClient != null && nativeEngineClient.Running && _engineSessionToken != null)
+            // Handoff 33: a profile with another logbook gets a new engine on that logbook's
+            // folder. The running one is NOT handed over: it is stopped with this window
+            // (CloseComm), after waiting for uploads in flight, so nothing of this logbook's --
+            // a write, an upload, a delayed answer -- can reach the other one. What is still
+            // queued stays in this logbook's own outbox for the next time it is used.
+            LogbookChangingOnReopen = !string.Equals(ProfileLogbookId(ResolveActiveIniPath(BaseIniFilePath(), ProfilesDirectory())),
+                                                     LogbookBooks.ActiveId, StringComparison.OrdinalIgnoreCase);
+            if (!LogbookChangingOnReopen && !TestModeGuard.IsTestMode && nativeEngineClient != null && nativeEngineClient.Running && _engineSessionToken != null)
                 EngineHandoffOut = new EngineHandoff { Client = nativeEngineClient, SessionToken = _engineSessionToken };
             Close();
+        }
+
+        // ── Logbooks for profiles (handoff 33) ─────────────────────────────────
+        internal const string LogbookIdKey = "logbookId";
+        internal bool LogbookChangingOnReopen { get; private set; }
+
+        // The logbook a profile's settings file names ("" = the main logbook).
+        internal static string ProfileLogbookId(string iniPath)
+        {
+            try { return File.Exists(iniPath) ? (new IniFile(iniPath).Read(LogbookIdKey) ?? "").Trim() : ""; }
+            catch { return ""; }
+        }
+
+        // Why the logbook cannot be changed right now (null = it can): not while a contact or a
+        // contest is under way -- its writes and its contest log belong to this logbook.
+        internal string LogbookChangeBlocked()
+        {
+            string inProg = wsjtxClient?.CallInProgress;
+            if (!string.IsNullOrEmpty(inProg)) return $"A contact with {inProg} is in progress. Finish or stop it first.";
+            if (contestWorkflow != null && contestWorkflow.IsSessionActive) return "A contest is running in this logbook. Leave the contest first (Contesting window).";
+            return null;
+        }
+
+        // Options > Profiles: this profile now keeps its contacts in another logbook. Saved in the
+        // profile, and Jimmy Next reopens with it (a new engine on that logbook).
+        internal bool UseLogbookForThisProfile(string id, IWin32Window owner)
+        {
+            string blocked = LogbookChangeBlocked();
+            if (blocked != null)
+            {
+                MessageBox.Show(owner, blocked, "Logbook", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
+            var book = LogbookBooks.Find(id);
+            if (book == null) return false;
+            if (string.Equals(book.Id, LogbookBooks.ActiveId, StringComparison.OrdinalIgnoreCase)) return false;
+            if (MessageBox.Show(owner,
+                    $"Use {book.Name} for profile {ActiveProfileDisplayName()}?{Environment.NewLine}{Environment.NewLine}" +
+                    $"Jimmy Next reopens with it. Transmit stops, and the engine restarts on that logbook. " +
+                    (book.ExportOnly ? "It is export only: nothing is uploaded or downloaded." : "Uploads follow your settings in Options.") +
+                    $" The {LogbookBooks.Active.Name} keeps its contacts.",
+                    "Logbook", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                return false;
+            wsjtxClient?.HaltTxForLogbookChange();
+            iniFile?.Write(LogbookIdKey, book.Id);
+            optionsDlg?.Close();
+            BeginInvoke(new Action(SwitchProfileInPlace));
+            return true;
         }
 
         private void Controller_FormClosing(object sender, FormClosingEventArgs e)
@@ -3646,6 +3730,11 @@ namespace WSJTX_Controller
             if (keyData == hotkeyConfig[HotkeyAction.WorkWatchedStationNow] && hotkeyConfig[HotkeyAction.WorkWatchedStationNow] != Keys.None)
             {
                 wsjtxClient.WorkWatchedStationNow();
+                return true;
+            }
+            if (keyData == hotkeyConfig[HotkeyAction.PreparedStationReady] && hotkeyConfig[HotkeyAction.PreparedStationReady] != Keys.None)
+            {
+                wsjtxClient.PreparedStationReady();
                 return true;
             }
 
@@ -4446,6 +4535,7 @@ namespace WSJTX_Controller
                         SaveRowOrder = SaveSpotRowOrder,
                         PlanSpot = (call, spotMode, freqKhz) => wsjtxClient?.PlanSpot(call, spotMode, freqKhz),
                         PrepareWouldInterrupt = () => wsjtxClient?.PrepareWouldInterrupt(),
+                        PrepareMovesRadio = plan => wsjtxClient == null || wsjtxClient.PrepareMovesRadio(plan),
                         PrepareSpot = plan => wsjtxClient == null ? "The radio is not available." : wsjtxClient.PrepareSpot(plan),
                     });
                 // Deliberately no Owner assignment -- see the matching comment on
@@ -4700,7 +4790,11 @@ namespace WSJTX_Controller
             // feedback message, so it is the Immediate lane's DEFER case (speaks now, unmodified,
             // never touches a pending Now-batch; see SpeechCoordinator's own header comment).
             var speech = wsjtxClient?.Notify?.Speech;
-            if (queueSpeechExperiment && speech != null && _activeHotkeyOrigin == null)
+            // Not while a Station Watch has routine speech held back: the queue would throw the
+            // message away (2026-10-12: "not heard after 10 calls; Smart Mode stopped" was never
+            // said, with a watch on another station). It is said directly then, as it is with
+            // the queue off.
+            if (queueSpeechExperiment && speech != null && _activeHotkeyOrigin == null && !speech.StationWatchSuppressingRoutine)
                 speech.SubmitMessage(text);   // joins whatever else is being said (speech experiment)
             else
             {

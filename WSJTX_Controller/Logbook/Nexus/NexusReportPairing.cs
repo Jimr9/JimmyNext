@@ -10,31 +10,30 @@ namespace WSJTX_Controller
     // Makes a confirmation download (LoTW report, QRZ FETCH) pair with the RIGHT contacts in Nexus,
     // without changing Nexus.
     //
-    // Nexus's merge pairs a report row with a logged contact by (call, band, mode class, UTC day),
-    // falling back to the day before and then the day after, and inside that group takes the
-    // contacts in LOG order -- the order they were added -- not the one nearest in time
-    // (tempo-core reconcile::take_match). So with several contacts with one station on one band in
-    // a day, a row can land on the wrong one: a download listing them in time order against a log
-    // that holds them in another order, a row missing for an earlier contact, or a confirmation of
-    // a later contact while an earlier one is unconfirmed. Upgrades are never taken back, so a
-    // wrong pairing leaves a false confirmation.
+    // Since Nexus 1.18 its merge pairs a report row with the logged contact NEAREST IN TIME, within
+    // 30 minutes, with the same call, band and mode class; no contact takes two rows and no row two
+    // contacts (tempo-core reconcile::pair_report). Up to 1.17 it took contacts in LOG order within
+    // a UTC day, and this guard had to hold back whole groups whose rows did not arrive in that
+    // order. That rule is gone: the order contacts are stored in no longer decides anything.
     //
-    // This hands Nexus only the rows its pairing is certain to put on their own contact (the
-    // contact at the same minute), in the order that makes it do so; every other row is held back
-    // -- it changes nothing -- and reported, rather than guessed:
-    //   - a row with exactly one contact at its minute is sent when the rows sent for that group
-    //     are for the group's FIRST contacts in log order (Nexus hands them out in that order, so
-    //     row i then takes contact i); otherwise the whole group's rows are held;
+    // What is still checked, so that a row can only land on its own contact:
+    //   - a row with exactly one contact at its minute is sent, unless another logged contact with
+    //     that station is nearer to the row's time than that one (seconds apart across a minute
+    //     boundary), or two rows claim the one contact -- then they are held;
     //   - a row with no contact at its minute is sent only when the log has no contact with that
     //     call and band on that day or the day either side (QRZ: a contact the log lacks, which
     //     Nexus adds; LoTW: an unmatched confirmation Nexus reports); otherwise it is held;
-    //   - two contacts at one minute, or two rows for one contact, hold the group.
+    //   - two contacts at one minute hold the row.
+    // A held row changes nothing and is reported, rather than guessed.
     // With nearbyUnique (eQSL, whose rows carry the OTHER station's time, often minutes off ours --
     // Jimmy's own eQSL matcher never used the time): a row with no contact at its minute is also
     // sent when exactly ONE logged contact has its call, band and mode class on that day or the day
-    // either side and no other row claims it -- the only contact Nexus can pair it with. More than
-    // one such contact holds it, as Jimmy's matcher skipped it as ambiguous.
-    // The header and each row sent are passed on exactly as received -- except that a row paired
+    // either side and no other row claims it. More than one such contact holds it, as Jimmy's
+    // matcher skipped it as ambiguous. When that one contact is more than 30 minutes from the
+    // row's time, Nexus 1.18 would no longer pair them, so the row is handed over with the
+    // CONTACT's date and time in place of its own -- the row is still that contact's, and the
+    // other station's clock is not evidence against it.
+    // The header and each row sent are passed on as received -- except for that time, and that a row paired
     // with a logged contact has its STATE and COUNTRY taken out (2026-10-04): Nexus's merge fills a
     // BLANK logged state or country from the row, and the contact keeps what was logged, blanks
     // included. The row's location is returned in Located, for the caller to keep apart.
@@ -86,8 +85,24 @@ namespace WSJTX_Controller
             return sb.ToString();
         }
 
-        private sealed class Contact { public int Pos; public string Bucket, Minute; }
-        private sealed class Row { public string Raw, Bucket, Minute, Label; public long Day; public string CallBand, ModeClass; public Dictionary<string, string> Fields; }
+        private sealed class Contact { public int Pos; public string Bucket, Minute, Group; public long When; }
+        private sealed class Row { public string Raw, Bucket, Minute, Label; public long Day; public long? When; public string CallBand, ModeClass; public Dictionary<string, string> Fields; }
+
+        // Nexus's own window (tempo-core reconcile::MATCH_WINDOW_SECS).
+        private const long MatchWindowSecs = 30 * 60;
+
+        // The row with one field's value replaced (the field must be there).
+        private static string WithField(string raw, string tag, string value)
+        {
+            foreach (Match fm in Field.Matches(raw))
+            {
+                if (!string.Equals(fm.Groups[1].Value, tag, StringComparison.OrdinalIgnoreCase)) continue;
+                int len = int.Parse(fm.Groups[2].Value, CultureInfo.InvariantCulture);
+                int end = Math.Min(raw.Length, fm.Index + fm.Length + len);
+                return raw.Substring(0, fm.Index) + $"<{fm.Groups[1].Value}:{value.Length}>{value}" + raw.Substring(end);
+            }
+            return raw;
+        }
 
         private static readonly Regex Field = new Regex(@"<([A-Za-z0-9_]+):(\d+)(?::[A-Za-z])?>", RegexOptions.Compiled);
         private static readonly Regex Eoh = new Regex(@"<eoh>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -130,15 +145,19 @@ namespace WSJTX_Controller
             var contacts = new Dictionary<string, List<Contact>>();
             var byMinute = new Dictionary<string, List<Contact>>();
             var callBandDays = new HashSet<string>();
+            var byGroup = new Dictionary<string, List<Contact>>();   // call, band and mode class: every day
             for (int i = 0; i < logInOrder.Count; i++)
             {
                 var q = logInOrder[i];
                 var when = DateTimeOffset.FromUnixTimeSeconds((long)q.WhenUnix).UtcDateTime;
                 string cb = $"{(q.Call ?? "").Trim().ToUpperInvariant()}|{(q.Band ?? "").Trim().ToLowerInvariant()}";
                 long day = (long)q.WhenUnix / 86400;
-                var c = new Contact { Pos = i, Bucket = Bucket(cb, ModeClass(q.Mode), day), Minute = $"{cb}|{when:yyyyMMddHHmm}" };
+                var c = new Contact { Pos = i, Bucket = Bucket(cb, ModeClass(q.Mode), day), Minute = $"{cb}|{when:yyyyMMddHHmm}",
+                                      Group = cb + "|" + ModeClass(q.Mode), When = (long)q.WhenUnix };
                 if (!contacts.TryGetValue(c.Bucket, out var list)) contacts[c.Bucket] = list = new List<Contact>();
                 list.Add(c);
+                if (!byGroup.TryGetValue(c.Group, out var gl)) byGroup[c.Group] = gl = new List<Contact>();
+                gl.Add(c);
                 if (!byMinute.TryGetValue(c.Minute + "|" + ModeClass(q.Mode), out var ml)) byMinute[c.Minute + "|" + ModeClass(q.Mode)] = ml = new List<Contact>();
                 ml.Add(c);
                 callBandDays.Add($"{cb}|{ModeClass(q.Mode)}|{day}");
@@ -177,9 +196,12 @@ namespace WSJTX_Controller
                     DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var d)
                     ? (long)(d - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalDays : long.MinValue;
                 string mc = ModeClass(mode);
+                string hhmmss = ((time ?? "").Trim() + "000000").Substring(0, 6);
+                long? rowWhen = dayNo != long.MinValue && int.TryParse(hhmmss, NumberStyles.None, CultureInfo.InvariantCulture, out int hms)
+                    ? dayNo * 86400 + (hms / 10000) * 3600 + (hms / 100 % 100) * 60 + hms % 100 : (long?)null;
                 rows.Add(new Row
                 {
-                    Raw = raw, CallBand = cb, ModeClass = mc, Day = dayNo, Fields = f,
+                    Raw = raw, CallBand = cb, ModeClass = mc, Day = dayNo, When = rowWhen, Fields = f,
                     Bucket = Bucket(cb, mc, dayNo), Minute = $"{cb}|{(date ?? "").Trim()}{hhmm}|{mc}",
                     Label = $"{call.Trim().ToUpperInvariant()} {(band ?? "").Trim().ToLowerInvariant()} {(mode ?? "").Trim()} {(date ?? "").Trim()} {hhmm}"
                 });
@@ -200,6 +222,14 @@ namespace WSJTX_Controller
                 if (at != null && at.Count == 1)
                 {
                     var c = at[0];
+                    // Nexus gives the row to the contact nearest its time. That is this one unless
+                    // another contact with the station sits closer across the minute boundary.
+                    if (r.When.HasValue && byGroup.TryGetValue(c.Group, out var same)
+                        && same.Any(o => !ReferenceEquals(o, c) && Math.Abs(o.When - r.When.Value) < Math.Abs(c.When - r.When.Value)))
+                    {
+                        Hold(r, "another logged contact with this station is nearer to this time than the one at its minute");
+                        continue;
+                    }
                     if (!matched.TryGetValue(c.Bucket, out var g)) matched[c.Bucket] = g = new List<(Row, Contact)>();
                     g.Add((r, c));
                     continue;
@@ -213,6 +243,13 @@ namespace WSJTX_Controller
                     if (cands.Count == 1)
                     {
                         var c = cands[0];
+                        // Further apart than Nexus pairs: handed over at the contact's own time.
+                        if (!r.When.HasValue || Math.Abs(c.When - r.When.Value) > MatchWindowSecs)
+                        {
+                            var at2 = DateTimeOffset.FromUnixTimeSeconds(c.When).UtcDateTime;
+                            r.Raw = WithField(WithField(r.Raw, "QSO_DATE", at2.ToString("yyyyMMdd", CultureInfo.InvariantCulture)),
+                                              "TIME_ON", at2.ToString("HHmmss", CultureInfo.InvariantCulture));
+                        }
                         if (!matched.TryGetValue(c.Bucket, out var g)) matched[c.Bucket] = g = new List<(Row, Contact)>();
                         g.Add((r, c));
                         continue;
@@ -229,7 +266,6 @@ namespace WSJTX_Controller
 
             foreach (var g in matched)
             {
-                var inLog = contacts[g.Key];
                 if (collapseSameMinute)
                 {
                     var one = g.Value.GroupBy(x => x.Contact).Select(x => x.First()).ToList();
@@ -237,14 +273,11 @@ namespace WSJTX_Controller
                     g.Value.Clear();
                     g.Value.AddRange(one);
                 }
+                // (No rule about the ORDER of the group's contacts any more: Nexus 1.18 pairs by time.)
                 var taken = g.Value.Select(x => x.Contact).ToList();
-                bool dup = taken.Distinct().Count() != taken.Count;
-                bool prefix = !dup && new HashSet<Contact>(taken).SetEquals(inLog.Take(taken.Count));
-                if (!prefix)
+                if (taken.Distinct().Count() != taken.Count)
                 {
-                    string why = dup ? "two rows for one logged contact"
-                        : $"{inLog.Count} logged contacts with this station and band that day, and the rows do not cover them in the order Nexus pairs them";
-                    foreach (var x in g.Value) Hold(x.Row, why);
+                    foreach (var x in g.Value) Hold(x.Row, "two rows for one logged contact");
                     continue;
                 }
                 foreach (var x in g.Value)
