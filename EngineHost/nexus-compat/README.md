@@ -78,16 +78,14 @@ against them before anything here changed.
   **What was given up:** our restore read the dial back to confirm it, and kept reconciling after
   CAT came back; upstream counts the restore done when the radio accepts the command and stops
   after three tries. **Needs an on-air check on the operator's TS-590SG.**
-- **New, in `tempo-audio-slot.patch` + `tempo-audio-service.patch`: a Fake-It move the radio
-  refuses is not transmitted.** Upstream's `apply_tx_dial_shift` is `let _ = rig.set_freq(tx_dial)`:
-  the answer is ignored and the over is keyed regardless, though the engine has already lowered
-  its audio by the shift -- so it goes out that many Hz below the chosen frequency. Now a failed
-  move halts TX through `Engine::halt_tx_for_refused_key` (the reason reaches Jimmy as
-  `slot_key_refused`, which it already announces) and neither call site keys. The restore is
-  still held. Test: `jimmy_compat_fake_it_move_the_radio_refuses_sends_nothing_and_halts_tx`.
-- **`tempo-audio-service.patch`** is now three things: the refused-move gate at the late-start
-  call site, `Status.tx_message = eng.last_own_tx_text()`, and the "Mode: None" test.
-- **`tempo-audio-slot.patch`** is now two: the Rig-split `dont_set_mode` gate and the refused move.
+- **A Fake-It move the radio refuses is sent anyway, as Nexus does.** Upstream's
+  `apply_tx_dial_shift` is `let _ = rig.set_freq(tx_dial)`: the over is keyed whatever the radio
+  answered. For a few days (2.0.85) Jimmy patched that to halt TX instead; on 2026-10-15 the
+  operator chose to follow Nexus's own judgement, and the patch was removed. Nothing is posted
+  upstream about it.
+- **`tempo-audio-service.patch`** is now two things: `Status.tx_message = eng.last_own_tx_text()`
+  and the "Mode: None" test.
+- **`tempo-audio-slot.patch`** is now one: the Rig-split `dont_set_mode` gate.
 - **`tempo-app-engine.patch`: 7 behaviours** (the Fake-It status setter went); re-anchored.
 - **`tempo-app-settings.patch`, `tempo-app-station.patch`:** offsets only, payload identical.
 - **`tempo-core-message.patch`, `tempo-core-inbox.patch`, `tempo-audio-rigctld-test-portability.patch`,
@@ -522,8 +520,8 @@ check is a real compile error, not a false alarm.
 
 ### `patches/tempo-audio-service.patch` -- radio-loop wiring, `crates/tempo-audio/src/service.rs`
 
-**Since 2026-10-13 (v1.18.0) this patch is only: the refused Fake-It move gate at the late-start call site, `Status.tx_message`, and the "Mode: None" test. Everything below about Jimmy's own Fake-It restore is history -- see the v1.18.0 re-assessment above.**
-**How to check (current):** `grep -n "shift_refused\|last_own_tx_text\|jimmy_compat_dont_set_mode" crates/tempo-audio/src/service.rs`.
+**Since 2026-10-15 this patch is only: `Status.tx_message` and the "Mode: None" test. Everything below about Jimmy's own Fake-It restore is history -- see the v1.18.0 re-assessment above.**
+**How to check (current):** `grep -n "last_own_tx_text\|jimmy_compat_dont_set_mode" crates/tempo-audio/src/service.rs`.
 
 Since 2026-10-04 (v1.16.0) only the Fake-It restore, `Status.tx_message` and the "Mode: None" test remain; the `ptt_data_source` / `disable_rfpower_probe` threading and RFPOWER gates described below were retired with `tempo-audio-rig.patch`.
 
@@ -605,11 +603,11 @@ exact call for every caller; confirm this fourth site is still present and still
 not a regression) by grepping `read_level("RFPOWER")` across the whole file and hand-checking
 each hit's own gating.
 
-### `patches/tempo-audio-slot.patch` -- refused Fake-It move + Rig-split do-not-set-mode
+### `patches/tempo-audio-slot.patch` -- Rig-split do-not-set-mode
 
-**Since 2026-10-13 (v1.18.0) this patch is only: `SplitApply.shift_refused` (a Fake-It move the radio refuses halts TX and is not keyed) and the Rig-split `dont_set_mode` gate. The `FakeItShift` physical capture described below is history.**
-**Obsoleted when:** upstream stops keying an over whose Fake-It `set_freq` failed, and honours a do-not-set-mode gate.
-**How to check (current):** `grep -n "shift_refused\|dont_set_mode\|let _ = rig.set_freq(tx_dial)" crates/tempo-audio/src/slot.rs`.
+**Since 2026-10-15 this patch is only the Rig-split `dont_set_mode` gate. The `FakeItShift` physical capture described below is history.**
+**Obsoleted when:** upstream honours a do-not-set-mode gate on the Rig-split TX VFO.
+**How to check (current):** `grep -n "dont_set_mode" crates/tempo-audio/src/slot.rs`.
 
 `crates/tempo-audio/src/slot.rs`, `apply_tx_dial_shift` (+ every `SlotAction` builder that
 consumes its result -- as of v1.14.0 there are three inside `slot_tx_phase`: the successful-key

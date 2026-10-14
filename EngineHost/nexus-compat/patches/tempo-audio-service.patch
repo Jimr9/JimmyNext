@@ -1,21 +1,8 @@
 diff --git a/src/service.rs b/src/service.rs
-index 3db1845..05300e6 100644
+index 3db1845..d5c656d 100644
 --- a/src/service.rs
 +++ b/src/service.rs
-@@ -12339,7 +12339,11 @@ impl RadioLoop {
-                         let asked = Instant::now();
-                         // A key the radio refuses plays nothing here and halts TX, as at the
-                         // boundary (`slot::slot_key_failure`).
--                        if crate::slot::key_slot_transmitter(&mut eng, rig, backend, held) {
-+                        // JIMMY COMPAT: nor after a Fake-It move the radio refused, which has
-+                        // already halted TX (`slot::apply_tx_dial_shift`).
-+                        if !split.shift_refused
-+                            && crate::slot::key_slot_transmitter(&mut eng, rig, backend, held)
-+                        {
-                             let mut secs = 0.0f32;
-                             let last = waves.len() - 1;
-                             for (i, w) in waves.iter().enumerate() {
-@@ -13138,7 +13142,9 @@ impl RadioLoop {
+@@ -13138,7 +13138,9 @@ impl RadioLoop {
                      // T/R period (s), mode-driven: FT1 = 4, FT4 ≈ 8, FT8/DX1 = 15.
                      tr_period: eng.active_slot_secs().round() as u32,
                      config_name: "Default",
@@ -26,7 +13,7 @@ index 3db1845..05300e6 100644
                  });
                  if !fd_new.is_empty() {
                      let ctx = FdWsjtxCtx {
-@@ -31107,6 +31113,57 @@ mod tests {
+@@ -31107,6 +31109,57 @@ mod tests {
          );
      }
  

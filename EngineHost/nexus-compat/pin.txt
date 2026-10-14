@@ -15,8 +15,9 @@
 # Upgraded 2026-10-13 from v1.17.0 (177e0b94): nine patches. propagation-solar-wind.patch retired
 # (#404 is fixed upstream) and tempo-app-snapshot.patch retired with Jimmy's own Fake-It restore:
 # Nexus 1.18 restores the dial itself after every over and reports a failure in the CAT status
-# text, which Jimmy now announces. The service and slot patches shrank to Status.tx_message, the
-# "Mode: None" gate and test, and one new piece: a Fake-It move the radio refuses is not transmitted.
+# text, which Jimmy now announces. The service and slot patches shrank to Status.tx_message and the
+# "Mode: None" gate and test. (2.0.85 also stopped an over whose Fake-It move the radio refused;
+# removed 2026-10-15 on the operator's choice to do what Nexus does.)
 # Earlier: upgraded 2026-10-12 from v1.16.0 (21ac4c13): all ten patches kept (same code, new offsets; the slot
 # patch's test hunk re-anchored for slot_tx_phase's new argument), and propagation-solar-wind.patch
 # added -- upstream main's bdb832e4, NOAA's real-time solar wind feeds (the old ones return 404).
