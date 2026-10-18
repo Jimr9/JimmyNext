@@ -91,7 +91,6 @@ namespace WSJTX_Controller
         private System.Windows.Forms.NumericUpDown   _qrzLogbookRefreshDaysNum;
         private System.Windows.Forms.CheckBox        _lotwEnabledCb;
         private System.Windows.Forms.CheckBox        _lotwBoostCb;
-        private System.Windows.Forms.NumericUpDown   _lotwRefreshDaysNum;
         private System.Windows.Forms.Button          _lotwUpdateBtn;
         private System.Windows.Forms.TextBox         _lotwStatusLbl;
         private System.Windows.Forms.CheckBox        _lotwUploadEnabledCb;
@@ -99,11 +98,9 @@ namespace WSJTX_Controller
         private System.Windows.Forms.TextBox         _lotwLogbookPassTb;
         private System.Windows.Forms.CheckBox        _lotwLogbookAutoSyncCb;
         private System.Windows.Forms.NumericUpDown   _lotwLogbookRefreshDaysNum;
-        private System.Windows.Forms.NumericUpDown   _clubLogRefreshDaysNum;
         private System.Windows.Forms.Button          _clubLogUpdateBtn;
         private System.Windows.Forms.TextBox         _clubLogStatusLbl;
         private System.Windows.Forms.CheckBox        _fccUlsEnabledCb;
-        private System.Windows.Forms.NumericUpDown   _fccUlsRefreshDaysNum;
         private System.Windows.Forms.Button          _fccUlsUpdateBtn;
         private System.Windows.Forms.TextBox         _fccUlsStatusLbl;
         private System.Windows.Forms.CheckBox        _clubLogUploadEnabledCb;
@@ -303,8 +300,7 @@ namespace WSJTX_Controller
             BuildFrequenciesTab();
             BuildNotificationsTab();
             BuildSoundsTab();
-            BuildLogbookSyncTab();
-            BuildLookupDataTab();
+            BuildServicesTab();   // Logbooks and Lookups (was Logbook Sync + Lookup Data)
             BuildAppearanceTab();
             BuildStationOperatorTab();
             BuildProfilesTab();
@@ -319,7 +315,7 @@ namespace WSJTX_Controller
             var categoryPanels = _categoryPanels = new List<Control> {
                 generalPanel, receiveReplyPanel, transmitPanel, hotkeysPanel,
                 advUiPanel, wantedCallsPanel, spotWatchPanel, soundsPanel, radioPanel,
-                decodeEnginePanel, decodePanel, frequenciesPanel, notificationsPanel, logbookSyncPanel, lookupPanel,
+                decodeEnginePanel, decodePanel, frequenciesPanel, notificationsPanel, logbookSyncPanel,
                 appearancePanel, stationOperatorPanel, profilesPanel
             };
             AddOtherProgramsCategory(categoryPanels);   // output to other programs (OptionsDlg.OtherPrograms.cs)
@@ -6380,16 +6376,8 @@ namespace WSJTX_Controller
         // an entry in both, since it genuinely does both jobs.
         private void BuildLogbookSyncTab()
         {
-            logbookSyncPanel.Controls.Clear();
-            // This category panel has AutoScroll=true from the Designer (like every other
-            // Options category), but AddServiceSelectorColumn's detailHost is a Dock=Fill
-            // child of it -- verified live that an AutoScroll panel's own Dock=Fill child
-            // renders in the wrong place (it ignored the Dock=Left service selector here,
-            // overlapping it by ~157px, confirmed via UI Automation bounding rectangles, not
-            // a paint/timing artifact). detailHost provides its own AutoScroll for the
-            // (possibly taller-than-the-window) selected provider box, so this outer scroll
-            // is redundant as well as the thing actually causing the overlap.
-            logbookSyncPanel.AutoScroll = false;
+            // 2026-10-17: builds the logbook services' boxes only; BuildServicesTab places them on
+            // the one "Logbooks and Lookups" page, grouped by company.
             var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
             const int cw = ServiceDetailContentWidth;
 
@@ -6398,17 +6386,12 @@ namespace WSJTX_Controller
                 : "";
             if (string.IsNullOrEmpty(uploadLotwKeyText)) uploadLotwKeyText = "(unassigned hotkey)";
 
-            var detailHost = AddServiceSelectorColumn(logbookSyncPanel, font, "Logbook services", out var serviceList);
-
-            var panels = new List<System.Windows.Forms.GroupBox>();
             int tabIdx;
             int y;
 
             // ── QRZ Logbook Download / Upload ────────────────────────────────────
             tabIdx = 1;
             var qrzLogbookBox = MakeServiceGroupBox("QRZ Logbook Download / Upload", font);
-            panels.Add(qrzLogbookBox);
-            serviceList.Items.Add("QRZ");
 
             qrzLogbookBox.Controls.Add(MakeLabel("API key:", 10, 23, font));
             _qrzLogbookApiKeyTb = new System.Windows.Forms.TextBox
@@ -6428,7 +6411,7 @@ namespace WSJTX_Controller
                 "Downloads QSOs you've already logged to your QRZ online logbook (Logbook > Sync tab). " +
                 "From qrz.com → Logbook → Settings → API Access. Requires a paid QRZ XML Data subscription " +
                 "-- this key only reaches your own logbook, but also unlocks full Callsign Lookup data " +
-                "(Lookup Data tab).",
+                "(QRZ, Callsign lookup).",
                 10, 48, cw, font);
             qrzLogbookBox.Controls.Add(qrzDescLbl);
             y = qrzDescLbl.Bottom + 8;
@@ -6486,8 +6469,6 @@ namespace WSJTX_Controller
             // ── LoTW Logbook Download ────────────────────────────────────────────
             tabIdx = 1;
             var lotwLogbookBox = MakeServiceGroupBox("LoTW Logbook Download", font);
-            panels.Add(lotwLogbookBox);
-            serviceList.Items.Add("LoTW");
 
             lotwLogbookBox.Controls.Add(MakeLabel("Username:", 10, 23, font));
             _lotwLogbookUserTb = new System.Windows.Forms.TextBox
@@ -6517,7 +6498,7 @@ namespace WSJTX_Controller
 
             var lotwDescLbl = MakeWrapLabel(
                 "Downloads your confirmed QSOs from LoTW (Logbook > Sync tab). Separate feature from LoTW " +
-                "User Activity (Lookup Data tab) -- this is your standard LoTW.org login; no TQSL " +
+                "user list below -- this is your standard LoTW.org login; no TQSL " +
                 "certificate here.",
                 10, 71, cw, font);
             lotwLogbookBox.Controls.Add(lotwDescLbl);
@@ -6589,8 +6570,6 @@ namespace WSJTX_Controller
             // ClubLogUploadClient.cs for why these cannot be the same credential.
             tabIdx = 1;
             var clUploadBox = MakeServiceGroupBox("Club Log Logbook Upload", font);
-            panels.Add(clUploadBox);
-            serviceList.Items.Add("Club Log");
 
             _clubLogUploadEnabledCb = new System.Windows.Forms.CheckBox
             {
@@ -6687,7 +6666,7 @@ namespace WSJTX_Controller
                 "Uploads QSOs to your Club Log online logbook (Logbook > Sync tab, or automatically as you " +
                 "log each contact). Requires a Club Log Application Password (clublog.org → Settings → App " +
                 "Passwords) -- NOT your normal Club Log website login. Separate from the country-data key " +
-                "(Lookup Data tab).",
+                "(Country data).",
                 10, y, cw, font));
 
             // ── HRDLog.net Upload (self-sufficiency plan, Phase 2) ───────────────
@@ -6697,8 +6676,6 @@ namespace WSJTX_Controller
             // no bulk-fetch API, unlike QRZ/LoTW/Club Log above.
             tabIdx = 1;
             var hrdLogBox = MakeServiceGroupBox("HRDLog.net Upload", font);
-            panels.Add(hrdLogBox);
-            serviceList.Items.Add("HRDLog");
 
             _hrdLogUploadEnabledCb = new System.Windows.Forms.CheckBox
             {
@@ -6762,8 +6739,6 @@ namespace WSJTX_Controller
             // contract.
             tabIdx = 1;
             var eqslBox = MakeServiceGroupBox("eQSL.cc Upload", font);
-            panels.Add(eqslBox);
-            serviceList.Items.Add("eQSL");
 
             _eqslUploadEnabledCb = new System.Windows.Forms.CheckBox
             {
@@ -6825,23 +6800,20 @@ namespace WSJTX_Controller
             AddProfileOnlyCheckBox("ClubLog", _clubLogUploadCallsignTb, 10, font, _clubLogUploadEmailTb, _clubLogUploadPasswordTb, _clubLogUploadCallsignTb);
             AddProfileOnlyCheckBox("HrdLog", _hrdLogUploadCodeTb, 10, font, _hrdLogUploadCallsignTb, _hrdLogUploadCodeTb);
             AddProfileOnlyCheckBox("Eqsl", _eqslPasswordTb, 10, font, _eqslUsernameTb, _eqslPasswordTb);
-            WireServiceList(serviceList, detailHost, panels);
+            _svcQrzLogbook = qrzLogbookBox; _svcLotwLogbook = lotwLogbookBox; _svcClubLog = clUploadBox;
+            _svcHrdLog = hrdLogBox; _svcEqsl = eqslBox;
         }
 
         private void BuildLookupDataTab()
         {
-            lookupPanel.Controls.Clear();
-            // See BuildLogbookSyncTab's identical line for why -- same AutoScroll-panel/
-            // Dock=Fill-child conflict, same fix.
-            lookupPanel.AutoScroll = false;
+            // 2026-10-17: builds the lookup services' boxes only; BuildServicesTab places them on
+            // the one "Logbooks and Lookups" page, grouped by company.
             var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
             const int cw = ServiceDetailContentWidth;
 
-            // ── General ── stays full width (Dock=Top), spanning above the selector/detail
-            // row below -- it isn't one of the per-provider boxes affected by the width bug.
-            var genBox = MakeGroupBox("General", 5, 5, 630, 74, font);
-            genBox.Dock = System.Windows.Forms.DockStyle.Top;
-            lookupPanel.Controls.Add(genBox);
+            // ── General ── an entry of its own on the services page (2026-10-17; was a full-width
+            // box above the Lookup Data tab's list).
+            var genBox = MakeServiceGroupBox("General", font);
 
             _useLookupDataCb = new System.Windows.Forms.CheckBox
             {
@@ -6869,17 +6841,12 @@ namespace WSJTX_Controller
             _callsignLookupProviderCb.SelectedIndex = (int)ctrl.callsignLookupProvider;
             genBox.Controls.Add(_callsignLookupProviderCb);
 
-            var detailHost = AddServiceSelectorColumn(lookupPanel, font, "Lookup data services", out var serviceList, topOffset: genBox.Height);
-
-            var panels = new List<System.Windows.Forms.GroupBox>();
             int tabIdx;
             int y;
 
             // ── QRZ Callsign Lookup ──────────────────────────────────────────────
             tabIdx = 2;
             var qrzBox = MakeServiceGroupBox("QRZ Callsign Lookup", font);
-            panels.Add(qrzBox);
-            serviceList.Items.Add("QRZ Callsign Lookup");
 
             _qrzEnabledCb = new System.Windows.Forms.CheckBox
             {
@@ -6998,7 +6965,7 @@ namespace WSJTX_Controller
             qrzBox.Controls.Add(MakeWrapLabel(
                 "Real-time station lookup by callsign (name, address, grid). Uses your normal QRZ.com " +
                 "login -- any QRZ account works, but without a paid XML Data subscription QRZ returns " +
-                "fewer data fields. The same subscription key (Logbook Sync's QRZ panel) unlocks full " +
+                "fewer data fields. The same subscription key (QRZ, Logbook) unlocks full " +
                 "lookup data and log sync.",
                 10, y, cw, font));
 
@@ -7010,8 +6977,6 @@ namespace WSJTX_Controller
 
             tabIdx = 2;
             var lotwBox = MakeServiceGroupBox("LoTW User Activity  (public download — no account required)", font);
-            panels.Add(lotwBox);
-            serviceList.Items.Add("LoTW User Activity");
 
             _lotwEnabledCb = new System.Windows.Forms.CheckBox
             {
@@ -7037,19 +7002,7 @@ namespace WSJTX_Controller
             };
             lotwBox.Controls.Add(_lotwBoostCb);
 
-            lotwBox.Controls.Add(MakeLabel("Refresh (days):", 10, 66, font));
-            _lotwRefreshDaysNum = new System.Windows.Forms.NumericUpDown
-            {
-                Minimum        = 1,
-                Maximum        = 365,
-                Value          = Math.Max(1, Math.Min(365, ctrl.lotwRefreshDays)),
-                Location       = new System.Drawing.Point(108, 63),
-                Size           = new System.Drawing.Size(60, 20),
-                TabIndex       = tabIdx++,
-                Font           = font,
-                AccessibleName = "LoTW refresh interval in days",
-            };
-            lotwBox.Controls.Add(_lotwRefreshDaysNum);
+            // No refresh interval to set (2026-10-17): the schedule is in the status line below.
 
             _lotwUpdateBtn = new System.Windows.Forms.Button
             {
@@ -7094,22 +7047,8 @@ namespace WSJTX_Controller
             // escape (silently swallowing it, e.g. "Country Prefix Data") rather than a
             // literal ampersand.
             var clBox = MakeServiceGroupBox("Country && Prefix Data (automatic — no account needed)", font);
-            panels.Add(clBox);
-            serviceList.Items.Add("Country & Prefix Data");
 
-            clBox.Controls.Add(MakeLabel("Refresh (days):", 10, 23, font));
-            _clubLogRefreshDaysNum = new System.Windows.Forms.NumericUpDown
-            {
-                Minimum        = 1,
-                Maximum        = 365,
-                Value          = Math.Max(1, Math.Min(365, ctrl.clubLogRefreshDays)),
-                Location       = new System.Drawing.Point(108, 20),
-                Size           = new System.Drawing.Size(60, 20),
-                TabIndex       = tabIdx++,
-                Font           = font,
-                AccessibleName = "Club Log refresh interval in days",
-            };
-            clBox.Controls.Add(_clubLogRefreshDaysNum);
+            // No refresh interval to set (2026-10-17): the schedule is in the status line below.
 
             _clubLogUpdateBtn = new System.Windows.Forms.Button
             {
@@ -7133,8 +7072,6 @@ namespace WSJTX_Controller
             // the FCC's own authoritative registration data.
             tabIdx = 2;
             var fccBox = MakeServiceGroupBox("FCC ULS US State Lookup (optional -- ~170MB download, no account needed)", font);
-            panels.Add(fccBox);
-            serviceList.Items.Add("FCC ULS");
 
             _fccUlsEnabledCb = new System.Windows.Forms.CheckBox
             {
@@ -7148,19 +7085,7 @@ namespace WSJTX_Controller
             };
             fccBox.Controls.Add(_fccUlsEnabledCb);
 
-            fccBox.Controls.Add(MakeLabel("Refresh (days):", 10, 47, font));
-            _fccUlsRefreshDaysNum = new System.Windows.Forms.NumericUpDown
-            {
-                Minimum        = 1,
-                Maximum        = 365,
-                Value          = Math.Max(1, Math.Min(365, ctrl.fccUlsRefreshDays)),
-                Location       = new System.Drawing.Point(108, 44),
-                Size           = new System.Drawing.Size(60, 20),
-                TabIndex       = tabIdx++,
-                Font           = font,
-                AccessibleName = "FCC ULS refresh interval in days",
-            };
-            fccBox.Controls.Add(_fccUlsRefreshDaysNum);
+            // No refresh interval to set (2026-10-17): the schedule is in the status line below.
 
             _fccUlsUpdateBtn = new System.Windows.Forms.Button
             {
@@ -7196,8 +7121,6 @@ namespace WSJTX_Controller
             // itself make live lookups run.
             tabIdx = 2;
             var hamQthBox = MakeServiceGroupBox("HamQTH Callsign Lookup", font);
-            panels.Add(hamQthBox);
-            serviceList.Items.Add("HamQTH");
 
             _hamQthEnabledCb = new System.Windows.Forms.CheckBox
             {
@@ -7275,7 +7198,264 @@ namespace WSJTX_Controller
 
             AddProfileOnlyCheckBox("QrzLookup", _qrzPasswordTb, 10, font, _qrzUsernameTb, _qrzPasswordTb);
             AddProfileOnlyCheckBox("HamQth", _hamQthPasswordTb, 10, font, _hamQthUsernameTb, _hamQthPasswordTb);
-            WireServiceList(serviceList, detailHost, panels);
+            _svcGeneral = genBox; _svcQrzLookup = qrzBox; _svcLotwUsers = lotwBox; _svcCountry = clBox;
+            _svcFcc = fccBox; _svcHamQth = hamQthBox;
+        }
+
+        // ── Logbooks and Lookups (2026-10-17) ──────────────────────────────────────────────
+        // One page for every online service and data download, in place of the separate Logbook
+        // Sync and Lookup Data pages, which split one account across two places (QRZ's two logins,
+        // LoTW's download, TQSL upload and user list). The list goes by company -- how people think
+        // of their accounts -- with Status first (how everything stands, one line each), then the
+        // services you sign up for, then the data that downloads by itself. Each entry opens with
+        // one sentence of what it does; the settings boxes inside are the ones the two builders
+        // above make, unchanged, so every field, saved setting and test keeps working.
+        private System.Windows.Forms.GroupBox _svcGeneral, _svcQrzLookup, _svcQrzLogbook, _svcLotwLogbook, _svcLotwUsers,
+            _svcClubLog, _svcEqsl, _svcHrdLog, _svcHamQth, _svcCountry, _svcFcc;
+        private System.Windows.Forms.TextBox _servicesStatusTb;
+        internal const string ServicesPageName = "Logbooks and Lookups";
+
+        private void BuildServicesTab()
+        {
+            BuildLogbookSyncTab();
+            BuildLookupDataTab();
+            AddServiceTests(new System.Drawing.Font("Microsoft Sans Serif", 8.25F));
+            logbookSyncPanel.Controls.Clear();
+            // detailHost scrolls the selected entry itself; an AutoScroll page around it put the
+            // entry in the wrong place (see AddServiceSelectorColumn).
+            logbookSyncPanel.AutoScroll = false;
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+            var detailHost = AddServiceSelectorColumn(logbookSyncPanel, font, "Logbook and lookup services", out var list);
+            var entries = new List<System.Windows.Forms.GroupBox>();
+            void Add(string name, System.Windows.Forms.GroupBox box) { list.Items.Add(name); entries.Add(box); }
+
+            Add("Status", StatusEntry(font));
+            Add("General", WithIntro(_svcGeneral,
+                "Turns callsign lookups on or off, and chooses which service looks up callsigns.", font));
+            // The accounts you set up.
+            Add("QRZ", CompanyEntry("QRZ",
+                "QRZ looks up callsigns with your QRZ username and password, and keeps your online logbook " +
+                "with your QRZ Logbook API key. These are two separate logins.", font,
+                (_svcQrzLookup, "Callsign lookup"), (_svcQrzLogbook, "Logbook")));
+            Add("LoTW", CompanyEntry("LoTW",
+                "LoTW confirms contacts for ARRL awards. Your LoTW website login downloads confirmations, TQSL " +
+                "uploads your contacts, and the user list shows which stations use LoTW.", font,
+                (_svcLotwLogbook, "Confirmations and TQSL upload"), (_svcLotwUsers, "LoTW user list")));
+            Add("Club Log", WithIntro(_svcClubLog,
+                "Club Log keeps an online copy of your log. It needs a Club Log application password, not your " +
+                "website password.", font, "Club Log"));
+            Add("eQSL", WithIntro(_svcEqsl,
+                "eQSL.cc exchanges electronic QSL cards, using your eQSL.cc username and password.", font, "eQSL"));
+            Add("HRDLog", WithIntro(_svcHrdLog,
+                "HRDLog.net keeps an online copy of your log, using your HRDLog.net upload code.", font, "HRDLog.net"));
+            Add("HamQTH", WithIntro(_svcHamQth,
+                "HamQTH is a free alternative to QRZ for looking up callsigns.", font, "HamQTH"));
+            // The data that downloads by itself.
+            Add("Country data", WithIntro(_svcCountry,
+                "Which country each callsign belongs to, from Club Log and Big CTY. Downloads by itself; no " +
+                "account needed.", font, "Country data"));
+            Add("FCC license data", WithIntro(_svcFcc,
+                "Each US callsign's state, from the FCC's license database, for WAS. Downloads by itself; no " +
+                "account needed.", font, "FCC license data"));
+
+            WireServiceList(list, detailHost, entries);
+            // Status reads how things stand each time it is shown.
+            list.SelectedIndexChanged += (s, e) => { if (list.SelectedIndex == 0) _servicesStatusTb.Text = ServicesStatusText(); };
+        }
+
+        // ── Test buttons (2026-10-17) ──────────────────────────────────────────────────────
+        // Every test only reads: QRZ's STATUS action, a LoTW and an eQSL download limited to today
+        // (thrown away), and TQSL's own files. Nothing is uploaded, changed or deleted anywhere.
+        // The result lands in the status box beside the button, which takes the focus so a screen
+        // reader says it (the operator pressed the button), as Test Login already does.
+        private void AddTestRow(System.Windows.Forms.GroupBox box, string buttonText, string buttonName,
+                                string statusName, System.Drawing.Font font, Func<string> test)
+        {
+            int bottom = 0, tab = 0;
+            foreach (System.Windows.Forms.Control c in box.Controls) { bottom = Math.Max(bottom, c.Bottom); tab = Math.Max(tab, c.TabIndex); }
+            var btn = new System.Windows.Forms.Button
+            {
+                Text = buttonText, Location = new System.Drawing.Point(10, bottom + 8), Size = new System.Drawing.Size(110, 24),
+                TabIndex = tab + 1, Font = font, AccessibleName = buttonName,
+            };
+            var status = MakeStatusBox("Not tested yet.", 130, bottom + 10, tab + 2, statusName, font);
+            btn.Click += async (s, e) =>
+            {
+                btn.Enabled = false;
+                status.Text = "Testing…";
+                string result;
+                try { result = await System.Threading.Tasks.Task.Run(test); }
+                catch (Exception ex) { result = "The test could not run: " + ex.Message; }
+                if (IsDisposed) return;
+                status.Text = result;
+                btn.Enabled = true;
+                status.Focus();
+            };
+            box.Controls.Add(btn);
+            box.Controls.Add(status);
+        }
+
+        private void AddServiceTests(System.Drawing.Font font)
+        {
+            string MyCall() => (wsjtxClient?.myCall ?? "").Trim().ToUpperInvariant();
+            AddTestRow(_svcQrzLogbook, "Test key", "Test the QRZ Logbook API key", "QRZ Logbook key test result", font, () =>
+            {
+                string key = _qrzLogbookApiKeyTb.Text.Trim();
+                if (key.Length == 0) return "Enter your QRZ Logbook API key first.";
+                bool ok = new ExternalDataClient().TestQrzLogbook(key, out string owner, out int count, out string error);
+                return QrzKeyTestResult(ok, owner, count, error, MyCall());
+            });
+            AddTestRow(_svcLotwLogbook, "Test sign-in", "Test the LoTW sign-in", "LoTW sign-in test result", font, () =>
+            {
+                string user = _lotwLogbookUserTb.Text.Trim(), pass = _lotwLogbookPassTb.Text;
+                if (user.Length == 0 || pass.Length == 0) return "Enter your LoTW username and password first.";
+                new ExternalDataClient().DownloadLotw(user, pass, DateTime.UtcNow.ToString("yyyy-MM-dd"), null, out string error);
+                return error == null ? "Signed in to LoTW." : "Could not sign in to LoTW: " + error;
+            });
+            AddTestRow(_svcLotwLogbook, "Check TQSL", "Check TQSL and its station location", "TQSL check result", font, () =>
+            {
+                string tqsl = TqslUploadClient.LocateTqsl();
+                var locations = tqsl == null ? null : TqslStationData.Load(out string loadError);
+                return TqslCheckResult(tqsl != null, locations, _tqslStationLocationTb.Text.Trim(), MyCall());
+            });
+            AddTestRow(_svcEqsl, "Test sign-in", "Test the eQSL sign-in", "eQSL sign-in test result", font, () =>
+            {
+                string user = _eqslUsernameTb.Text.Trim(), pass = _eqslPasswordTb.Text;
+                if (user.Length == 0 || pass.Length == 0) return "Enter your eQSL username and password first.";
+                new ExternalDataClient().DownloadEqsl(user, pass, DateTimeOffset.UtcNow.ToUnixTimeSeconds(), out string error);
+                return error == null ? "Signed in to eQSL." : "Could not sign in to eQSL: " + error;
+            });
+        }
+
+        // The QRZ Logbook key test's sentence. A key that opens another call's logbook is said:
+        // uploads would go to that logbook.
+        internal static string QrzKeyTestResult(bool ok, string owner, int count, string error, string myCall)
+        {
+            if (!ok) return "QRZ did not accept the key: " + (string.IsNullOrWhiteSpace(error) ? "no reason given." : error.TrimEnd('.') + ".");
+            string book = string.IsNullOrWhiteSpace(owner) ? "your logbook" : owner.Trim().ToUpperInvariant() + "'s logbook";
+            string s = $"The key works: it opens {book}, {count:N0} contacts.";
+            if (!string.IsNullOrWhiteSpace(owner) && myCall.Length > 0
+                && !string.Equals(owner.Trim(), myCall, StringComparison.OrdinalIgnoreCase))
+                s += $" That is not {myCall}'s logbook.";
+            return s;
+        }
+
+        // The TQSL check's sentence: TQSL installed, and the station location named here present,
+        // with the call it signs as.
+        internal static string TqslCheckResult(bool installed, Dictionary<string, TqslStationData.Location> locations, string name, string myCall)
+        {
+            if (!installed) return "TQSL is not installed.";
+            if (name.Length == 0) return "TQSL is installed. Enter the name of your TQSL station location.";
+            if (locations == null || !locations.TryGetValue(name, out var loc))
+                return $"TQSL is installed, but it has no station location named {name}.";
+            string call = (loc.Call ?? "").Trim().ToUpperInvariant();
+            string s = $"TQSL is installed, with station location {name}" + (call.Length > 0 ? $" for {call}." : ".");
+            if (call.Length > 0 && myCall.Length > 0 && call != myCall) s += $" That is not {myCall}.";
+            return s;
+        }
+
+        private System.Windows.Forms.GroupBox StatusEntry(System.Drawing.Font font)
+        {
+            var box = MakeServiceGroupBox("Status", font);
+            var intro = MakeWrapLabel("How each service and download stands, one line each. Choose a service in the " +
+                "list to change it.", 10, 20, ServiceDetailContentWidth, font);
+            box.Controls.Add(intro);
+            _servicesStatusTb = new System.Windows.Forms.TextBox
+            {
+                Text           = ServicesStatusText(),
+                Location       = new System.Drawing.Point(10, intro.Bottom + 6),
+                Size           = new System.Drawing.Size(ServiceDetailContentWidth, 260),
+                Multiline      = true,
+                WordWrap       = true,
+                ReadOnly       = true,
+                ScrollBars     = System.Windows.Forms.ScrollBars.Vertical,
+                TabStop        = true,
+                TabIndex       = 0,
+                Font           = font,
+                AccessibleName = "Status of logbook and lookup services",
+            };
+            box.Controls.Add(_servicesStatusTb);
+            return box;
+        }
+
+        // An entry of one settings box: its title, and one sentence at the top (the box's own
+        // controls move down to make room).
+        private static System.Windows.Forms.GroupBox WithIntro(System.Windows.Forms.GroupBox box, string intro,
+                                                              System.Drawing.Font font, string title = null)
+        {
+            if (title != null) box.Text = title;
+            var lbl = MakeWrapLabel(intro, 10, 20, ServiceDetailContentWidth, font);
+            int shift = lbl.Height + 6;
+            foreach (System.Windows.Forms.Control c in box.Controls) c.Top += shift;
+            box.Controls.Add(lbl);
+            return box;
+        }
+
+        // An entry of several settings boxes for one company, one under the other, each under its
+        // own short title (a screen reader names the group as it is entered).
+        private static System.Windows.Forms.GroupBox CompanyEntry(string title, string intro, System.Drawing.Font font,
+            params (System.Windows.Forms.GroupBox Box, string Title)[] parts)
+        {
+            var outer = MakeServiceGroupBox(title, font);
+            var lbl = MakeWrapLabel(intro, 10, 20, ServiceDetailContentWidth, font);
+            outer.Controls.Add(lbl);
+            int y = lbl.Bottom + 6, tab = 0;
+            foreach (var (box, name) in parts)
+            {
+                box.Text = name;
+                int bottom = 0;
+                foreach (System.Windows.Forms.Control c in box.Controls) bottom = Math.Max(bottom, c.Bottom);
+                box.Location = new System.Drawing.Point(8, y);
+                box.Size = new System.Drawing.Size(ServiceDetailContentWidth + 24, bottom + 10);
+                box.TabIndex = tab++;
+                outer.Controls.Add(box);
+                y = box.Bottom + 8;
+            }
+            // The parts follow the entry's width (it is sized to the page when shown).
+            outer.Resize += (s, e) =>
+            {
+                foreach (var (box, _) in parts) box.Width = Math.Max(ServiceDetailContentWidth + 24, outer.ClientSize.Width - 16);
+            };
+            return outer;
+        }
+
+        // Status, one line per service: whether it is set up (as the page shows it now) and how it
+        // last went. Plain sentences for a screen reader, read a line at a time.
+        internal string ServicesStatusText()
+        {
+            string Last(string key)
+            {
+                string raw = ctrl.SettingsIni?.Read(key);
+                return DateTime.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out var t) ? t.ToLocalTime().ToString("g") : "never";
+            }
+            bool Has(System.Windows.Forms.TextBox tb) => !string.IsNullOrWhiteSpace(tb?.Text);
+            bool On(System.Windows.Forms.CheckBox cb) => cb?.Checked == true;
+            var lines = new List<string>();
+
+            lines.Add("QRZ callsign lookup: " + (!On(_qrzEnabledCb) ? "off." : !Has(_qrzUsernameTb) ? "on, but no username." : QrzStatusText()));
+            lines.Add("QRZ Logbook: " + (!Has(_qrzLogbookApiKeyTb) ? "not set up." :
+                $"API key set; upload {(On(_qrzUploadEnabledCb) ? "on" : "off")}; " +
+                $"{(On(_qrzLogbookAutoSyncCb) ? $"downloads every {_qrzLogbookRefreshDaysNum?.Value} days" : "downloads when you ask")}; " +
+                $"last download {Last("LogbookLastQrzRefresh")}."));
+            lines.Add("LoTW confirmations: " + (!Has(_lotwLogbookUserTb) || !Has(_lotwLogbookPassTb) ? "not set up." :
+                $"login set; {(On(_lotwLogbookAutoSyncCb) ? $"downloads every {_lotwLogbookRefreshDaysNum?.Value} days" : "downloads when you ask")}; " +
+                $"last download {Last("LogbookLastLoTWRefresh")}."));
+            lines.Add("LoTW upload with TQSL: " + (!On(_lotwUploadEnabledCb) ? "off." :
+                Has(_tqslStationLocationTb) ? $"on, station location {_tqslStationLocationTb.Text.Trim()}." : "on, but no TQSL station location."));
+            lines.Add("Club Log: " + (!On(_clubLogUploadEnabledCb) ? "off." :
+                !Has(_clubLogUploadEmailTb) || !Has(_clubLogUploadPasswordTb) || !Has(_clubLogUploadCallsignTb) ? "on, but the login is not complete." :
+                $"upload on; last download {Last("LogbookLastClubLogRefresh")}."));
+            lines.Add("eQSL: " + (!On(_eqslUploadEnabledCb) ? "off." :
+                !Has(_eqslUsernameTb) || !Has(_eqslPasswordTb) ? "on, but the login is not complete." :
+                $"upload on; last download {Last("LogbookLastEqslRefresh")}."));
+            lines.Add("HRDLog.net: " + (!On(_hrdLogUploadEnabledCb) ? "off." :
+                !Has(_hrdLogUploadCallsignTb) || !Has(_hrdLogUploadCodeTb) ? "on, but the callsign or upload code is missing." : "upload on."));
+            lines.Add("HamQTH: " + (!On(_hamQthEnabledCb) ? "off." : HamQthStatusText()));
+            lines.Add("LoTW user list: " + LoTWStatusText());
+            lines.Add("Country data: " + ClubLogStatusText());
+            lines.Add("FCC license data: " + FccUlsStatusText());
+            return string.Join(Environment.NewLine, lines);
         }
 
         private string HamQthStatusText() =>
@@ -7575,7 +7755,7 @@ namespace WSJTX_Controller
             if (m == null || !m.LoTW.IsEnabled) return "LoTW lookup disabled.";
             if (m.LoTW.UserCount == 0) return "Not downloaded yet. Click Update Now.";
             var age = m.LoTW.LastUpdate == DateTime.MinValue ? "never" : m.LoTW.LastUpdate.ToLocalTime().ToString("g");
-            return $"{m.LoTW.UserCount:N0} users, last updated {age}";
+            return $"{m.LoTW.UserCount:N0} users, last updated {age}. Downloaded weekly.";
         }
 
         private string ClubLogStatusText()
@@ -7593,7 +7773,7 @@ namespace WSJTX_Controller
                 ? "Big CTY aliases not downloaded yet"
                 : $"{m.ClubLog.BigCtyAliasCount:N0} Big CTY aliases, updated " +
                   (m.ClubLog.BigCtyLastUpdate == DateTime.MinValue ? "never" : m.ClubLog.BigCtyLastUpdate.ToLocalTime().ToString("g"));
-            return $"{m.ClubLog.EntityCount} entities, last updated {age}; {bigCty}";
+            return $"{m.ClubLog.EntityCount} entities, last updated {age}; {bigCty}. Club Log downloaded daily, Big CTY weekly.";
         }
 
         private void SaveLookupTab()
@@ -7614,12 +7794,10 @@ namespace WSJTX_Controller
             ctrl.lotwEnabled             = _lotwEnabledCb?.Checked              ?? false;
             ctrl.lotwBoostEnabled        = _lotwBoostCb?.Checked                ?? false;
             ctrl.lotwUploadEnabled       = _lotwUploadEnabledCb?.Checked        ?? true;
-            ctrl.lotwRefreshDays         = (int)(_lotwRefreshDaysNum?.Value      ?? 30);
             ctrl.lotwLogbookUser         = _lotwLogbookUserTb?.Text.Trim()      ?? "";
             ctrl.lotwLogbookPass         = _lotwLogbookPassTb?.Text            ?? "";
             ctrl.lotwLogbookAutoSyncEnabled = _lotwLogbookAutoSyncCb?.Checked    ?? false;
             ctrl.lotwLogbookRefreshDays  = (int)(_lotwLogbookRefreshDaysNum?.Value ?? 7);
-            ctrl.clubLogRefreshDays      = (int)(_clubLogRefreshDaysNum?.Value   ?? 7);
             ctrl.clubLogUploadEnabled    = _clubLogUploadEnabledCb?.Checked     ?? false;
             ctrl.clubLogUploadRealtime   = _clubLogUploadRealtimeCb?.Checked    ?? false;
             ctrl.clubLogUploadEmail      = _clubLogUploadEmailTb?.Text.Trim()   ?? "";
@@ -7633,7 +7811,6 @@ namespace WSJTX_Controller
             ctrl.hrdLogUploadCode        = _hrdLogUploadCodeTb?.Text              ?? "";
             ctrl.tqslStationLocation     = _tqslStationLocationTb?.Text.Trim()    ?? "";
             ctrl.fccUlsEnabled           = _fccUlsEnabledCb?.Checked           ?? false;
-            ctrl.fccUlsRefreshDays       = (int)(_fccUlsRefreshDaysNum?.Value   ?? 7);
             ctrl.eqslUploadEnabled       = _eqslUploadEnabledCb?.Checked       ?? false;
             ctrl.eqslUploadRealtime      = _eqslUploadRealtimeCb?.Checked      ?? false;
             ctrl.eqslUsername            = _eqslUsernameTb?.Text.Trim()        ?? "";
@@ -8433,7 +8610,7 @@ namespace WSJTX_Controller
             if (!string.IsNullOrEmpty(m.FccUls.LastError)) return $"Error: {m.FccUls.LastError}";
             if (m.FccUls.RecordCount == 0) return "Not downloaded yet. Click Update Now.";
             var age = m.FccUls.LastUpdate == DateTime.MinValue ? "never" : m.FccUls.LastUpdate.ToLocalTime().ToString("g");
-            return $"{m.FccUls.RecordCount:N0} callsigns, last updated {age}";
+            return $"{m.FccUls.RecordCount:N0} callsigns, last updated {age}. Downloaded weekly.";
         }
 
         private async void FccUlsUpdateBtn_Click(object sender, EventArgs e)

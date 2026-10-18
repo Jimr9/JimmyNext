@@ -46,19 +46,84 @@ namespace WSJTX_Controller
             public ulong WhenUnix { get; set; }
             public string FirstSeenUtc { get; set; }
             public string LastSeenUtc { get; set; }
+            public string Note { get; set; }           // the country check's own words (Service CHECK)
 
             // "QRZ: OT9K 20m FT8 2026-10-04 15:00. Country NON-DXCC, QRZ says Belgium (name only, same DXCC entity)."
             public string Sentence()
             {
                 string when = DateTimeOffset.FromUnixTimeSeconds((long)WhenUnix).UtcDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
                 string service = ServiceName(Service);
+                if (Service == CheckService) return $"{service}: {Call} {Band} {Mode} {when}. {Note} Apply sets {Field} to {Proposed}.";
                 string change = string.IsNullOrEmpty(Logged) ? $"{Field} is blank, {service} says {Proposed}" : $"{Field} {Logged}, {service} says {Proposed}";
                 return $"{service}: {Call} {Band} {Mode} {when}. {change}" + (NameOnly ? " (name only, same DXCC entity)." : ".");
             }
         }
 
         internal static string ServiceName(string service) =>
-            service == "LOTW" ? "LoTW" : service == "EQSL" ? "eQSL" : service == "QRZ" ? "QRZ" : service;
+            service == "LOTW" ? "LoTW" : service == "EQSL" ? "eQSL" : service == "QRZ" ? "QRZ"
+            : service == CheckService ? "Country check" : service;
+
+        // ── The country check (2026-10-17, Nexus 1.19) ──────────────────────────────────────
+        // Not a download: Jimmy's own look at each contact's DXCC number, its call and its logged
+        // country text, with Nexus's lookups. Only real disagreements become proposals -- a name
+        // spelled another way ("UNITED STATES OF AMERICA" for United States) is not one. Like
+        // every proposal here it changes nothing until the operator approves it.
+        //   - DXCC: the grid square the station sent places it in another entity than the logged
+        //     number (MW3WQZ logged as England, sent IO71 in Wales). The call alone is not enough
+        //     (operator, 2026-10-17: W0XC sent DM68, Colorado, while cty.dat lists the call in
+        //     Hawaii); with no grid, or one that does not tell, nothing is suggested. Not raised
+        //     when LoTW confirmed the contact under the logged number: LoTW has settled it.
+        //   - Country: the logged text clearly names an entity other than the number's, or says
+        //     the contact is in no DXCC entity at all ("NON-DXCC" with 209) -- not while the grid
+        //     says the number itself is wrong (that is fixed first).
+        internal const string CheckService = "CHECK";
+
+        internal int CheckCountry(NexusQso q, DateTime utcNow)
+        {
+            if (q?.Id == null) return 0;
+            uint dx = q.Dxcc ?? 0;
+            string Num(uint n) => n.ToString(CultureInfo.InvariantCulture);
+            string named = string.IsNullOrEmpty(q.CountryByDxcc) ? "" : $" ({q.CountryByDxcc})";
+
+            uint.TryParse(q.ExtraValue("APP_JIMMY_LOTW_DXCC"), NumberStyles.None, CultureInfo.InvariantCulture, out uint lotwDx);
+            bool lotwSettled = q.QslRcvd != null && q.QslRcvd.Lotw && lotwDx == dx;
+            uint grid = q.GridDxcc ?? 0;
+            bool gridDisagrees = dx > 0 && grid > 0 && grid != dx;
+            string dxccNote = gridDisagrees && !lotwSettled
+                ? $"DXCC {Num(dx)}{named}, but the grid it sent, {(q.Grid ?? "").Trim()}, is in {q.GridCountry ?? "another entity"} ({Num(grid)})."
+                : null;
+
+            string logged = (q.Country ?? "").Trim();
+            string countryNote = null;
+            if (!gridDisagrees && dx > 0 && !string.IsNullOrEmpty(q.CountryByDxcc) && logged.Length > 0 && q.CountryTextDxcc.HasValue && q.CountryTextDxcc.Value != dx)
+                countryNote = q.CountryTextDxcc.Value == 0
+                    ? $"Logged country {logged} says no DXCC entity, but DXCC {Num(dx)} is {q.CountryByDxcc}."
+                    : $"Logged country {logged} names another entity than DXCC {Num(dx)}{named}.";
+
+            return Check(q, "DXCC", dxccNote, dxccNote == null ? null : Num(grid), utcNow)
+                 + Check(q, "Country", countryNote, q.CountryByDxcc, utcNow);
+        }
+
+        private int Check(NexusQso q, string field, string note, string proposed, DateTime utcNow)
+        {
+            string key = q.Id + "|" + CheckService + "|" + field;
+            var have = Items.FirstOrDefault(p => p.Key == key);
+            if (note == null) { if (have != null) Items.Remove(have); return 0; }   // no disagreement (any more)
+            string now = utcNow.ToString("o", CultureInfo.InvariantCulture), mine = LoggedValue(q, field);
+            if (have != null && string.Equals(have.Proposed, proposed, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(have.Logged ?? "", mine, StringComparison.OrdinalIgnoreCase))
+            {
+                have.LastSeenUtc = now; have.Note = note;
+                return 0;
+            }
+            if (have != null) Items.Remove(have);
+            Items.Add(new Proposal
+            {
+                Key = key, ContactId = q.Id, Service = CheckService, Field = field, Logged = mine, Proposed = proposed, Note = note,
+                Call = q.Call, Band = q.Band, Mode = q.Mode, WhenUnix = q.WhenUnix, FirstSeenUtc = now, LastSeenUtc = now,
+            });
+            return 1;
+        }
 
         // The fields a download row can propose, and how each reads on the logged contact.
         internal static readonly (string Field, string RowTag)[] Fields =

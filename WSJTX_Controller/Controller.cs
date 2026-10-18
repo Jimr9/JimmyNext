@@ -379,18 +379,17 @@ namespace WSJTX_Controller
         public int              qrzMinIntervalSeconds   = 10;
         public bool             lotwEnabled             = true;
         public bool             lotwBoostEnabled        = false;
-        public int              lotwRefreshDays         = 30;
         // No clubLogEnabled/clubLogApiKey fields: Club Log country data is
         // automatic Jimmy infrastructure, not a user-facing toggle or a
         // per-user credential -- the key is Jimmy's application key
-        // (ClubLogAppKey.Resolve()) and downloads happen unconditionally,
-        // subject only to the refresh interval below. See RuleUniverse.cs.
-        public int              clubLogRefreshDays      = 7;    // small file, updated as exceptions come in
+        // (ClubLogAppKey.Resolve()) and downloads happen unconditionally. See RuleUniverse.cs.
+        // No refresh intervals either (2026-10-17): every lookup data file follows its source's
+        // own schedule (LookupManager.ClubLogDays etc.); the old lotwRefreshDays /
+        // clubLogRefreshDays / fccUlsRefreshDays keys in an .ini are no longer read.
         // On by default since 2026-10-01 (was opt-in): ~170MB, downloaded in the background at
-        // the first start and then every fccUlsRefreshDays; until it lands, US state comes from
-        // the grid as before.
+        // the first start and then weekly; until it lands, US state comes from the grid as before.
         public bool             fccUlsEnabled           = true;
-        public int              fccUlsRefreshDays       = 7;
+        private System.Windows.Forms.Timer _lookupDataTimer;   // the 6-hourly lookup data check
 
         private bool formLoaded = false;
         private HelpDlg helpDlg = null;
@@ -680,6 +679,8 @@ namespace WSJTX_Controller
                 // anything opens the logbook or starts the engine (which is given its folder).
                 if (!TestModeGuard.IsTestMode) LogbookBooks.Use(iniFile.Read(LogbookIdKey));
                 LogbookBooks.StationCallNow = () => wsjtxClient?.myCall;
+                LogbookBooks.MainStationCalls = () => NexusLogbook.Read(db => db.StationCallCounts(), null);
+                if (!TestModeGuard.IsTestMode) LoadDownloadMatchMinutes();
                 hotkeyConfig.LoadFromIni(iniFile);
                 RefreshHotkeyAccessibleNames();
                 // Parse optional row-order settings from INI (INI-only settings). Stored in
@@ -1086,10 +1087,7 @@ namespace WSJTX_Controller
                 int qrzint; if (iniFile.KeyExists("qrzMinIntervalSeconds") && int.TryParse(iniFile.Read("qrzMinIntervalSeconds"), out qrzint) && qrzint >= 5) qrzMinIntervalSeconds = qrzint;
                 if (iniFile.KeyExists("lotwEnabled"))        lotwEnabled        = iniFile.Read("lotwEnabled")    == "True";
                 if (iniFile.KeyExists("lotwBoostEnabled"))   lotwBoostEnabled   = iniFile.Read("lotwBoostEnabled") == "True";
-                int lotwd; if (iniFile.KeyExists("lotwRefreshDays") && int.TryParse(iniFile.Read("lotwRefreshDays"), out lotwd)   && lotwd   >= 1) lotwRefreshDays  = lotwd;
-                int clgd; if (iniFile.KeyExists("clubLogRefreshDays") && int.TryParse(iniFile.Read("clubLogRefreshDays"), out clgd) && clgd >= 1) clubLogRefreshDays = clgd;
                 if (iniFile.KeyExists("fccUlsEnabled"))       fccUlsEnabled      = iniFile.Read("fccUlsEnabled")     == "True";
-                int fccd; if (iniFile.KeyExists("fccUlsRefreshDays") && int.TryParse(iniFile.Read("fccUlsRefreshDays"), out fccd) && fccd >= 1) fccUlsRefreshDays = fccd;
                 if (iniFile.KeyExists("qrzLogbookApiKey")) qrzLogbookApiKey = CredentialProtector.Unprotect(iniFile.Read("qrzLogbookApiKey"));
                 if (iniFile.KeyExists("lotwLogbookUser"))  lotwLogbookUser  = iniFile.Read("lotwLogbookUser")  ?? "";
                 if (iniFile.KeyExists("lotwLogbookPass"))  lotwLogbookPass  = CredentialProtector.Unprotect(iniFile.Read("lotwLogbookPass"));
@@ -1392,8 +1390,8 @@ namespace WSJTX_Controller
             lookupManager.Initialize(
                 useLookupData,
                 qrzEnabled, qrzUsername, qrzPassword, qrzCacheDays,
-                lotwEnabled, lotwRefreshDays,
-                ClubLogAppKey.Resolve(), clubLogRefreshDays,
+                lotwEnabled, LookupManager.LotwUsersDays,
+                ClubLogAppKey.Resolve(), LookupManager.ClubLogDays,
                 fccUlsEnabled,
                 qrzLookupPolicy, qrzMinIntervalSeconds,
                 callsignLookupProvider,
@@ -1409,7 +1407,15 @@ namespace WSJTX_Controller
             // depth for the same race, not a duplicate of it.
             lookupManager.OnLookupCompleted = () =>
                 SafeBeginInvoke(() => wsjtxClient.RefreshQueueDisplay());
-            lookupManager.StartBackgroundRefreshIfNeeded(lotwRefreshDays, clubLogRefreshDays, fccUlsRefreshDays);
+            // Lookup data downloads: each result to Jimmy's log; a file well out of date said once.
+            lookupManager.Log = line => SafeBeginInvoke(() => wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} {line}"));
+            lookupManager.OnStale = text => SafeBeginInvoke(() =>
+                wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Lookup data", text)));
+            lookupManager.StartBackgroundRefreshIfNeeded();
+            // ...and checked again every 6 hours while Jimmy runs (it downloads only what is due).
+            _lookupDataTimer = new System.Windows.Forms.Timer { Interval = 6 * 60 * 60 * 1000 };
+            _lookupDataTimer.Tick += (s, e) => lookupManager?.StartBackgroundRefreshIfNeeded();
+            _lookupDataTimer.Start();
 
             // Loads every .ini file from the RuleDefinitions folder (awards engine).
             // A bad or missing folder must never block startup.
@@ -1924,10 +1930,7 @@ namespace WSJTX_Controller
                 iniFile.Write("qrzMinIntervalSeconds",   qrzMinIntervalSeconds.ToString());
                 iniFile.Write("lotwEnabled",             lotwEnabled.ToString());
                 iniFile.Write("lotwBoostEnabled",        lotwBoostEnabled.ToString());
-                iniFile.Write("lotwRefreshDays",         lotwRefreshDays.ToString());
-                iniFile.Write("clubLogRefreshDays",      clubLogRefreshDays.ToString());
                 iniFile.Write("fccUlsEnabled",           fccUlsEnabled.ToString());
-                iniFile.Write("fccUlsRefreshDays",       fccUlsRefreshDays.ToString());
                 iniFile.Write("qrzLogbookApiKey",        CredentialProtector.Protect(qrzLogbookApiKey));
                 iniFile.Write("lotwLogbookUser",         lotwLogbookUser          ?? "");
                 iniFile.Write("lotwLogbookPass",         CredentialProtector.Protect(lotwLogbookPass));
@@ -2020,6 +2023,25 @@ namespace WSJTX_Controller
         private static string ProgramName() => Assembly.GetExecutingAssembly().GetName().Name;
         private static string ProfilesAppDataPath() => $"{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}\\{ProgramName()}";
         private static string BaseIniFilePath() => ProfilesAppDataPath() + "\\" + ProgramName() + ".ini";
+
+        // How far (minutes) a confirmation download row may be from its one logged contact and still
+        // be paired with it (NexusReportPairing.MatchMinutes). INI only, in the main Jimmy Next.ini --
+        // shared by every profile, not something to change lightly: 30 is what Nexus does, 0 the
+        // exact minute only, never more than 30. Written with the default when missing, so it can be
+        // found.
+        internal const string DownloadMatchMinutesKey = "downloadMatchMinutes";
+        private static void LoadDownloadMatchMinutes()
+        {
+            try
+            {
+                var ini = new IniFile(BaseIniFilePath());
+                string v = (ini.Read(DownloadMatchMinutesKey) ?? "").Trim();
+                if (v.Length == 0) { ini.Write(DownloadMatchMinutesKey, NexusReportPairing.DefaultMatchMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture)); v = ""; }
+                NexusReportPairing.MatchMinutes = int.TryParse(v, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int m)
+                    ? m : NexusReportPairing.DefaultMatchMinutes;
+            }
+            catch { NexusReportPairing.MatchMinutes = NexusReportPairing.DefaultMatchMinutes; }
+        }
         private static string ProfilesDirectory() => ProfilesAppDataPath() + "\\Profiles";
 
         // The .ini file that actually governs the running session: the base file, or the named
@@ -2942,6 +2964,8 @@ namespace WSJTX_Controller
         // FormClosing path runs (settings saved or not, as chosen; transmit halted in Closing()).
         private void SwitchProfileInPlace()
         {
+            // Not while a dialog of another window is open (ModalElsewhere): finish it first.
+            if (ModalElsewhere.BringOpenDialogForward(this)) return;
             ReopenForProfile = true;
             // Handoff 33: a profile with another logbook gets a new engine on that logbook's
             // folder. The running one is NOT handed over: it is stopped with this window
@@ -3003,8 +3027,26 @@ namespace WSJTX_Controller
             return true;
         }
 
+        // A dialog opened from another Jimmy window (Logbook Center, Help) leaves this window
+        // usable (ModalElsewhere, operator 2026-10-17).
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            if (ModalElsewhere.IsDisable(ref m) && IsHandleCreated && !IsDisposed)
+                BeginInvoke(new Action(() => ModalElsewhere.KeepUsable(this)));
+        }
+
         private void Controller_FormClosing(object sender, FormClosingEventArgs e)
         {
+            // Dialogs of other windows still open (a Logbook dialog): they are closed first, as Cancel
+            // closes them, and then this close runs again -- closing the window under an open dialog
+            // would leave its code running on a closed window (ModalElsewhere.CloseDialogsThen).
+            if (e.CloseReason == CloseReason.UserClosing && !ReopenForProfile
+                && ModalElsewhere.CloseDialogsThen(this, () => { if (!IsDisposed) Close(); }))
+            {
+                e.Cancel = true;
+                return;
+            }
             // A support report still being written (or made) would be lost with the program:
             // ask, and stay open on No. Not on a profile switch -- there the program goes on and
             // what was typed is kept for the next time the form is opened (CloseForOwner below).
@@ -3320,10 +3362,7 @@ namespace WSJTX_Controller
             iniFile.Write("qrzMinIntervalSeconds",   qrzMinIntervalSeconds.ToString());
             iniFile.Write("lotwEnabled",             lotwEnabled.ToString());
             iniFile.Write("lotwBoostEnabled",        lotwBoostEnabled.ToString());
-            iniFile.Write("lotwRefreshDays",         lotwRefreshDays.ToString());
-            iniFile.Write("clubLogRefreshDays",      clubLogRefreshDays.ToString());
             iniFile.Write("fccUlsEnabled",           fccUlsEnabled.ToString());
-            iniFile.Write("fccUlsRefreshDays",       fccUlsRefreshDays.ToString());
             iniFile.Write("qrzLogbookApiKey",        CredentialProtector.Protect(qrzLogbookApiKey));
             iniFile.Write("lotwLogbookUser",         lotwLogbookUser          ?? "");
             iniFile.Write("lotwLogbookPass",         CredentialProtector.Protect(lotwLogbookPass));
@@ -3579,8 +3618,12 @@ namespace WSJTX_Controller
             // require WSJT-X to be connected.
             if (keyData == hotkeyConfig[HotkeyAction.AddManualQso] && hotkeyConfig[HotkeyAction.AddManualQso] != Keys.None)
             {
-                OpenLogbookWindow();
-                _logbookWindow?.OpenAddQsoDialog();
+                // A Logbook dialog already open is finished first (ModalElsewhere).
+                if (!ModalElsewhere.BringOpenDialogForward(this, _logbookWindow))
+                {
+                    OpenLogbookWindow();
+                    _logbookWindow?.OpenAddQsoDialog();
+                }
                 return true;
             }
 
@@ -4306,7 +4349,7 @@ namespace WSJTX_Controller
                         _tqslCaptureWarned = cause;
                         wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "TQSL station location",
                             cause.TrimEnd('.') + ". Contacts are still logged, but LoTW upload will hold them until their location is reviewed. " +
-                            "Create the location in TQSL, or choose another in Options, Logbook Sync."));
+                            "Create the location in TQSL, or choose another in Options, Logbooks and Lookups, LoTW."));
                     }
                     return f;
                 }
@@ -4465,7 +4508,8 @@ namespace WSJTX_Controller
         {
             if (_logbookWindow != null && !_logbookWindow.IsDisposed)
             {
-                _logbookWindow.Activate();
+                // With one of its dialogs open, that dialog is where the Logbook is.
+                if (!ModalElsewhere.BringOpenDialogForward(this, _logbookWindow)) _logbookWindow.Activate();
                 return;
             }
             try
@@ -4664,13 +4708,13 @@ namespace WSJTX_Controller
             lookupManager?.Initialize(
                 useLookupData,
                 qrzEnabled, qrzUsername, qrzPassword, qrzCacheDays,
-                lotwEnabled, lotwRefreshDays,
-                ClubLogAppKey.Resolve(), clubLogRefreshDays,
+                lotwEnabled, LookupManager.LotwUsersDays,
+                ClubLogAppKey.Resolve(), LookupManager.ClubLogDays,
                 fccUlsEnabled,
                 qrzLookupPolicy, qrzMinIntervalSeconds,
                 callsignLookupProvider,
                 hamQthEnabled, hamQthUsername, hamQthPassword, hamQthCacheDays);
-            lookupManager?.StartBackgroundRefreshIfNeeded(lotwRefreshDays, clubLogRefreshDays, fccUlsRefreshDays);
+            lookupManager?.StartBackgroundRefreshIfNeeded();
             wsjtxClient.SortCallsPublic();  // re-rank if LoTW boost changed
         }
 
@@ -6786,6 +6830,8 @@ namespace WSJTX_Controller
         private void helpTimer_Tick(object sender, EventArgs e)
         {
             helpTimer.Stop();
+            // Help's own dialog still open (ModalElsewhere): finish it before Help is replaced.
+            if (helpDlg != null && ModalElsewhere.BringOpenDialogForward(this, helpDlg)) return;
             _helpReturnFocus = this.ActiveControl;
             if (helpDlg != null) helpDlg.Close();
             helpDlg = new HelpDlg(this, $"{wsjtxClient.pgmName}{helpSuffix}", (string)helpTimer.Tag);

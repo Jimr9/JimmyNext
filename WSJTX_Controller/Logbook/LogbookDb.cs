@@ -16,7 +16,11 @@ namespace WSJTX_Controller
         public string QsoDate     { get; set; }
         public string TimeOn      { get; set; }
         public string TimeOff     { get; set; }
-        public string Country     { get; set; }
+        public string Country     { get; set; }   // as logged or imported -- never rewritten
+        // The country shown (Nexus 1.19: the entity the DXCC number names, else the call's); the
+        // logged Country when the read copy has none.
+        public string ShownCountry { get; set; }
+        public string CountryShown => string.IsNullOrEmpty(ShownCountry) ? Country : ShownCountry;
         public string State       { get; set; }
         public int    Dxcc        { get; set; }
         public int    CqZone      { get; set; }
@@ -442,6 +446,16 @@ namespace WSJTX_Controller
                     Exec($"ALTER TABLE qso ADD COLUMN {c} INTEGER DEFAULT 0;");
                 SetMeta("db_version", "11");
             }
+
+            // v12 (2026-10-17, Nexus 1.19): the country each contact is SHOWN under (its DXCC
+            // number's entity, else its call's) and the one its number names, beside the logged
+            // country, which stays as logged. Filled from Nexus as the read copy is rebuilt.
+            if (ver < 12)
+            {
+                foreach (var c in new[] { "country_shown", "country_by_dxcc" })
+                    Exec($"ALTER TABLE qso ADD COLUMN {c} TEXT DEFAULT '';");
+                SetMeta("db_version", "12");
+            }
         }
 
         // ── Meta ─────────────────────────────────────────────────────────────────
@@ -739,7 +753,7 @@ namespace WSJTX_Controller
                 using (var cmd = _conn.CreateCommand())
                 {
                     cmd.CommandText =
-                        "SELECT qso_date, time_on, callsign, band, mode, country, lotw_qsl_rcvd, qrz_qsl_rcvd " +
+                        "SELECT qso_date, time_on, callsign, band, mode, country, lotw_qsl_rcvd, qrz_qsl_rcvd, country_shown " +
                         $"FROM qso ORDER BY qso_date DESC, time_on DESC LIMIT {limit};";
                     using (var r = cmd.ExecuteReader())
                     {
@@ -754,6 +768,7 @@ namespace WSJTX_Controller
                                 Country     = Str(r, 5),
                                 LotwQslRcvd = Str(r, 6),
                                 QrzQslRcvd  = Str(r, 7),
+                                ShownCountry = Str(r, 8),
                             });
                     }
                 }
@@ -866,7 +881,7 @@ namespace WSJTX_Controller
                 {
                     cmd.CommandText =
                         "SELECT qso_date, time_on, callsign, band, mode, state, country, dxcc, " +
-                        "lotw_qsl_rcvd, qrz_qsl_rcvd, source " +
+                        "lotw_qsl_rcvd, qrz_qsl_rcvd, source, country_shown " +
                         $"FROM qso WHERE callsign LIKE @p ORDER BY qso_date DESC, time_on DESC LIMIT {limit};";
                     cmd.Parameters.AddWithValue("@p", pattern);
                     using (var r = cmd.ExecuteReader())
@@ -885,6 +900,7 @@ namespace WSJTX_Controller
                                 LotwQslRcvd = Str(r,  8),
                                 QrzQslRcvd  = Str(r,  9),
                                 Source      = Str(r, 10),
+                                ShownCountry = Str(r, 11),
                             });
                     }
                 }
@@ -901,7 +917,7 @@ namespace WSJTX_Controller
         {
             "id", "qso_date", "time_on", "time_off", "callsign", "band", "mode",
             "state", "country", "grid", "name", "rst_sent", "rst_rcvd", "comment",
-            "dxcc", "cq_zone", "lotw_qsl_rcvd", "qrz_qsl_rcvd", "source",
+            "dxcc", "cq_zone", "lotw_qsl_rcvd", "qrz_qsl_rcvd", "source", "country_shown",
         };
 
         private static QsoRecord ReadEditLogRow(IDataReader r) => new QsoRecord
@@ -925,6 +941,7 @@ namespace WSJTX_Controller
             LotwQslRcvd = Str(r, 16),
             QrzQslRcvd  = Str(r, 17),
             Source      = Str(r, 18),
+            ShownCountry = Str(r, 19),
         };
 
         // "Search in" choices on Lookup and Edit (operator, 2026-10-02: "just my POTA contacts for
@@ -1018,6 +1035,9 @@ namespace WSJTX_Controller
                         var cols = searchField == null
                             ? new[] { "callsign" }.Concat(SearchFields.Select(f => f.Column)).ToArray()
                             : SearchFields.Where(f => f.Column == searchField).Select(f => f.Column).ToArray();
+                        // Country finds the name shown as well as the one logged ("Fed. Rep. of Germany" and
+                        // an imported "GERMANY").
+                        cols = cols.SelectMany(c => c == "country" ? new[] { "country", "country_shown" } : new[] { c }).ToArray();
                         if (cols.Length == 0) throw new ArgumentException("Unknown search field: " + searchField);
                         // Typed % and _ are plain characters, not wildcards.
                         where.Add("(" + string.Join(" OR ", cols.Select(c => $"IFNULL({c},'') LIKE @text ESCAPE '\\'")) + ")");
@@ -1273,6 +1293,23 @@ namespace WSJTX_Controller
             }
         }
 
+        // The station calls contacts record, with how many each (LogbookBooks.OwnerFrom).
+        public List<(string Call, int Count)> StationCallCounts()
+        {
+            var result = new List<(string, int)>();
+            lock (_lock)
+            {
+                using (var cmd = _conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT UPPER(TRIM(station_call)), COUNT(*) FROM qso " +
+                                      "WHERE TRIM(IFNULL(station_call,''))!='' GROUP BY 1;";
+                    using (var r = cmd.ExecuteReader())
+                        while (r.Read()) result.Add((Str(r, 0), Convert.ToInt32(r.GetValue(1))));
+                }
+            }
+            return result;
+        }
+
         // Returns best-known country name per DXCC entity, derived from QSO records.
         public Dictionary<int, string> GetDxccCountryNames()
         {
@@ -1281,11 +1318,14 @@ namespace WSJTX_Controller
             {
                 using (var cmd = _conn.CreateCommand())
                 {
-                    // Pick the most-common non-empty country name per DXCC number
+                    // The name the DXCC number itself gives (Nexus 1.19, country_by_dxcc) first, so one
+                    // entity reads one way whatever the imports spelled it; else the most-common
+                    // non-empty logged name. A label only: awards count by the number.
                     cmd.CommandText =
-                        "SELECT dxcc, country, COUNT(*) as c FROM qso " +
-                        "WHERE dxcc>0 AND country!='' AND country IS NOT NULL " +
-                        "GROUP BY dxcc, country ORDER BY dxcc, c DESC;";
+                        "SELECT dxcc, name, SUM(c) FROM (" +
+                        "SELECT dxcc, country_by_dxcc AS name, 1000000 AS c FROM qso WHERE dxcc>0 AND IFNULL(country_by_dxcc,'')!='' " +
+                        "UNION ALL SELECT dxcc, country AS name, 1 AS c FROM qso WHERE dxcc>0 AND IFNULL(country,'')!='') " +
+                        "GROUP BY dxcc, name ORDER BY dxcc, 3 DESC;";
                     using (var r = cmd.ExecuteReader())
                     {
                         while (r.Read())

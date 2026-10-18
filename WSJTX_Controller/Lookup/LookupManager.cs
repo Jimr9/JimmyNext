@@ -238,22 +238,83 @@ namespace WSJTX_Controller
             StartAutoTimer();
         }
 
-        public void StartBackgroundRefreshIfNeeded(int lotwDays, int clubLogDays, int fccUlsDays = 7)
+        // ── Lookup data downloads (operator, 2026-10-17) ──────────────────────────────────
+        // Jimmy needs these files to work, so they are not settings: each is fetched on its
+        // source's own schedule, checked at start and then daily while Jimmy runs (Controller's
+        // lookup-data timer). A failed download is tried again at the next check, every result
+        // goes to Jimmy's log, and a file that has fallen well behind is said once per run. (Until
+        // 2026-10-17 each had a "refresh every N days" box in Options; a 30 there left Club Log's
+        // country data a month old with nothing said.)
+        //   Club Log country data: daily -- Club Log updates it as exceptions come in and asks
+        //     programs not to fetch it more often than that.
+        //   Big CTY prefix data (AD1C): weekly -- released every week or few.
+        //   LoTW user list: weekly -- ARRL regenerates it daily; it tracks recent LoTW activity.
+        //   FCC license data: weekly -- the FCC rebuilds the full file weekly.
+        public const int ClubLogDays = 1, BigCtyDays = 7, LotwUsersDays = 7, FccUlsDays = 7;
+
+        // A file is said to be out of date at three times its schedule, at least a week.
+        internal static int StaleAfterDays(int days) => Math.Max(7, days * 3);
+
+        // One line for Jimmy's log, and one short sentence to say (called on a worker thread).
+        public Action<string> Log;
+        public Action<string> OnStale;
+
+        private readonly HashSet<string> _refreshing = new HashSet<string>();
+        private readonly HashSet<string> _warnedStale = new HashSet<string>();
+        // Club Log's and Big CTY's downloads share one provider (and its LastError): one at a time.
+        private readonly SemaphoreSlim _clubLogGate = new SemaphoreSlim(1, 1);
+
+        public void StartBackgroundRefreshIfNeeded()
         {
-            if (ClubLog.NeedsRefresh(clubLogDays))
-                _ = ClubLog.RefreshAsync();
-            // Same "always on, no Use Lookup Data gate" treatment as the Club Log XML
-            // refresh just above -- this is the alias/exception data FindByCallsign
-            // needs to resolve prefixes correctly (see ClubLogProvider.cs), not a
-            // user-facing lookup feature. Reuses the same refresh cadence.
-            if (ClubLog.NeedsBigCtyRefresh(clubLogDays))
-                _ = ClubLog.RefreshBigCtyAsync();
+            Refresh("Club Log country data", ClubLog.NeedsRefresh(ClubLogDays), ClubLog.RefreshAsync,
+                () => ClubLog.LastError, () => $"{ClubLog.EntityCount:N0} entities", () => ClubLog.LastUpdate, ClubLogDays, _clubLogGate);
+            // Same "always on, no Use Lookup Data gate" treatment as the Club Log XML just above --
+            // the alias/exception data FindByCallsign needs (see ClubLogProvider.cs).
+            Refresh("Big CTY prefix data", ClubLog.NeedsBigCtyRefresh(BigCtyDays), ClubLog.RefreshBigCtyAsync,
+                () => ClubLog.LastError, () => $"{ClubLog.BigCtyAliasCount:N0} prefixes and exceptions", () => ClubLog.BigCtyLastUpdate, BigCtyDays, _clubLogGate);
 
             if (!_useLookupData) return;
-            if (LoTW.IsEnabled && LoTW.NeedsRefresh(lotwDays))
-                _ = LoTW.RefreshAsync();
-            if (FccUls.IsEnabled && FccUls.NeedsRefresh(fccUlsDays))
-                _ = FccUls.RefreshAsync();
+            if (LoTW.IsEnabled)
+                Refresh("LoTW user list", LoTW.NeedsRefresh(LotwUsersDays), LoTW.RefreshAsync,
+                    () => LoTW.LastError, () => $"{LoTW.UserCount:N0} users", () => LoTW.LastUpdate, LotwUsersDays);
+            if (FccUls.IsEnabled)
+                Refresh("FCC license data", FccUls.NeedsRefresh(FccUlsDays), FccUls.RefreshAsync,
+                    () => FccUls.LastError, () => $"{FccUls.RecordCount:N0} callsigns", () => FccUls.LastUpdate, FccUlsDays);
+        }
+
+        private void Refresh(string name, bool due, Func<Task<bool>> download, Func<string> error, Func<string> detail,
+                             Func<DateTime> lastUpdate, int days, SemaphoreSlim gate = null)
+        {
+            if (!due) return;
+            lock (_refreshing) { if (!_refreshing.Add(name)) return; }   // already on its way
+            Task.Run(async () =>
+            {
+                bool ok = false;
+                string why = null;
+                if (gate != null) await gate.WaitAsync().ConfigureAwait(false);
+                try { ok = await download().ConfigureAwait(false); if (!ok) why = error(); }
+                catch (Exception ex) { why = ex.Message; }
+                finally
+                {
+                    gate?.Release();
+                    lock (_refreshing) _refreshing.Remove(name);
+                }
+                if (ok) { Log?.Invoke($"[LOOKUP DATA] {name} updated: {detail()}"); return; }
+                Log?.Invoke($"[LOOKUP DATA] {name} not updated: {(string.IsNullOrWhiteSpace(why) ? "no reason given" : why)}");
+                string warn = StaleWarning(name, lastUpdate(), DateTime.UtcNow, days);
+                if (warn == null) return;
+                lock (_warnedStale) { if (!_warnedStale.Add(name)) return; }   // once per run
+                OnStale?.Invoke(warn);
+            });
+        }
+
+        // The sentence for a file a download could not bring up to date, or null while it is not yet
+        // out of date. Never downloaded at all says so.
+        internal static string StaleWarning(string name, DateTime lastUpdateUtc, DateTime nowUtc, int days)
+        {
+            if (lastUpdateUtc == DateTime.MinValue) return $"{name} could not be downloaded.";
+            int age = (int)Math.Floor((nowUtc - lastUpdateUtc).TotalDays);
+            return age >= StaleAfterDays(days) ? $"{name} is {age} days old and could not be updated." : null;
         }
 
         // ── Synchronous lookups (no network) ────────────────────────────────────

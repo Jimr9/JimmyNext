@@ -994,15 +994,46 @@ pub struct EqslUploadArgs {
 /// Uploads one QSO to eQSL. Returns a wire-tagged outcome ("pending"/"accepted"/"duplicate"/
 /// "rejected"/"authfail") on a successful round trip, or Err with a redacted (never
 /// credential-bearing) message on transport failure.
+/// QRZ_LOGBOOK_STATUS wire args: the QRZ Logbook API key to check.
+#[derive(serde::Deserialize)]
+pub struct QrzLogbookStatusArgs {
+    pub key: String,
+}
+
+/// The Options page's "Test key" (2026-10-17): QRZ Logbook's STATUS action, which proves the API
+/// key and names the logbook it opens WITHOUT adding or changing anything (Nexus's own "Test
+/// connection" uses it). Ok: `{"owner":..,"count":..}`. QRZ echoes the request in its reason, so
+/// the key is taken out of any message before it leaves here.
+pub fn qrz_logbook_status(args: &QrzLogbookStatusArgs) -> Result<serde_json::Value, String> {
+    let key = args.key.trim();
+    if key.is_empty() {
+        return Err("no QRZ Logbook API key".to_string());
+    }
+    let scrub = |s: &str| s.replace(key, "(key)");
+    let body = propagation::live::qrz::post_form(tempo_core::qrz::QRZ_LOGBOOK_URL, tempo_core::qrz::build_status_body(key))
+        .map_err(|e| scrub(&e))?;
+    let st = tempo_core::qrz::parse_status_response(&body);
+    if st.ok {
+        Ok(serde_json::json!({ "owner": st.owner, "count": st.count }))
+    } else {
+        Err(scrub(st.reason.as_deref().unwrap_or("QRZ refused the key")))
+    }
+}
+
+/// The version an eQSL upload names (Nexus 1.19: every upload's header carries `PROGRAMID` Nexus and
+/// this `PROGRAMVERSION`, as eQSL asks of client programs). The Nexus release EngineHost is built
+/// from -- keep it with `nexus-compat/pin.txt`.
+pub const EQSL_PROGRAM_VERSION: &str = "1.19.0";
+
 pub fn eqsl_upload(args: &EqslUploadArgs) -> Result<&'static str, String> {
     // qth_nickname: `None` -- Jimmy Next has no UI for eQSL's multi-profile "QTH Nickname"
     // (new upstream field, Nexus 93b9f012) and single-profile accounts don't need it; wiring
     // it up end-to-end (wire args + Options UI) is a separate feature, not part of this
     // compatibility upgrade.
-    let body = tempo_core::eqsl::build_upload_body(&args.username, &args.password, &args.record_adif, None);
+    let body = tempo_core::eqsl::build_upload_body(&args.username, &args.password, &args.record_adif, None, EQSL_PROGRAM_VERSION);
     let html = eqsl::post_form(tempo_core::eqsl::EQSL_IMPORT_URL, body)?;
     match tempo_core::eqsl::classify_upload(&html) {
-        Some(outcome) => Ok(outcome.code()),
+        Some((outcome, _)) => Ok(outcome.code()),
         None => Err("eQSL: could not classify the upload response".to_string()),
     }
 }
@@ -1079,8 +1110,6 @@ pub fn lotw_download(args: &LotwDownloadArgs) -> Result<LotwDownloadReply, Strin
     let query = tempo_core::lotw::LotwQuery {
         username: args.username.clone(),
         password: args.password.clone(),
-        // No qso_owncall: every callsign in the account, as Jimmy has always downloaded.
-        owncall: None,
         qsl_since: args.since.clone().filter(|s| !s.trim().is_empty()),
     };
     let own_from = args.own_from.as_deref().filter(|s| !s.trim().is_empty());

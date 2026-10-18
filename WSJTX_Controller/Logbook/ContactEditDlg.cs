@@ -127,7 +127,16 @@ namespace WSJTX_Controller
             _qth = Box(t, "QTH", q.Qth);
             _state = Box(t, "State", q.State, upper: true);
             _county = Box(t, "County", q.ExtraValue("CNTY"));
-            _country = Box(t, "Country", q.Country);
+            // The country by the contact's DXCC number (Nexus 1.19), as the lists show it and an
+            // export or upload writes it: a logged spelling variant reads as the standard name (and
+            // a save stores it). A logged text that carries location detail -- a WAE area, another
+            // entity, "NON-DXCC" -- stays as logged, with the number's name read-only beside it;
+            // changing it is the operator's call (or the country check's, once approved).
+            bool standard = q.CountrySpellingOnly && !string.IsNullOrEmpty(q.CountryByDxcc);
+            _country = Box(t, "Country", standard ? q.CountryByDxcc : q.Country);
+            if (!standard && !string.IsNullOrEmpty(q.CountryByDxcc)
+                && !string.Equals((q.Country ?? "").Trim(), q.CountryByDxcc, StringComparison.Ordinal))
+                Box(t, "Country by DXCC", q.CountryByDxcc, readOnly: true);
             _grid = Box(t, "Grid", q.Grid, upper: true);
             _iota = Box(t, "IOTA", q.Ota?.Iota, upper: true);
             _theirProgram = Combo(t, "Their park program", q.Ota?.TheirProgram, Programs);

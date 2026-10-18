@@ -482,6 +482,8 @@ namespace WSJTX_Controller
                             ["freq_hz"] = (long)Math.Round(q.FreqMhz * 1_000_000),
                             ["rst_sent"] = q.RstSent ?? "", ["rst_rcvd"] = q.RstRcvd ?? "",
                             ["state"] = q.State ?? "", ["country"] = country, ["dxcc"] = (long)dxccNum, ["dxcc_derived"] = derived ? 1L : 0L,
+                            ["country_shown"] = string.IsNullOrEmpty(q.ShownCountry) ? country : q.ShownCountry,
+                            ["country_by_dxcc"] = q.CountryByDxcc ?? "",
                             ["cq_zone"] = ExtraLong(q, "CQZ"), ["itu_zone"] = ExtraLong(q, "ITUZ"),
                             ["continent"] = q.ExtraValue("CONT") ?? "", ["county"] = q.ExtraValue("CNTY") ?? "",
                             ["iota"] = !string.IsNullOrEmpty(q.Ota?.Iota) ? q.Ota.Iota : (q.ExtraValue(IotaRawTag) ?? q.ExtraValue("IOTA") ?? ""),

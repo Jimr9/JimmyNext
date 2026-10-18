@@ -57,6 +57,24 @@ namespace WSJTX_Controller
         public string MyRig { get; set; }
         // From LOG_ROWS: the key an edit or delete must send back (Nexus refuses a stale one).
         public string EditKey { get; set; }
+        // From LOG_ROWS (EngineHost logbook_host::country_names, Nexus 1.19's lookups), worked out
+        // as the row is read -- the contact's own Country above stays exactly as logged:
+        //   CountryByDxcc: the entity the contact's DXCC number names (what an export writes);
+        //   ShownCountry: that, else the entity its call places it in (the Country column);
+        //   CallDxcc: the DXCC number its call places it in;
+        //   CountryTextDxcc: the entity the logged Country text itself names (0: "NON-DXCC").
+        public string CountryByDxcc { get; set; }
+        public string ShownCountry { get; set; }
+        public uint? CallDxcc { get; set; }
+        public string CallCountry { get; set; }
+        public uint? CountryTextDxcc { get; set; }
+        // The logged Country is only another spelling of CountryByDxcc (blank, "UNITED STATES OF
+        // AMERICA" for 291...) -- not a WAE area, another entity or "NON-DXCC". Standardized away.
+        public bool CountrySpellingOnly { get; set; }
+        // The entity the grid the station sent places it in, between the logged number and the
+        // call's entity (EngineHost logbook_host::grid_dxcc); null when the grid does not tell.
+        public uint? GridDxcc { get; set; }
+        public string GridCountry { get; set; }
         // Rust (String, String) tuples serialize as two-element arrays.
         public List<List<string>> Extra { get; set; } = new List<List<string>>();
 

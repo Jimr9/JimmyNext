@@ -2077,6 +2077,29 @@ fn handle_control_connection(
                 }
             }
             return;
+        } else if let Some(json) = line.strip_prefix("QRZ_LOGBOOK_STATUS ") {
+            // Options' "Test key": read-only (external_data::qrz_logbook_status).
+            match serde_json::from_str::<external_data::QrzLogbookStatusArgs>(json) {
+                Ok(args) => {
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        match external_data::qrz_logbook_status(&args) {
+                            Ok(v) => {
+                                let _ = writeln!(stream, "OK {v}");
+                            }
+                            Err(e) => {
+                                let _ = writeln!(stream, "ERR {e}");
+                            }
+                        }
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                    });
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad QRZ_LOGBOOK_STATUS args: {e}");
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                }
+            }
+            return;
         } else if let Some(json) = line.strip_prefix("HAMQTH_TEST ") {
             match serde_json::from_str::<external_data::HamQthTestArgs>(json) {
                 Ok(args) => {

@@ -1213,8 +1213,40 @@ namespace WSJTX_Controller
             Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, title, $"{what}{why}. Transmit is stopped."));
         }
         // Tests: the same call DirectApplyStatus makes for a refused key.
-        internal void TestAnnounceKeyRefused(DirectSlotRefusal refusal) =>
-            AnnounceSlotRefusal(refusal, ref _lastSlotKeyRefusedAt, "Radio did not transmit", "The radio did not go into transmit");
+        internal void TestAnnounceKeyRefused(DirectSlotRefusal refusal)
+        {
+            var (title, what) = KeyRefusalWords(refusal);
+            AnnounceSlotRefusal(refusal, ref _lastSlotKeyRefusedAt, title, what);
+        }
+
+        // Nexus 1.19: a refused key is either the radio refusing it, or the sound card's transmit
+        // output not opening (txAudioFailed) -- then the radio refused nothing and was never keyed.
+        internal static (string Title, string What) KeyRefusalWords(DirectSlotRefusal refusal) =>
+            refusal != null && refusal.TxAudioFailed
+                ? ("No transmit audio", "Transmit audio would not open")
+                : ("Radio did not transmit", "The radio did not go into transmit");
+
+        // Nexus 1.19 (RadioStatus.slot_over_dropped): the radio keyed an FT8/FT4 over only after its
+        // period had ended, so Nexus unkeyed at once and sent nothing. Transmit stays ON (as in
+        // WSJT-X), so this is a warning, not "Transmit is stopped". Said for the first of a run and
+        // then every fifth, so a slow radio does not repeat it every period. Null: nothing to say.
+        private ulong _lastSlotOverDroppedAt;
+        internal static string OverDroppedWords(DirectSlotOverDropped d)
+        {
+            if (d == null || d.At == 0) return null;
+            string late = string.IsNullOrWhiteSpace(d.Late) ? "" : $" {d.Late.Trim()}";
+            if (d.Count <= 1) return $"Over dropped: the radio keyed{late} late.";
+            return d.Count % 5 == 0 ? $"{d.Count} overs dropped in a row: the radio keys late." : null;
+        }
+
+        private void AnnounceOverDropped(DirectSlotOverDropped d)
+        {
+            if (d == null || d.At == 0 || d.At == _lastSlotOverDroppedAt) return;
+            _lastSlotOverDroppedAt = d.At;
+            DebugOutput($"{Time()} [RADIO] over dropped: radio keyed {d.Late} after its period ({d.Count} in a row); TX stays on");
+            string words = OverDroppedWords(d);
+            if (words != null) Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Over dropped", words));
+        }
 
         private void ApplyCatHealthNotification(bool? catOk, string catDetail)
         {
@@ -1359,8 +1391,9 @@ namespace WSJTX_Controller
             // transmitting on its own (radio.TxEnabled, reconciled below, turns Jimmy's side
             // off); this says why, once per event -- the event's own time is its identity, so
             // the same one is not repeated on every poll or after a reconnect.
-            AnnounceSlotRefusal(radio.SlotKeyRefused, ref _lastSlotKeyRefusedAt,
-                "Radio did not transmit", "The radio did not go into transmit");
+            var (keyTitle, keyWhat) = KeyRefusalWords(radio.SlotKeyRefused);
+            AnnounceSlotRefusal(radio.SlotKeyRefused, ref _lastSlotKeyRefusedAt, keyTitle, keyWhat);
+            AnnounceOverDropped(radio.SlotOverDropped);
             AnnounceSlotRefusal(radio.SlotUnkeyFailed, ref _lastSlotUnkeyFailedAt,
                 "Radio did not return to receive", "The radio did not return to receive");
             // No `else` that wipes the remembered identity: a resolved episode (warn == null)
@@ -4540,6 +4573,9 @@ namespace WSJTX_Controller
         // again. DirectApplyStatus announces each once.
         public DirectSlotRefusal SlotKeyRefused { get; set; }
         public DirectSlotRefusal SlotUnkeyFailed { get; set; }
+        // Nexus 1.19 (RadioStatus.slot_over_dropped): an over the radio keyed after its period;
+        // nothing was sent and transmit stays on. Absent until it happens.
+        public DirectSlotOverDropped SlotOverDropped { get; set; }
         // Whether the operator's licence class permits transmitting on the current frequency
         // (RadioStatus.tx_allowed). True when no class is set, and when an older engine does not
         // send it.
@@ -4551,6 +4587,16 @@ namespace WSJTX_Controller
     {
         public ulong At { get; set; }
         public string Why { get; set; }
+        // Nexus 1.19: the sound card's transmit output would not open; Why is its own error.
+        public bool TxAudioFailed { get; set; }
+    }
+
+    // Nexus 1.19 (tempo-app/src/dto.rs SlotOverDropped).
+    internal class DirectSlotOverDropped
+    {
+        public ulong At { get; set; }
+        public string Late { get; set; }   // "1.2 s", as Nexus writes it
+        public uint Count { get; set; }    // in a row, this one included
     }
 
     internal class DirectDecodeRow

@@ -55,7 +55,11 @@ namespace WSJTX_Controller
         }
 
         internal static readonly string[] LocationTags = { "STATE", "CNTY", "COUNTRY", "DXCC", "CQZ", "ITUZ", "GRIDSQUARE" };
-        private static readonly HashSet<string> MergeFills = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "STATE", "COUNTRY" };
+        // Nexus 1.19's merge also fills a BLANK logged DXCC number and CQ zone from the row
+        // (reconcile::apply_match), so those leave a paired row too: the contact keeps what was
+        // logged, and the row's values are still kept apart in Located (APP_JIMMY_LOTW_*) and
+        // offered for review, as STATE and COUNTRY always were.
+        private static readonly HashSet<string> MergeFills = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "STATE", "COUNTRY", "DXCC", "CQZ" };
 
         // Club Log's own view of a confirmation (operator, 2026-10-06): a contact Club Log adds is
         // added unconfirmed -- LoTW, QRZ and eQSL downloads say what is confirmed, from the source.
@@ -91,6 +95,21 @@ namespace WSJTX_Controller
         // Nexus's own window (tempo-core reconcile::MATCH_WINDOW_SECS).
         private const long MatchWindowSecs = 30 * 60;
 
+        // How far from a logged contact's minute a download row may be and still be paired with it,
+        // when it is the ONLY contact with that station, band and mode class within Nexus's own
+        // 30-minute window and no other row claims it (2026-10-17: 28 QRZ rows 1-3 minutes off
+        // their only contact were held). Jimmy Next.ini, [Jimmy Next] downloadMatchMinutes; 30 is
+        // what Nexus itself does since 1.18, 0 is the exact minute only (Jimmy's rule before). Never
+        // more than 30: past Nexus's window the row would not pair at all, and a QRZ row would be
+        // added to the log as a new contact.
+        public const int DefaultMatchMinutes = 30;
+        private static int _matchMinutes = DefaultMatchMinutes;
+        public static int MatchMinutes
+        {
+            get => _matchMinutes;
+            set => _matchMinutes = Math.Max(0, Math.Min((int)(MatchWindowSecs / 60), value));
+        }
+
         // The row with one field's value replaced (the field must be there).
         private static string WithField(string raw, string tag, string value)
         {
@@ -123,6 +142,9 @@ namespace WSJTX_Controller
 
         private static string Bucket(string callBand, string modeClass, long day) => $"{callBand}|{modeClass}|{day}";
 
+        private static bool SameCall(string contactCall, string rowBase) =>
+            contactCall != null && LogbookBooks.PortableBase(contactCall) == rowBase;
+
         // LoTW's own-records report only (PromoteLotwReceived), 2026-10-06:
         //   settled: contacts outside logInOrder (already award-confirmed). A row at one of their
         //     minutes, and at no contact in logInOrder, is that contact's own record -- nothing to
@@ -132,9 +154,16 @@ namespace WSJTX_Controller
         // absentOnly (Club Log's download, 2026-10-06): Club Log holds only what was uploaded to it,
         //   so only a contact the log does not hold at all is sent -- added unconfirmed (its
         //   confirmation fields taken out). A row at a logged contact is left out (Dropped).
+        // LoTW only (Nexus 1.19, reconcile::pair_lotw): a row lands only on a contact made under the
+        // call it names (STATION_CALLSIGN), a portable suffix aside. confirmationCall gives the call
+        // Jimmy holds a contact to be made under (LogbookBooks.ConfirmationCall; null: not known),
+        // nexusCall the call Nexus takes a contact with none recorded as (the engine's own, the
+        // profile's). A row whose contact Jimmy and Nexus would see under different calls -- only
+        // a contact with no station call, while the profile is not the owner's -- is held.
         public static Result Prepare(string text, IReadOnlyList<NexusQso> logInOrder, bool nearbyUnique = false,
                                      IReadOnlyList<NexusQso> settled = null, bool collapseSameMinute = false,
-                                     bool absentOnly = false)
+                                     bool absentOnly = false, Func<NexusQso, string> confirmationCall = null,
+                                     string nexusCall = null)
         {
             text = text ?? "";
             var m = Eoh.Match(text);
@@ -218,6 +247,24 @@ namespace WSJTX_Controller
                 if (r.Day == long.MinValue) { Hold(r, "no valid date"); continue; }
                 byMinute.TryGetValue(r.Minute, out var at);
                 if (absentOnly && at != null && at.Count > 0) { result.Dropped++; continue; }   // already logged
+                string rowCall = null;
+                if (confirmationCall != null && at != null && at.Count > 0)
+                {
+                    r.Fields.TryGetValue("STATION_CALLSIGN", out var named);
+                    rowCall = LogbookBooks.PortableBase(string.IsNullOrWhiteSpace(named) ? nexusCall : named);
+                    if (rowCall.Length > 0)
+                    {
+                        if (at.Any(c => confirmationCall(logInOrder[c.Pos]) == null))
+                        {
+                            Hold(r, "a contact at this minute has no station call recorded, and whose call it is is not clear");
+                            continue;
+                        }
+                        var own = at.Where(c => SameCall(confirmationCall(logInOrder[c.Pos]), rowCall)).ToList();
+                        if (own.Count == 0) { Hold(r, $"confirms a contact made as {rowCall}; the one at this minute was made as another call"); continue; }
+                        at = own;
+                    }
+                    else rowCall = null;   // neither names a call: paired as before, as Nexus does
+                }
                 if (at != null && at.Count > 1) { Hold(r, "more than one logged contact at this minute"); continue; }
                 if (at != null && at.Count == 1)
                 {
@@ -225,16 +272,58 @@ namespace WSJTX_Controller
                     // Nexus gives the row to the contact nearest its time. That is this one unless
                     // another contact with the station sits closer across the minute boundary.
                     if (r.When.HasValue && byGroup.TryGetValue(c.Group, out var same)
-                        && same.Any(o => !ReferenceEquals(o, c) && Math.Abs(o.When - r.When.Value) < Math.Abs(c.When - r.When.Value)))
+                        && same.Any(o => !ReferenceEquals(o, c) && Math.Abs(o.When - r.When.Value) < Math.Abs(c.When - r.When.Value)
+                                         && (rowCall == null || SameCall(confirmationCall(logInOrder[o.Pos]), rowCall))))
                     {
                         Hold(r, "another logged contact with this station is nearer to this time than the one at its minute");
                         continue;
+                    }
+                    // Nexus takes a contact with no station call as the profile's call; Jimmy as the
+                    // owner's. Where those differ, Nexus would not put this row on the contact.
+                    if (rowCall != null)
+                    {
+                        string sc = logInOrder[c.Pos].StationCallsign;
+                        string nexusSees = LogbookBooks.PortableBase(string.IsNullOrWhiteSpace(sc) ? nexusCall : sc);
+                        if (nexusSees.Length > 0 && nexusSees != rowCall)
+                        {
+                            Hold(r, $"the contact has no station call recorded and is {rowCall}'s; download again while using a profile with that call");
+                            continue;
+                        }
                     }
                     if (!matched.TryGetValue(c.Bucket, out var g)) matched[c.Bucket] = g = new List<(Row, Contact)>();
                     g.Add((r, c));
                     continue;
                 }
                 if (settledMinutes.Contains(r.Minute)) { result.Dropped++; continue; }
+                // Not at a contact's minute, but within MatchMinutes of the one contact with this
+                // station, band and mode class inside Nexus's 30-minute window: Nexus pairs it with
+                // that contact, so it is sent (as at the minute). Two or more such contacts hold it.
+                if (!absentOnly && MatchMinutes > 0 && r.When.HasValue && byGroup.TryGetValue(r.CallBand + "|" + r.ModeClass, out var group))
+                {
+                    string rowBase = null;
+                    if (confirmationCall != null)
+                    {
+                        r.Fields.TryGetValue("STATION_CALLSIGN", out var named);
+                        rowBase = LogbookBooks.PortableBase(string.IsNullOrWhiteSpace(named) ? nexusCall : named);
+                        if (rowBase.Length == 0) rowBase = null;
+                    }
+                    var inWindow = group.Where(o => Math.Abs(o.When - r.When.Value) <= MatchWindowSecs
+                                                    && (rowBase == null || SameCall(confirmationCall(logInOrder[o.Pos]), rowBase))).ToList();
+                    if (inWindow.Count == 1 && Math.Abs(inWindow[0].When - r.When.Value) <= MatchMinutes * 60L)
+                    {
+                        var c = inWindow[0];
+                        string sc = logInOrder[c.Pos].StationCallsign;
+                        string nexusSees = LogbookBooks.PortableBase(string.IsNullOrWhiteSpace(sc) ? nexusCall : sc);
+                        if (rowBase != null && nexusSees.Length > 0 && nexusSees != rowBase)
+                        {
+                            Hold(r, $"the contact has no station call recorded and is {rowBase}'s; download again while using a profile with that call");
+                            continue;
+                        }
+                        if (!matched.TryGetValue(c.Bucket, out var g)) matched[c.Bucket] = g = new List<(Row, Contact)>();
+                        g.Add((r, c));
+                        continue;
+                    }
+                }
                 if (nearbyUnique)
                 {
                     var cands = new List<Contact>();

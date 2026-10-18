@@ -1134,7 +1134,7 @@ namespace WSJTX_Controller
                 case "band":      return q.Band;
                 case "mode":      return q.Mode;
                 case "state":     return q.State;
-                case "country":   return q.Country;
+                case "country":   return q.CountryShown;   // logged text stays in Edit contact
                 case "confirmed": return ConfirmedText(q.LotwQslRcvd, q.QrzQslRcvd);
                 case "source":    return q.Source;
                 default:          return "";
@@ -1669,7 +1669,7 @@ namespace WSJTX_Controller
                     item.SubItems.Add(q.Callsign);
                     item.SubItems.Add(q.Band);
                     item.SubItems.Add(q.Mode);
-                    item.SubItems.Add(q.Country);
+                    item.SubItems.Add(q.CountryShown);
                     item.SubItems.Add(ConfirmedText(q.LotwQslRcvd, q.QrzQslRcvd));
                     _dashRecentLv.Items.Add(item);
                 }
@@ -1736,7 +1736,7 @@ namespace WSJTX_Controller
             {
                 // QRZ status
                 if (string.IsNullOrWhiteSpace(_qrzApiKey()))
-                    _srcQrzStatusLbl.Text = "QRZ Logbook API key not configured.  (Options > Logbook)";
+                    _srcQrzStatusLbl.Text = "QRZ Logbook API key not configured.  (Options > Logbooks and Lookups)";
                 else
                 {
                     string dt = ReadableDate(_ini?.Read("LogbookLastQrzRefresh"));
@@ -1746,7 +1746,7 @@ namespace WSJTX_Controller
 
                 // LoTW status
                 if (string.IsNullOrWhiteSpace(_lotwUser()))
-                    _srcLotwStatusLbl.Text = "LoTW credentials not configured.  (Options > Logbook)";
+                    _srcLotwStatusLbl.Text = "LoTW credentials not configured.  (Options > Logbooks and Lookups)";
                 else
                 {
                     string dt = ReadableDate(_ini?.Read("LogbookLastLoTWRefresh"));
@@ -1757,7 +1757,7 @@ namespace WSJTX_Controller
                 // eQSL status -- confirmed count is informational only (not an award-eligible
                 // confirmation source, see LogbookDb.EqslConfirmedQsos's own comment).
                 if (string.IsNullOrWhiteSpace(_eqslUsername()) || string.IsNullOrWhiteSpace(_eqslPassword()))
-                    _srcEqslStatusLbl.Text = "eQSL credentials not configured.  (Options > Logbook)";
+                    _srcEqslStatusLbl.Text = "eQSL credentials not configured.  (Options > Logbooks and Lookups)";
                 else
                 {
                     string dt = ReadableDate(_ini?.Read("LogbookLastEqslRefresh"));
@@ -1767,7 +1767,7 @@ namespace WSJTX_Controller
 
                 // Club Log status
                 if (string.IsNullOrWhiteSpace(_clubLogEmail()) || string.IsNullOrWhiteSpace(_clubLogPassword()) || string.IsNullOrWhiteSpace(_clubLogCallsign()))
-                    _srcClubLogStatusLbl.Text = "Club Log upload credentials not configured.  (Options > Logbook)";
+                    _srcClubLogStatusLbl.Text = "Club Log upload credentials not configured.  (Options > Logbooks and Lookups)";
                 else
                 {
                     string dt = ReadableDate(_ini?.Read("LogbookLastClubLogRefresh"));

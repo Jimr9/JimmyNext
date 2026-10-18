@@ -302,10 +302,12 @@ static class JimmyTests
                 new (string, string)[0], "qrz",
                 c => QrzRec(c, "20260901", "0100", null, "C"), 0,
                 E(new (string, bool, bool)[0]), 1),
+            // 2026-10-17 (downloadMatchMinutes, default 30 as Nexus): a row a minute off the ONLY
+            // contact is paired with it, no longer held.
             ("9 report time one minute off the only logged contact",
                 new[] { ("20260901", "0010") }, "qrz",
-                c => QrzRec(c, "20260901", "0011", null, "C"), 1,
-                E(new[] { ("0010", false, false) }), 0),
+                c => QrzRec(c, "20260901", "0011", null, "C"), 0,
+                E(new[] { ("0010", false, true) }), 0),
             ("10 two contacts at the same minute",
                 new[] { ("20260901", "001000"), ("20260901", "001030") }, "lotw",
                 c => Lotw + Rec(c, "20260901", "0010", "Y", null), 1,
@@ -976,6 +978,8 @@ static class JimmyTests
                 string Snap(NexusQso q)
                 {
                     q.EditKey = null; q.Dxcc = null;
+                    // Worked out from the DXCC number as the row is read (Nexus 1.19), not stored.
+                    q.CountryByDxcc = null; q.ShownCountry = null; q.CallDxcc = null; q.CallCountry = null; q.CountryTextDxcc = null;
                     q.Extra = q.Extra.Where(e => e.Count < 1 || !string.Equals(e[0], "CONT", StringComparison.OrdinalIgnoreCase)).ToList();
                     return System.Text.Json.JsonSerializer.Serialize(q, json);
                 }
@@ -1073,8 +1077,13 @@ static class JimmyTests
                         && expRec.IndexOf("<MY_STATE:2>ID", StringComparison.OrdinalIgnoreCase) >= 0 && expRec.IndexOf("<STATE:2>ID", StringComparison.OrdinalIgnoreCase) >= 0, true);
 
                     NexusLogbook.Refresh(force: true);
+                    // Handoff 33: only contacts made as the profile's station call are uploaded.
+                    LogbookBooks.StationCallNow = () => "KB0UZT";
                     var pend = new NexusLogbookService().GetPendingUploads("LOTW").Where(q => q.Callsign == "K7PRK").ToList();
+                    LogbookBooks.StationCallNow = () => null;
                     var plan = TqslUploadClient.PlanBatches(pend, "Home", tqsl, null);
+                    Console.WriteLine($"  LoTW plan: {pend.Count} pending ({string.Join(",", pend.Select(p => p.StationCall))}), {LogbookBooks.LastHeldForOtherCall} held for another call, {plan.Count} batch(es)" +
+                        string.Concat(plan.Select(b => $"; {b.Location} held: {b.HeldWhy ?? "no"}")));
                     Check("LoTW: both contacts sign with the location they were logged at, not the configured one",
                         pend.Count == 2 && plan.Count == 1 && plan[0].HeldWhy == null && plan[0].Location == "Park", true);
 
@@ -1696,6 +1705,10 @@ static class JimmyTests
         SupportReportDraftTests();
         SupportLocalChoiceTests();
         DownloadedChangesTests();
+        Nexus119Tests();
+        ModalElsewhereTests();
+        LookupDataScheduleTests();
+        ServicesPageTests();
         OtherProgramsTests();
         SpotRowsTests();
         SpotPrepareTests();
@@ -4243,6 +4256,29 @@ static class JimmyTests
                 Check("6: an ordinary unbracketed message is stored verbatim",
                       wc.allCallDict.ContainsKey("K1ABC") &&
                       wc.allCallDict["K1ABC"][wc.allCallDict["K1ABC"].Count - 1].Message == myCall + " K1ABC R-09", true);
+            }
+
+            // ── 7. Nexus 1.19 (#410): OUR OWN call is the compound one. Nexus now sends it in
+            //       brackets in the report and roger, as WSJT-X does ("PA0A <OE/PD1SCO> -01"), and
+            //       in full in RR73; the other station's roger names it in brackets too. The
+            //       contact completes and is logged once. ──
+            {
+                const string own = "OE/PD1SCO", dx = "PA0A";
+                DirectSnapshot Own(ulong slot, bool tx, string txNow, string decode) => ParseDirectSnapshot(@"{
+                    ""mycall"": """ + own + @""", ""mygrid"": ""JN78"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": " + (tx ? "true" : "false") + @", ""slot"": " + slot + @" },
+                    ""recentDecodes"": [" + (decode == null ? "" : @"{ ""from"": ""X"", ""snr"": -5, ""dtSec"": 0.2, ""freqHz"": 1500.0, ""message"": """ + Esc(decode) + @""" }") + @"]" +
+                    (txNow == null ? "" : @", ""qso"": { ""state"": ""done"", ""txNow"": """ + Esc(txNow) + @""" }") + @"
+                }");
+                var wc = MakeClient();
+                wc.callInProg = dx;
+                wc.TestApplyDirectSnapshot(own, "JN78", Own(700, true, dx + " <" + own + "> -01", null));
+                Check("7: our report with our own call bracketed is recognized", wc.sentReportList.Contains(dx), true);
+                wc.TestApplyDirectSnapshot(own, "JN78", Own(701, false, null, "<" + own + "> " + dx + " R-05"));
+                Check("7: their roger naming our call in brackets reaches the QSO", wc.allCallDict.ContainsKey(dx), true);
+                wc.TestApplyDirectSnapshot(own, "JN78", Own(702, true, dx + " " + own + " RR73", null));
+                Check("7: our RR73 completes the QSO -> logged once, callInProg cleared",
+                      wc.logList.Contains(dx) && wc.callInProg == null && QueuedCount(dx) == 1, true);
             }
         }
         catch (Exception ex)
@@ -21757,6 +21793,338 @@ static class JimmyTests
     // Handoff 05 (2026-10-12): what a download says about a logged contact's own fields is kept
     // for review and changes nothing until approved. The fixture is the operator's own case:
     // OT9K logged with country NON-DXCC and DXCC 209, QRZ saying Belgium.
+    // Nexus 1.19 (2026-10-17): what Jimmy says for a TX audio failure and a dropped late over;
+    // the country shown and exported by DXCC number with the logged text kept; the merge no longer
+    // fills DXCC or CQ zone; LoTW confirmations by call (handoff 33 owner rules); the country check.
+    static void Nexus119Tests()
+    {
+        Console.WriteLine("\n── Nexus 1.19: transmit words, countries, LoTW identity ──");
+        string folder = Path.Combine(Path.GetTempPath(), "JimmyNexus119_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            // Transmit: a TX audio failure is not "the radio did not transmit"; a dropped over leaves TX on.
+            var audio = WsjtxClient.KeyRefusalWords(new DirectSlotRefusal { At = 1, Why = "device busy", TxAudioFailed = true });
+            CheckStr("TX audio failure: its own words", audio.Title + " / " + audio.What, "No transmit audio / Transmit audio would not open");
+            var key = WsjtxClient.KeyRefusalWords(new DirectSlotRefusal { At = 1, Why = "RPRT -1" });
+            CheckStr("a refused key: as before", key.What, "The radio did not go into transmit");
+            CheckStr("dropped over: said once, with how late", WsjtxClient.OverDroppedWords(new DirectSlotOverDropped { At = 5, Late = "1.2 s", Count = 1 }),
+                "Over dropped: the radio keyed 1.2 s late.");
+            Check("dropped over: the second in a row is not repeated", WsjtxClient.OverDroppedWords(new DirectSlotOverDropped { At = 6, Late = "1.1 s", Count = 2 }) == null, true);
+            CheckStr("dropped over: every fifth in a row is said", WsjtxClient.OverDroppedWords(new DirectSlotOverDropped { At = 9, Late = "1.0 s", Count = 5 }),
+                "5 overs dropped in a row: the radio keys late.");
+            var status = System.Text.Json.JsonSerializer.Deserialize<DirectRadioStatusProbe>(
+                "{\"slotKeyRefused\":{\"at\":7,\"why\":\"x\",\"txAudioFailed\":true},\"slotOverDropped\":{\"at\":8,\"late\":\"0.9 s\",\"count\":1}}",
+                new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase });
+            Check("the engine's fields are read (txAudioFailed, slotOverDropped)",
+                status.SlotKeyRefused.TxAudioFailed && status.SlotOverDropped.Count == 1 && status.SlotOverDropped.Late == "0.9 s", true);
+
+            // Export: COUNTRY by the DXCC number. A spelling variant is simply replaced; a logged
+            // text with location detail travels beside it; the file only.
+            string rec = "<CALL:5>DL1AB <DXCC:3>230 <COUNTRY:7>GERMANY <BAND:3>20m";
+            CheckStr("export: a spelling variant is standardized, not kept",
+                NexusLogbookService.WithCountryByDxcc(rec, "Fed. Rep. of Germany", keepLogged: false),
+                "<CALL:5>DL1AB <DXCC:3>230 <COUNTRY:20>Fed. Rep. of Germany <BAND:3>20m");
+            CheckStr("export: location detail (a WAE area) travels as APP_JIMMY_LOGGED_COUNTRY",
+                NexusLogbookService.WithCountryByDxcc("<CALL:6>IT9ABC <DXCC:3>248 <COUNTRY:6>Sicily", "Italy", keepLogged: true),
+                "<CALL:6>IT9ABC <DXCC:3>248 <COUNTRY:5>Italy <APP_JIMMY_LOGGED_COUNTRY:6>Sicily");
+            CheckStr("export: already the same name, unchanged", NexusLogbookService.WithCountryByDxcc("<COUNTRY:7>Belgium", "Belgium", true), "<COUNTRY:7>Belgium");
+            CheckStr("export: no DXCC name, unchanged", NexusLogbookService.WithCountryByDxcc(rec, null, true), rec);
+            CheckStr("export: no COUNTRY, added", NexusLogbookService.WithCountryByDxcc("<CALL:4>W1AW <DXCC:3>291", "United States", false),
+                "<CALL:4>W1AW <DXCC:3>291 <COUNTRY:13>United States");
+            CheckStr("export: a logged name with a non-ASCII letter is read by its UTF-8 length",
+                NexusLogbookService.WithCountryByDxcc("<COUNTRY:8>Curaçao<BAND:3>20m", "Curacao", true),
+                "<COUNTRY:7>Curacao<BAND:3>20m <APP_JIMMY_LOGGED_COUNTRY:8>Curaçao");
+
+            // The merge no longer fills a blank DXCC or CQ zone; LoTW's values are still kept apart.
+            var t0 = new DateTime(2026, 10, 4, 15, 0, 0, DateTimeKind.Utc);
+            ulong At(int min) => (ulong)new DateTimeOffset(t0.AddMinutes(min)).ToUnixTimeSeconds();
+            string F(string tag, string v) => $"<{tag}:{v.Length}>{v}";
+            string Row(string call, string time, string station, string extra = "") => F("CALL", call) + F("BAND", "20m") + F("MODE", "FT8") +
+                F("QSO_DATE", "20261004") + F("TIME_ON", time) + (station == null ? "" : F("STATION_CALLSIGN", station)) + extra + F("QSL_RCVD", "Y") + "<eor>";
+            var one = new List<NexusQso> { new NexusQso { Id = "1", Call = "EA8ABC", Band = "20m", Mode = "FT8", WhenUnix = At(0), StationCallsign = "KB0UZT" } };
+            var merged = NexusReportPairing.Prepare("<eoh>" + Row("EA8ABC", "1500", "KB0UZT", F("DXCC", "29") + F("CQZ", "33")), one);
+            Check("merge: a paired row carries no DXCC or CQ zone into the contact", merged.Text.Contains("<DXCC:") || merged.Text.Contains("<CQZ:"), false);
+            CheckStr("merge: LoTW's DXCC is still kept apart", merged.Located.Count == 1 ? merged.Located[0].Location["DXCC"] : "?", "29");
+
+            // LoTW by call: two own calls with one station in one minute each get their own row.
+            var two = new List<NexusQso>
+            {
+                new NexusQso { Id = "a", Call = "DL1AB", Band = "20m", Mode = "FT8", WhenUnix = At(0), StationCallsign = "KB0UZT" },
+                new NexusQso { Id = "b", Call = "DL1AB", Band = "20m", Mode = "FT8", WhenUnix = At(0) + 20, StationCallsign = "K4B" },
+            };
+            Func<NexusQso, string> asLogged = q => LogbookBooks.ConfirmationCall(q.StationCallsign);
+            var byCall = NexusReportPairing.Prepare("<eoh>" + Row("DL1AB", "1500", "K4B") + Row("DL1AB", "1500", "KB0UZT/P"), two,
+                confirmationCall: asLogged, nexusCall: "KB0UZT");
+            Check("LoTW: each call's row on its own contact (and /P counts as the call)",
+                byCall.Sent == 2 && byCall.Held == 0 && byCall.Located.Select(l => l.Logged.Id).OrderBy(x => x).SequenceEqual(new[] { "a", "b" }), true);
+            var without = NexusReportPairing.Prepare("<eoh>" + Row("DL1AB", "1500", "K4B"), two);
+            Check("...where without the call both contacts at the minute held it", without.Held == 1 && without.Sent == 0, true);
+            var otherCall = NexusReportPairing.Prepare("<eoh>" + Row("DL1AB", "1500", "W9XYZ"), two, confirmationCall: asLogged, nexusCall: "KB0UZT");
+            Check("LoTW: a row for a call none of the contacts was made as is held", otherCall.Held == 1 && otherCall.Sent == 0, true);
+
+            // A row a few minutes off its ONLY contact is paired, as Nexus pairs it (downloadMatchMinutes).
+            try
+            {
+                var lone = new List<NexusQso> { new NexusQso { Id = "k", Call = "KV2J", Band = "20m", Mode = "FT8", WhenUnix = At(1) } };
+                var off = NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null), lone);
+                Check("matching: a row 1 minute off its only contact is paired", off.Sent == 1 && off.Held == 0 && off.Located.Count == 1, true);
+                var twoNear = new List<NexusQso>
+                {
+                    new NexusQso { Id = "p", Call = "KV2J", Band = "20m", Mode = "FT8", WhenUnix = At(2) },
+                    new NexusQso { Id = "q", Call = "KV2J", Band = "20m", Mode = "FT8", WhenUnix = At(20) },
+                };
+                Check("matching: two contacts within 30 minutes: held", NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null), twoNear).Held == 1, true);
+                var dupes = NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null) + Row("KV2J", "1501", null), lone);
+                Check("matching: two rows for the one contact (a duplicate at QRZ): both held", dupes.Held == 2 && dupes.Sent == 0, true);
+                NexusReportPairing.MatchMinutes = 0;
+                Check("matching: downloadMatchMinutes=0 is the exact minute only (held)", NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null), lone).Held == 1, true);
+                NexusReportPairing.MatchMinutes = 2;
+                var far = new List<NexusQso> { new NexusQso { Id = "f", Call = "KV2J", Band = "20m", Mode = "FT8", WhenUnix = At(5) } };
+                Check("matching: a tighter window holds a row outside it", NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null), far).Held == 1, true);
+                NexusReportPairing.MatchMinutes = 45;
+                Check("matching: never more than Nexus's 30 minutes", NexusReportPairing.MatchMinutes == 30, true);
+            }
+            finally { NexusReportPairing.MatchMinutes = NexusReportPairing.DefaultMatchMinutes; }
+
+            // Handoff 33 owner rules: a contact with no station call is the main logbook owner's.
+            LogbookBooks.ResetForTests();
+            LogbookBooks.TestRoot = folder;
+            CheckStr("owner: the station call most contacts record", LogbookBooks.OwnerFrom(new[] { ("KB0UZT", 2400), ("K4B", 30) }), "KB0UZT");
+            Check("owner: none recorded is not known", LogbookBooks.OwnerFrom(new (string, int)[0]) == null, true);
+            CheckStr("owner: two equally common is unclear", LogbookBooks.OwnerFrom(new[] { ("KB0UZT", 5), ("kb0uzt", 0), ("K4B", 5) }), "");
+            CheckStr("portable: W1ABC/P is W1ABC; W1ABC/9 and FG/W1ABC stay",
+                LogbookBooks.PortableBase("w1abc/p") + " " + LogbookBooks.PortableBase("W1ABC/9") + " " + LogbookBooks.PortableBase("FG/W1ABC"), "W1ABC W1ABC/9 FG/W1ABC");
+            LogbookBooks.MainStationCalls = () => new[] { ("KB0UZT", 100) };
+            LogbookBooks.StationCallNow = () => "K4B";
+            Check("main logbook, profile K4B: the owner's contact with no station call is not uploaded as K4B", LogbookBooks.MayUpload(""), false);
+            CheckStr("...and its confirmations are the owner's", LogbookBooks.ConfirmationCall(""), "KB0UZT");
+            var blank = new List<NexusQso> { new NexusQso { Id = "c", Call = "JA1XYZ", Band = "20m", Mode = "FT8", WhenUnix = At(0) } };
+            var heldForOwner = NexusReportPairing.Prepare("<eoh>" + Row("JA1XYZ", "1500", "KB0UZT"), blank, confirmationCall: asLogged, nexusCall: "K4B");
+            Check("...a LoTW row for it is held while the profile is K4B (Nexus would take it as K4B's), with the reason",
+                heldForOwner.Held == 1 && heldForOwner.Sent == 0 && heldForOwner.HeldDetails[0].Contains("KB0UZT"), true);
+            var asK4b = NexusReportPairing.Prepare("<eoh>" + Row("JA1XYZ", "1500", "K4B"), blank, confirmationCall: asLogged, nexusCall: "K4B");
+            Check("...and a K4B row never lands on the owner's contact", asK4b.Held == 1 && asK4b.Sent == 0, true);
+            LogbookBooks.StationCallNow = () => "KB0UZT";
+            Check("main logbook, owner's profile: uploaded", LogbookBooks.MayUpload(""), true);
+            var asOwner = NexusReportPairing.Prepare("<eoh>" + Row("JA1XYZ", "1500", "KB0UZT"), blank, confirmationCall: asLogged, nexusCall: "KB0UZT");
+            Check("...and confirmed", asOwner.Sent == 1 && asOwner.Held == 0, true);
+            LogbookBooks.MainStationCalls = () => new[] { ("KB0UZT", 5), ("K4B", 5) };
+            Check("owner unclear: held, not guessed", !LogbookBooks.MayUpload("") && LogbookBooks.ConfirmationCall("") == null, true);
+            LogbookBooks.MainStationCalls = () => new (string, int)[0];
+            Check("no station call recorded anywhere: the call in use, as before", LogbookBooks.MayUpload("") && LogbookBooks.ConfirmationCall("") == "KB0UZT", true);
+            LogbookBooks.ResetForTests();
+
+            // The country check: real disagreements only, nothing applied until approved.
+            var now = new DateTime(2026, 10, 17, 12, 0, 0, DateTimeKind.Utc);
+            var list = new NexusDownloadedChanges();
+            var wales = new NexusQso { Id = "w", Call = "MW3WQZ", Band = "20m", Mode = "FT8", WhenUnix = At(0), Country = "England", Dxcc = 223,
+                CountryByDxcc = "England", CallDxcc = 294, CallCountry = "Wales", CountryTextDxcc = 223, Grid = "IO71QX", GridDxcc = 294, GridCountry = "Wales" };
+            // W0XC sent DM68 (Colorado); cty.dat lists the call in Hawaii. Logged right: nothing.
+            // Logged as Hawaii: the grid says the United States, and the country text waits.
+            var w0xcRight = new NexusQso { Id = "x1", Call = "W0XC", Band = "17m", Mode = "FT8", WhenUnix = At(0), Country = "United States", Dxcc = 291,
+                CountryByDxcc = "United States", CallDxcc = 110, CallCountry = "Hawaii", CountryTextDxcc = 291, Grid = "DM68WU", GridDxcc = 291, GridCountry = "United States" };
+            var w0xcWrong = new NexusQso { Id = "x2", Call = "W0XC", Band = "17m", Mode = "FT8", WhenUnix = At(1), Country = "United States", Dxcc = 110,
+                CountryByDxcc = "Hawaii", CallDxcc = 110, CallCountry = "Hawaii", CountryTextDxcc = 291, Grid = "DM68WU", GridDxcc = 291, GridCountry = "United States" };
+            var noGrid = new NexusQso { Id = "g", Call = "MW0ABC", Band = "20m", Mode = "FT8", WhenUnix = At(0), Country = "England", Dxcc = 223,
+                CountryByDxcc = "England", CallDxcc = 294, CallCountry = "Wales", CountryTextDxcc = 223 };
+            var grid = new NexusDownloadedChanges();
+            new[] { w0xcRight, w0xcWrong, noGrid }.Sum(q => grid.CheckCountry(q, now));
+            Check("country check: the call alone is not enough (W0XC sent from Colorado; no grid, nothing)",
+                grid.Items.Select(p => p.ContactId + p.Field + p.Proposed).SequenceEqual(new[] { "x2DXCC291" }), true);
+            var usa = new NexusQso { Id = "u", Call = "W1AW", Band = "20m", Mode = "FT8", WhenUnix = At(0), Country = "UNITED STATES OF AMERICA", Dxcc = 291,
+                CountryByDxcc = "United States", CallDxcc = 291, CallCountry = "United States", CountryTextDxcc = null };
+            var navassa = new NexusQso { Id = "n", Call = "K1N", Band = "20m", Mode = "CW", WhenUnix = At(0), Country = "Navassa Island", Dxcc = 182,
+                CountryByDxcc = "Navassa Island", CallDxcc = 291, CallCountry = "United States", CountryTextDxcc = 182,
+                QslRcvd = new NexusQslRcvd { Lotw = true }, Extra = new List<List<string>> { new List<string> { "APP_JIMMY_LOTW_DXCC", "182" } } };
+            var ot9k = new NexusQso { Id = "o", Call = "OT9K", Band = "15m", Mode = "FT4", WhenUnix = At(0), Country = "NON-DXCC", Dxcc = 209,
+                CountryByDxcc = "Belgium", CallDxcc = 209, CallCountry = "Belgium", CountryTextDxcc = 0 };
+            int added = new[] { wales, usa, navassa, ot9k }.Sum(q => list.CheckCountry(q, now));
+            Check("country check: MW3WQZ (its grid is in Wales) and OT9K (NON-DXCC) only -- not a spelling, not a LoTW-settled K1N",
+                added == 2 && list.Items.Select(p => p.ContactId + p.Field).OrderBy(x => x).SequenceEqual(new[] { "oCountry", "wDXCC" }), true);
+            CheckStr("country check: says what it found and what Apply would do", list.Items.First(p => p.ContactId == "w").Sentence(),
+                "Country check: MW3WQZ 20m FT8 2026-10-04 15:00. DXCC 223 (England), but the grid it sent, IO71QX, is in Wales (294). Apply sets DXCC to 294.");
+            Check("country check: run again, nothing new", new[] { wales, usa, navassa, ot9k }.Sum(q => list.CheckCountry(q, now)) == 0 && list.Items.Count == 2, true);
+            Check("country check: the contact is unchanged until approved", wales.Dxcc == 223 && ot9k.Country == "NON-DXCC", true);
+            var edits = new List<NexusQso>();
+            var applied = list.Apply(list.Items.Where(p => p.ContactId == "w").ToList(), new[] { wales }, q => { edits.Add(q); return null; });
+            Check("country check: approved, it goes through the guarded edit and sets only the DXCC", applied.Applied == 1 && edits.Count == 1
+                && edits[0].Dxcc == 294 && edits[0].Country == "England", true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  Nexus119Tests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            LogbookBooks.ResetForTests();
+            try { Directory.Delete(folder, true); } catch { }
+        }
+    }
+
+    // ModalElsewhere (operator, 2026-10-17): a dialog opened from another window (Logbook Center)
+    // leaves the main window usable and its own window disabled; the main window's own dialog
+    // still holds the main window; and the open dialog is found for the exit / profile guards.
+    static void ModalElsewhereTests()
+    {
+        Console.WriteLine("\n── Dialogs of other windows leave the main window usable ──");
+        TabOrderWalker.OnSTA(() =>
+        {
+            using (var main = new System.Windows.Forms.Form { Text = "main", ShowInTaskbar = false })
+            using (var book = new System.Windows.Forms.Form { Text = "logbook", ShowInTaskbar = false })
+            {
+                main.Show(); book.Show();
+                bool mainUsable = false, bookHeld = false, found = false, ownStillModal = false, foundAfter = true;
+                using (var dlg = new System.Windows.Forms.Form { Text = "rule definitions", ShowInTaskbar = false })
+                {
+                    dlg.Shown += (s, e) =>
+                    {
+                        ModalElsewhere.KeepUsable(main);
+                        mainUsable = IsWindowEnabledT(main.Handle);
+                        bookHeld = !IsWindowEnabledT(book.Handle);
+                        found = ModalElsewhere.OpenDialogOutsideMain(main, book) == dlg.Handle;
+                        dlg.Close();
+                    };
+                    dlg.ShowDialog(book);
+                }
+                foundAfter = ModalElsewhere.OpenDialogOutsideMain(main) != IntPtr.Zero;
+                using (var own = new System.Windows.Forms.Form { Text = "options", ShowInTaskbar = false })
+                {
+                    own.Shown += (s, e) =>
+                    {
+                        ModalElsewhere.KeepUsable(main);
+                        ownStillModal = !IsWindowEnabledT(main.Handle);
+                        own.Close();
+                    };
+                    own.ShowDialog(main);
+                }
+                Check("a Logbook dialog: the main window is usable", mainUsable, true);
+                Check("...and the Logbook itself waits for its dialog", bookHeld, true);
+                Check("...and the open dialog is found (a profile switch brings it forward)", found, true);
+                Check("closed: no dialog is reported", foundAfter, false);
+                Check("the main window's own dialog still holds the main window", ownStillModal, true);
+                Check("after both, every window is usable again", IsWindowEnabledT(main.Handle) && IsWindowEnabledT(book.Handle), true);
+
+                // Alt+F4 on the main window: the open Logbook dialogs close as Cancel would, innermost
+                // first, and then the main window's close goes on.
+                bool thenRan = false, answeredCancel = false;
+                using (var outer = new System.Windows.Forms.Form { Text = "rule definitions", ShowInTaskbar = false })
+                using (var inner = new System.Windows.Forms.Form { Text = "edit rule", ShowInTaskbar = false })
+                {
+                    inner.Shown += (s, e) =>
+                    {
+                        ModalElsewhere.KeepUsable(main);
+                        Check("Alt+F4 with Logbook dialogs open: handled by closing them", ModalElsewhere.CloseDialogsThen(main, () => thenRan = true), true);
+                    };
+                    outer.Shown += (s, e) => { ModalElsewhere.KeepUsable(main); inner.ShowDialog(outer); };
+                    outer.ShowDialog(book);
+                    answeredCancel = outer.DialogResult == System.Windows.Forms.DialogResult.Cancel && inner.DialogResult == System.Windows.Forms.DialogResult.Cancel;
+                }
+                var until = DateTime.UtcNow.AddSeconds(5);
+                while (!thenRan && DateTime.UtcNow < until) { System.Windows.Forms.Application.DoEvents(); System.Threading.Thread.Sleep(20); }
+                Check("...both dialogs closed as Cancel (nothing applied)", answeredCancel, true);
+                Check("...and then the main window's close carried on", thenRan, true);
+                Check("with no dialog open, Alt+F4 closes as usual", ModalElsewhere.CloseDialogsThen(main, () => { }), false);
+            }
+        });
+    }
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "IsWindowEnabled")]
+    static extern bool IsWindowEnabledT(IntPtr hWnd);
+
+    // Lookup data downloads (2026-10-17): each file on its source's schedule, and a short spoken
+    // sentence only once a file has fallen well behind.
+    static void LookupDataScheduleTests()
+    {
+        Console.WriteLine("\n── Lookup data: schedules and the out-of-date warning ──");
+        Check("schedules: Club Log daily, Big CTY, LoTW users and FCC weekly",
+            LookupManager.ClubLogDays == 1 && LookupManager.BigCtyDays == 7 && LookupManager.LotwUsersDays == 7 && LookupManager.FccUlsDays == 7, true);
+        var now = new DateTime(2026, 10, 17, 12, 0, 0, DateTimeKind.Utc);
+        Check("Club Log 6 days old: nothing said", LookupManager.StaleWarning("Club Log country data", now.AddDays(-6), now, LookupManager.ClubLogDays) == null, true);
+        CheckStr("Club Log 28 days old: said, briefly", LookupManager.StaleWarning("Club Log country data", now.AddDays(-28.5), now, LookupManager.ClubLogDays),
+            "Club Log country data is 28 days old and could not be updated.");
+        Check("FCC 20 days old (weekly file): not yet", LookupManager.StaleWarning("FCC license data", now.AddDays(-20), now, LookupManager.FccUlsDays) == null, true);
+        CheckStr("FCC 21 days old: said", LookupManager.StaleWarning("FCC license data", now.AddDays(-21), now, LookupManager.FccUlsDays),
+            "FCC license data is 21 days old and could not be updated.");
+        CheckStr("never downloaded: said so", LookupManager.StaleWarning("LoTW user list", DateTime.MinValue, now, LookupManager.LotwUsersDays),
+            "LoTW user list could not be downloaded.");
+    }
+
+    // Logbooks and Lookups (2026-10-17): one Options page in place of Logbook Sync and Lookup Data,
+    // listed by company with Status first, each entry opening with one sentence.
+    static void ServicesPageTests()
+    {
+        Console.WriteLine("\n── Options: Logbooks and Lookups page ──");
+        TabOrderWalker.OnSTA(() =>
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.hotkeyConfig = new HotkeyConfig();
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            using (var dlg = new OptionsDlg(wc, ctrl))
+            {
+                var _ = dlg.Handle;
+                var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                // The page's own builder (OptionsDlg_Load's Radio page needs real serial ports,
+                // which this test context lacks -- see OptionsDlgKeyboardTraversalBaselineTests' SKIP).
+                typeof(OptionsDlg).GetMethod("BuildServicesTab", flags).Invoke(dlg, null);
+                var categories = (System.Windows.Forms.ListBox)typeof(OptionsDlg).GetField("_categoryListBox", flags).GetValue(dlg);
+                var names = categories.Items.Cast<object>().Select(o => o.ToString()).ToList();
+                Check("one category, Logbooks and Lookups, where Logbook Sync and Lookup Data were",
+                    names.Contains(OptionsDlg.ServicesPageName) && !names.Contains("Logbook Sync") && !names.Contains("Lookup Data"), true);
+                var page = (System.Windows.Forms.Control)typeof(OptionsDlg).GetField("logbookSyncPanel", flags).GetValue(dlg);
+                var list = page.Controls.OfType<System.Windows.Forms.ListBox>().Single();
+                CheckStr("listed by company: Status, General, the accounts, then the automatic downloads",
+                    string.Join(", ", list.Items.Cast<object>()),
+                    "Status, General, QRZ, LoTW, Club Log, eQSL, HRDLog, HamQTH, Country data, FCC license data");
+                IEnumerable<System.Windows.Forms.Control> All(System.Windows.Forms.Control c) =>
+                    c.Controls.Cast<System.Windows.Forms.Control>().SelectMany(x => new[] { x }.Concat(All(x)));
+                list.SelectedIndex = 2;
+                var qrz = All(page).OfType<System.Windows.Forms.GroupBox>().Select(g => g.Text).ToList();
+                Check("QRZ: both logins in one place, titled Callsign lookup and Logbook",
+                    qrz.Contains("QRZ") && qrz.Contains("Callsign lookup") && qrz.Contains("Logbook")
+                    && All(page).Any(c => c.AccessibleName == "QRZ password") && All(page).Any(c => c.AccessibleName == "QRZ Logbook API key"), true);
+                list.SelectedIndex = 0;
+                var status = All(page).OfType<System.Windows.Forms.TextBox>().Single(t => t.AccessibleName == "Status of logbook and lookup services");
+                var lines = status.Text.Split(new[] { Environment.NewLine }, StringSplitOptions.None);
+                Check("Status: one line per service, each starting with its name",
+                    lines.Length == 11 && lines[0].StartsWith("QRZ callsign lookup:") && lines[1].StartsWith("QRZ Logbook:")
+                    && lines.Last().StartsWith("FCC license data:") && status.TabStop && status.ReadOnly, true);
+
+                // The Test buttons, each with the box its result is read from.
+                list.SelectedIndex = 2;
+                Check("QRZ: a Test key button beside the API key",
+                    All(page).Any(c => c.AccessibleName == "Test the QRZ Logbook API key") && All(page).Any(c => c.AccessibleName == "QRZ Logbook key test result"), true);
+                list.SelectedIndex = 3;
+                Check("LoTW: Test sign-in and Check TQSL",
+                    All(page).Any(c => c.AccessibleName == "Test the LoTW sign-in") && All(page).Any(c => c.AccessibleName == "Check TQSL and its station location"), true);
+                list.SelectedIndex = 5;
+                Check("eQSL: Test sign-in", All(page).Any(c => c.AccessibleName == "Test the eQSL sign-in"), true);
+            }
+        });
+        // What the tests say (no network here).
+        CheckStr("QRZ key test: works, the operator's own logbook",
+            OptionsDlg.QrzKeyTestResult(true, "kb0uzt", 2671, null, "KB0UZT"), "The key works: it opens KB0UZT's logbook, 2,671 contacts.");
+        CheckStr("QRZ key test: another call's logbook is said",
+            OptionsDlg.QrzKeyTestResult(true, "K4B", 12, null, "KB0UZT"), "The key works: it opens K4B's logbook, 12 contacts. That is not KB0UZT's logbook.");
+        CheckStr("QRZ key test: refused, with QRZ's reason",
+            OptionsDlg.QrzKeyTestResult(false, null, 0, "invalid api key", "KB0UZT"), "QRZ did not accept the key: invalid api key.");
+        var locs = new Dictionary<string, TqslStationData.Location> { ["Home"] = new TqslStationData.Location { Name = "Home", Call = "kb0uzt" } };
+        CheckStr("TQSL check: not installed", OptionsDlg.TqslCheckResult(false, null, "Home", "KB0UZT"), "TQSL is not installed.");
+        CheckStr("TQSL check: the location and its call", OptionsDlg.TqslCheckResult(true, locs, "Home", "KB0UZT"),
+            "TQSL is installed, with station location Home for KB0UZT.");
+        CheckStr("TQSL check: no such location", OptionsDlg.TqslCheckResult(true, locs, "Park", "KB0UZT"),
+            "TQSL is installed, but it has no station location named Park.");
+        CheckStr("TQSL check: a location for another call is said", OptionsDlg.TqslCheckResult(true, locs, "Home", "K4B"),
+            "TQSL is installed, with station location Home for KB0UZT. That is not K4B.");
+    }
+
+    // What the engine's radio status carries for the two refusals read above (test only).
+    class DirectRadioStatusProbe { public DirectSlotRefusal SlotKeyRefused { get; set; } public DirectSlotOverDropped SlotOverDropped { get; set; } }
+
     static void DownloadedChangesTests()
     {
         Console.WriteLine("\n── Review downloaded changes: proposals, decline, approve, conflicts ──");
@@ -30185,7 +30553,7 @@ static class JimmyTests
         {
             using (var db = new LogbookDb(tmpDb))
             {
-                CheckStr("db_version reaches the current version (11, 2026-10-04)", db.GetMeta("db_version"), "11");
+                CheckStr("db_version reaches the current version (12, 2026-10-17)", db.GetMeta("db_version"), "12");
 
                 InsertQso(db, "K5KPE", "MO", dxcc: 291, zone: 4);
                 var (id, contestId, contestSessionId, modifiedAt) = QueryContestCols(tmpDb, "K5KPE");
@@ -30197,7 +30565,7 @@ static class JimmyTests
             // Re-opening an already-migrated database must not throw and must stay at v10.
             using (var db2 = new LogbookDb(tmpDb))
             {
-                CheckStr("Re-opening an already-v10 database: version unchanged", db2.GetMeta("db_version"), "11");
+                CheckStr("Re-opening an already-v10 database: version unchanged", db2.GetMeta("db_version"), "12");
             }
         }
         finally { try { File.Delete(tmpDb); } catch { } }

@@ -47,7 +47,7 @@ namespace WSJTX_Controller
             var about = new TextBox
             {
                 ReadOnly = true, Multiline = true, BorderStyle = BorderStyle.None, BackColor = SystemColors.Control, TabStop = false,
-                Text = "A download found these differences from your logged contacts. Your log is unchanged. " +
+                Text = "A download or the country check found these differences from your logged contacts. Your log is unchanged. " +
                        "Check the ones you accept, then Apply Checked. Confirmations were already merged and are not affected.",
                 Location = new Point(10, 8), Size = new Size(740, 30), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             };

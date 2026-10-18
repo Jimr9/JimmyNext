@@ -201,7 +201,7 @@ namespace WSJTX_Controller
                 if (rec.Length == 0)
                 {
                     string conf = (configured ?? "").Trim();
-                    Get(conf, conf.Length == 0 ? "TQSL Station Location is not configured (Options > Logbook Sync)" : null).Qsos.Add(q);
+                    Get(conf, conf.Length == 0 ? "TQSL Station Location is not configured (Options > Logbooks and Lookups > LoTW)" : null).Qsos.Add(q);
                     continue;
                 }
                 // 2026-10-12: one judgement shared with the contact editor (TqslStationData.Judge).

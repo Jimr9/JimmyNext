@@ -541,6 +541,26 @@ namespace WSJTX_Controller
             }
         }
 
+        // Options' QRZ Logbook "Test key" (2026-10-17): QRZ's STATUS action -- proves the key and
+        // names the logbook it opens, adding nothing. owner: that logbook's callsign; count: its QSOs.
+        public bool TestQrzLogbook(string apiKey, out string owner, out int count, out string error)
+        {
+            owner = null; count = 0;
+            string json = JsonSerializer.Serialize(new { key = apiKey ?? "" }, JsonOptions);
+            string payload = ParseOkOrError(SendCommand("QRZ_LOGBOOK_STATUS " + json, SlowTimeoutMs), out error);
+            if (error != null) return false;
+            try
+            {
+                using (var doc = JsonDocument.Parse(payload))
+                {
+                    if (doc.RootElement.TryGetProperty("owner", out var o) && o.ValueKind == JsonValueKind.String) owner = o.GetString();
+                    if (doc.RootElement.TryGetProperty("count", out var c) && c.ValueKind == JsonValueKind.Number) count = c.GetInt32();
+                }
+            }
+            catch (JsonException) { }
+            return true;
+        }
+
         // Login only, no lookup spent -- mirrors QrzProvider.TestAsync's own "prove the
         // credentials work" shape, used by the Options dialog's Test Login button.
         public bool TestHamQth(string username, string password, out string error)

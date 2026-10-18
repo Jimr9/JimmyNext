@@ -1,8 +1,8 @@
 diff --git a/src/station.rs b/src/station.rs
-index 20a1420..4d6c503 100644
+index c27973b7..6ada76de 100644
 --- a/src/station.rs
 +++ b/src/station.rs
-@@ -2067,6 +2067,14 @@ pub struct StationCore {
+@@ -2158,6 +2158,14 @@ pub struct StationCore {
      #[allow(clippy::type_complexity)]
      pub(crate) state_resolve:
          Option<Box<dyn Fn(&str, Option<&str>) -> Option<String> + Send + Sync>>,
@@ -17,26 +17,26 @@ index 20a1420..4d6c503 100644
      /// Grid → rarity tier (0–3) resolver, injected by the command layer (which
      /// owns the geography table in the propagation crate) — same pattern as
      /// [`Self::set_dxcc_resolver`]. `None` in headless tests (gems stay off).
-@@ -2209,6 +2217,7 @@ impl StationCore {
-             journals: Default::default(),
+@@ -2301,6 +2309,7 @@ impl StationCore {
              dxcc_resolve: None,
+             dxcc_country: None,
              state_resolve: None,
 +            keep_logged_location: false,
              grid_rarity_resolve: None,
              lotw_resolve: None,
              hunted_parks_import: HashSet::new(),
-@@ -2743,7 +2752,9 @@ impl StationCore {
+@@ -2840,7 +2849,9 @@ impl StationCore {
              match (before, after) {
                  (None, Some(row)) => {
                      let mut row = QsoRecord::clone(&row);
--                    fill_with(&mut row, country, state);
+-                    fill_with(&mut row, country, number, state);
 +                    if !self.keep_logged_location {
-+                        fill_with(&mut row, country, state);
++                        fill_with(&mut row, country, number, state);
 +                    }
                      if row.id.is_none() {
                          row.id = Some(self.minter.mint());
                      }
-@@ -3812,7 +3823,7 @@ impl StationCore {
+@@ -3937,7 +3948,7 @@ impl StationCore {
      /// station's resolver when the edit carries none (the edit form never does), which the edit
      /// then keeps over the stored one.
      pub(crate) fn edit_op(&self, id: RecordId, mut rec: QsoRecord) -> LogOp {
@@ -45,14 +45,16 @@ index 20a1420..4d6c503 100644
              if let Some(resolve) = &self.dxcc_resolve {
                  rec.country = resolve(&rec.call);
              }
-@@ -3864,7 +3875,9 @@ impl StationCore {
-         let card = edit.qsl_card_change(stored);
-         let mut rec = edit.record(stored);
-         // Keep country populated on edits, as `update_qso` does: the form does not carry it.
--        if let Some(resolve) = &self.dxcc_resolve {
+@@ -3991,7 +4002,11 @@ impl StationCore {
+         // Keep country populated on edits, as `update_qso` does: the form does not carry it. It
+         // follows the DXCC number the contact keeps — the edit leaves the stored one, and a
+         // corrected call drops both — and else the call.
+-        rec.country = self.country_for(&rec.call, rec.dxcc.or(stored.dxcc));
 +        if self.keep_logged_location && rec.call.trim().eq_ignore_ascii_case(stored.call.trim()) {
 +            rec.country = stored.country.clone();
-+        } else if let Some(resolve) = &self.dxcc_resolve {
-             rec.country = resolve(&rec.call);
-         }
++        } else {
++            rec.country = self.country_for(&rec.call, rec.dxcc.or(stored.dxcc));
++        }
          let mut ops = vec![LogOp::Edit {
+             id,
+             rec: Box::new(rec),

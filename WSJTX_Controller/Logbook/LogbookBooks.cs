@@ -29,6 +29,12 @@ namespace WSJTX_Controller
     //     profile uses now (STATION_CALLSIGN). One made as another call stays pending. A contact
     //     with no station call recorded is taken as the main logbook owner's (contacts logged by
     //     older versions); in a named logbook it is held.
+    //   - The main logbook owner's call (2026-10-17) is the station call most of its contacts
+    //     record; with none recorded at all, the call in use (as before); with two calls equally
+    //     common, unknown -- and a contact with no station call is then held, never sent or
+    //     confirmed under a guess. The same identity decides uploads (MayUpload) and which LoTW
+    //     confirmations land on which contacts (ConfirmationCall, NexusReportPairing), and a
+    //     portable /P, /M, /MM, /AM or /QRP is the same call for a confirmation, as in Nexus.
     // The list of logbooks is DataRoot\Logbooks\logbooks.ini, shared by every profile.
     public static class LogbookBooks
     {
@@ -68,7 +74,61 @@ namespace WSJTX_Controller
             ActiveId = id;
         }
 
-        internal static void ResetForTests() { ActiveId = MainId; TestRoot = null; StationCallNow = () => null; }
+        // The station calls the main logbook's contacts record, with how many each (read from the
+        // read copy by NexusLogbookService). Null: not known.
+        public static Func<IEnumerable<(string Call, int Count)>> MainStationCalls = () => null;
+
+        internal static void ResetForTests() { ActiveId = MainId; TestRoot = null; StationCallNow = () => null; MainStationCalls = () => null; }
+
+        // The owner's call from the main logbook's recorded station calls: the most common; null
+        // when none is recorded; "" when two are equally common (unknown).
+        internal static string OwnerFrom(IEnumerable<(string Call, int Count)> calls)
+        {
+            var top = (calls ?? Enumerable.Empty<(string Call, int Count)>())
+                .Where(c => !string.IsNullOrWhiteSpace(c.Call) && c.Count > 0)
+                .GroupBy(c => c.Call.Trim().ToUpperInvariant())
+                .Select(g => (Call: g.Key, Count: g.Sum(x => x.Count)))
+                .OrderByDescending(c => c.Count).Take(2).ToList();
+            if (top.Count == 0) return null;
+            return top.Count > 1 && top[1].Count == top[0].Count ? "" : top[0].Call;
+        }
+
+        // Whose a contact with no station call recorded is, in the logbook in use: the main
+        // logbook's owner (the call in use when no contact records one); null -- held -- in a
+        // named logbook, or when the owner is unknown.
+        public static string BlankCallBelongsTo()
+        {
+            if (ActiveId.Length != 0) return null;
+            string owner = OwnerFrom(MainStationCalls?.Invoke());
+            if (owner == null)
+            {
+                string now = (StationCallNow?.Invoke() ?? "").Trim().ToUpperInvariant();
+                return now.Length > 0 ? now : null;
+            }
+            return owner.Length > 0 ? owner : null;
+        }
+
+        // The call a contact was made under, for its confirmations: its station call, or for one
+        // with none recorded, BlankCallBelongsTo(). Null: not known.
+        public static string ConfirmationCall(string contactStationCall)
+        {
+            string was = (contactStationCall ?? "").Trim();
+            return was.Length > 0 ? was.ToUpperInvariant() : BlankCallBelongsTo();
+        }
+
+        // A call without the suffix that only says how it was operated (Nexus 1.19's
+        // reconcile::without_portable_suffix): W1ABC/P is W1ABC; FG/W1ABC and W1ABC/9 stay as they are.
+        public static string PortableBase(string call)
+        {
+            string c = (call ?? "").Trim().ToUpperInvariant();
+            int slash = c.LastIndexOf('/');
+            if (slash > 0)
+            {
+                string suffix = c.Substring(slash + 1);
+                if (suffix == "P" || suffix == "M" || suffix == "MM" || suffix == "AM" || suffix == "QRP") return c.Substring(0, slash);
+            }
+            return c;
+        }
 
         public static Book Active => Find(ActiveId) ?? new Book { Id = ActiveId, Name = ActiveId.Length == 0 ? MainName : ActiveId, ExportOnly = ActiveId.Length > 0 };
 
@@ -140,7 +200,16 @@ namespace WSJTX_Controller
             if (UploadsBlocked) return false;
             string now = (StationCallNow?.Invoke() ?? "").Trim();
             string was = (contactStationCall ?? "").Trim();
-            if (was.Length == 0) return ActiveId.Length == 0;
+            if (was.Length == 0)
+            {
+                // The owner's (2026-10-17): sent only while the profile uses the owner's call, so a
+                // profile on another call never signs the owner's contacts. No call recorded in the
+                // whole logbook: the call in use, as before.
+                if (ActiveId.Length != 0) return false;
+                string owner = OwnerFrom(MainStationCalls?.Invoke());
+                if (owner == null) return true;
+                return owner.Length > 0 && now.Length > 0 && string.Equals(owner, now, StringComparison.OrdinalIgnoreCase);
+            }
             return now.Length > 0 && string.Equals(was, now, StringComparison.OrdinalIgnoreCase);
         }
 

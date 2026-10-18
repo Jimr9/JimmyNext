@@ -821,7 +821,7 @@ pub fn log_upload(host: &LogHost, engine: &Mutex<Engine>, args: LogUploadArgs) -
         Ok(None) => return serde_json::json!({ "state": "unsent", "why": "no such contact" }),
         Err(e) => return serde_json::json!({ "state": "unsent", "why": e }),
     };
-    let adif = tempo_core::logbook::adif_record(&row);
+    let adif = tempo_core::logbook::adif_record(&as_sent(&row));
     let (service, outcome, detail, message) = match args.service.as_str() {
         "qrz" => {
             if args.qrz_key.trim().is_empty() {
@@ -852,12 +852,23 @@ pub fn log_upload(host: &LogHost, engine: &Mutex<Engine>, args: LogUploadArgs) -
             (UploadService::Clublog, push.result.to_upload_outcome(), push.result.to_upload_detail(), push.message)
         }
         "eqsl" => {
-            let body = tempo_core::eqsl::build_upload_body(&args.eqsl_username, &args.eqsl_password, &adif, None);
+            let body = tempo_core::eqsl::build_upload_body(
+                &args.eqsl_username,
+                &args.eqsl_password,
+                &adif,
+                None,
+                crate::external_data::EQSL_PROGRAM_VERSION,
+            );
             let html = match send_eqsl(body) {
                 Ok(h) => h,
                 Err(e) => return serde_json::json!({ "state": "unsent", "why": e }),
             };
-            (UploadService::Eqsl, tempo_core::eqsl::classify_upload(&html), None, None)
+            // Nexus 1.19: a refusal now carries its reason (outside the account's dates, no
+            // account matching the QTH Nickname, ...), kept on the contact as Club Log's is.
+            match tempo_core::eqsl::classify_upload(&html) {
+                Some((outcome, detail)) => (UploadService::Eqsl, Some(outcome), detail, None),
+                None => (UploadService::Eqsl, None, None, None),
+            }
         }
         "hrdlog" => {
             let code = args.hrdlog_code.trim().to_string();
@@ -990,6 +1001,184 @@ fn fold_contest_tags(rec: &mut QsoRecord, old: &QsoRecord) {
     rec.contest = Some(Box::new(c));
 }
 
+/// The names Jimmy shows and exports a contact's country under, worked out as it is read --
+/// nothing is written to the contact (its own COUNTRY stays exactly as logged or imported).
+/// Nexus 1.19's own lookups, called directly rather than registered on the station
+/// (`set_dxcc_country_resolver` would also change how new contacts, edits and the background
+/// fill set COUNTRY, which the keep-logged-location rule does not allow).
+///   - `by_dxcc`: the DXCC entity the contact's own DXCC number names
+///     (`propagation::dxcc::country_by_dxcc`); none for no number or one the table lacks.
+///   - `shown`: that, else the entity the call places it in (`shown_entity`) -- the Country column.
+///   - `call_dxcc`, `call_country`: the DXCC number and entity the call places it in -- for the
+///     review of disagreements.
+///   - `text_dxcc`: the entity the logged COUNTRY text itself names ([`country_text_dxcc`]).
+///   - `spelling_only`: the logged COUNTRY is only another spelling of `by_dxcc` ([`spelling_only`]).
+///   - `grid_dxcc`, `grid_country`: the entity the grid the station sent places it in ([`grid_dxcc`]).
+pub struct CountryNames {
+    pub by_dxcc: Option<&'static str>,
+    pub shown: Option<&'static str>,
+    pub call_dxcc: Option<u32>,
+    pub call_country: Option<&'static str>,
+    pub text_dxcc: Option<u32>,
+    pub spelling_only: bool,
+    pub grid_dxcc: Option<u32>,
+    pub grid_country: Option<&'static str>,
+}
+
+pub fn country_names(r: &QsoRecord) -> CountryNames {
+    let resolved = propagation::dxcc::resolve(&r.call);
+    CountryNames {
+        by_dxcc: r.dxcc.and_then(propagation::dxcc::country_by_dxcc),
+        shown: propagation::dxcc::shown_entity(resolved.as_ref(), r.dxcc),
+        call_dxcc: resolved.and_then(|i| i.dxcc),
+        call_country: resolved.map(|i| i.entity),
+        text_dxcc: r.country.as_deref().and_then(country_text_dxcc),
+        spelling_only: spelling_only(r),
+        grid_dxcc: None,
+        grid_country: None,
+    }
+    .with_grid(r)
+}
+
+impl CountryNames {
+    fn with_grid(mut self, r: &QsoRecord) -> Self {
+        self.grid_dxcc = grid_dxcc(r.grid.as_deref(), &[r.dxcc.unwrap_or(0), self.call_dxcc.unwrap_or(0)]);
+        self.grid_country = self.grid_dxcc.and_then(propagation::dxcc::country_by_dxcc);
+        self
+    }
+}
+
+/// Which DXCC entity the grid square a station sent places it in, between the contact's logged
+/// number and the entity its call gives (`candidates`) -- the evidence the country check asks for
+/// before it suggests changing a DXCC number (operator, 2026-10-17: W0XC sent DM68, Colorado,
+/// while cty.dat lists the call in Hawaii). The United States, Alaska and Hawaii are told apart by
+/// the grid's US state (`gridstate`), which may name one that is not a candidate (W0XC logged as
+/// Hawaii, sent from Colorado). Anywhere else the grid must lie clearly nearer one of the two
+/// entities' cty.dat points (within two thirds of the distance to the other). None: no valid grid,
+/// one candidate only, or not clear -- and then nothing is suggested.
+pub fn grid_dxcc(grid: Option<&str>, candidates: &[u32]) -> Option<u32> {
+    const US: [u32; 3] = [291, 6, 110];
+    let grid = grid?.trim();
+    if !propagation::geo::is_logged_grid(grid) {
+        return None;
+    }
+    let mut cands: Vec<u32> = candidates.iter().copied().filter(|&c| c > 0).collect();
+    cands.sort_unstable();
+    cands.dedup();
+    if cands.is_empty() {
+        return None;
+    }
+    if cands.iter().all(|c| US.contains(c)) {
+        return propagation::gridstate::state_for_grid(grid).map(|st| match st {
+            "AK" => 6,
+            "HI" => 110,
+            _ => 291,
+        });
+    }
+    if cands.len() != 2 {
+        return None;
+    }
+    let at = propagation::geo::maidenhead_to_latlon(grid)?;
+    let point = |code: u32| {
+        let name = propagation::dxcc::country_by_dxcc(code)?;
+        propagation::dxcc::dxcc_entity_locations().find(|(n, _, _)| *n == name).map(|(_, lat, lon)| (lat, lon))
+    };
+    let (a, b) = (point(cands[0])?, point(cands[1])?);
+    let (da, db) = (propagation::geo::haversine_km(at, a), propagation::geo::haversine_km(at, b));
+    if da < db * 2.0 / 3.0 {
+        Some(cands[0])
+    } else if db < da * 2.0 / 3.0 {
+        Some(cands[1])
+    } else {
+        None
+    }
+}
+
+/// Is the contact's logged COUNTRY only another spelling of the name its DXCC number gives --
+/// so standardizing it to that name loses nothing? Blank, the same name spelling aside, or a
+/// text that names no entity Nexus knows ("UNITED STATES OF AMERICA" for 291) is. A text that
+/// names ANOTHER entity, says "NON-DXCC", or names a WAE area (Sicily, a finer location than the
+/// number's Italy) is not: that is location detail, kept and offered for review. False with no
+/// name to standardize to (no DXCC number, or one Nexus does not know).
+pub fn spelling_only(r: &QsoRecord) -> bool {
+    let (Some(code), Some(name)) = (r.dxcc, r.dxcc.and_then(propagation::dxcc::country_by_dxcc)) else {
+        return false;
+    };
+    let text = r.country.as_deref().unwrap_or("").trim();
+    if text.is_empty() || country_key(text) == country_key(name) {
+        return true;
+    }
+    match country_text_dxcc(text) {
+        Some(named) => named == code,
+        None => !names_an_area(text),
+    }
+}
+
+/// Whether `text` names a WAE / CQ-only area (Sicily, Shetland Islands, European Turkey...), an
+/// entity of cty.dat's that is no DXCC entity of its own.
+fn names_an_area(text: &str) -> bool {
+    static AREAS: std::sync::LazyLock<std::collections::HashSet<String>> = std::sync::LazyLock::new(|| {
+        let dxcc: std::collections::HashSet<&str> = propagation::dxcc::dxcc_entity_names().into_iter().collect();
+        propagation::dxcc::entity_continents()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| !dxcc.contains(name))
+            .map(country_key)
+            .collect()
+    });
+    AREAS.contains(&country_key(text))
+}
+
+/// A contact as it leaves for a logbook service (QRZ, Club Log, eQSL, HRDLog): its COUNTRY the
+/// name its own DXCC number gives, as the Nexus desktop sends it (`log_queries::sent`), so no
+/// service is handed a DXCC and a COUNTRY that disagree. The DXCC number itself and every other
+/// field go as stored; the stored contact is not changed.
+pub fn as_sent(r: &QsoRecord) -> QsoRecord {
+    let mut sent = r.clone();
+    if let Some(name) = r.dxcc.and_then(propagation::dxcc::country_by_dxcc) {
+        sent.country = Some(name.to_string());
+    }
+    sent
+}
+
+/// A country name with spelling taken out: capitals, punctuation, "&" for "and", "St" for
+/// "Saint", and the words that only dress a name ("Republic of", "Island(s)", "Fed.", "and"). So
+/// "St Vincent", "SAINT VINCENT" and "St. Vincent" are one name, and so are "Bosnia and
+/// Herzegovina" and "Bosnia-Herzegovina".
+fn country_key(text: &str) -> String {
+    const DRESS: [&str; 10] = ["THE", "OF", "AND", "REPUBLIC", "REP", "FED", "FEDERAL", "ISLAND", "ISLANDS", "IS"];
+    text.to_ascii_uppercase()
+        .replace('&', " AND ")
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty() && !DRESS.contains(w))
+        .map(|w| if w == "ST" { "SAINT" } else { w })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The DXCC entity a logged COUNTRY text names on its own, when it names exactly one: by its
+/// name as Nexus spells it, or the ARRL's for a deleted entity, spelling aside ([`country_key`]).
+/// `Some(0)` for a text that says the contact is in no DXCC entity ("NON-DXCC"). `None` for a
+/// text that names none, or two at once ("Germany": today's and the deleted one) -- a spelling
+/// Nexus does not know is never taken as a disagreement.
+pub fn country_text_dxcc(text: &str) -> Option<u32> {
+    static BY_KEY: std::sync::LazyLock<std::collections::HashMap<String, Option<u32>>> = std::sync::LazyLock::new(|| {
+        let mut m = std::collections::HashMap::new();
+        for e in propagation::dxcc::entities() {
+            m.entry(country_key(e.name))
+                .and_modify(|v: &mut Option<u32>| if *v != Some(e.code) { *v = None })
+                .or_insert(Some(e.code));
+        }
+        m
+    });
+    let key = country_key(text);
+    match key.as_str() {
+        "" => None,
+        "NON DXCC" | "NONDXCC" | "NO DXCC" | "NONE" => Some(propagation::dxcc::NO_DXCC_ENTITY),
+        k => BY_KEY.get(k).copied().flatten(),
+    }
+}
+
 /// LOG_ROWS's argument.
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -1019,8 +1208,17 @@ pub fn rows_json(engine: &Mutex<Engine>, args: &LogRowsArgs) -> String {
                 .map(|r| {
                     let key = tempo_core::logbook::QsoEdit::project(&r).key();
                     let contest = contest_tags(&r);
+                    let names = country_names(&r);
                     let mut v = serde_json::to_value(LoggedQso::from(r)).unwrap_or_default();
                     v["editKey"] = serde_json::Value::String(key);
+                    v["countryByDxcc"] = serde_json::json!(names.by_dxcc);
+                    v["shownCountry"] = serde_json::json!(names.shown);
+                    v["callDxcc"] = serde_json::json!(names.call_dxcc);
+                    v["callCountry"] = serde_json::json!(names.call_country);
+                    v["countryTextDxcc"] = serde_json::json!(names.text_dxcc);
+                    v["countrySpellingOnly"] = serde_json::json!(names.spelling_only);
+                    v["gridDxcc"] = serde_json::json!(names.grid_dxcc);
+                    v["gridCountry"] = serde_json::json!(names.grid_country);
                     if let Some(extra) = v["extra"].as_array_mut() {
                         extra.extend(contest.into_iter().map(|(k, val)| serde_json::json!([k, val])));
                     }
@@ -1339,6 +1537,87 @@ mod tests {
         let key = row["editKey"].as_str().unwrap().to_string();
         assert_eq!(log_edit(&host, &eng, LogEditArgs { id, edit_key: key, qso: fix }).state, "saved");
         assert!(first_row(&eng)["extra"].to_string().contains("3A NL"));
+    }
+
+    /// The country Jimmy shows and exports follows the contact's own DXCC number where it names an
+    /// entity, else its call -- and nothing about the stored contact changes.
+    #[test]
+    fn country_names_follow_the_dxcc_number_and_keep_the_logged_text() {
+        let one = |adif: &str| tempo_core::logbook::parse_adif(adif).into_iter().next().expect("a record");
+        // K1N on Navassa: the record's number (182) wins over the US-style call.
+        let navassa = one("<CALL:3>K1N<QSO_DATE:8>20150201<TIME_ON:4>1200<BAND:3>20m<MODE:2>CW<DXCC:3>182<COUNTRY:24>UNITED STATES OF AMERICA<EOR>");
+        let n = country_names(&navassa);
+        assert_eq!(n.by_dxcc, Some("Navassa Island"));
+        assert_eq!(n.shown, Some("Navassa Island"));
+        assert_eq!(n.call_dxcc, Some(291), "the call alone places it in the United States");
+        assert_eq!(n.call_country, Some("United States"));
+        assert_eq!(navassa.country.as_deref(), Some("UNITED STATES OF AMERICA"), "the logged text is untouched");
+        // A WAE area carrying its parent's number is shown as the DXCC entity (Sicily -> Italy).
+        let sicily = one("<CALL:6>IT9ABC<QSO_DATE:8>20260101<TIME_ON:4>1200<BAND:3>20m<MODE:3>FT8<DXCC:3>248<EOR>");
+        assert_eq!(country_names(&sicily).shown, Some("Italy"));
+        // A deleted entity keeps its own name.
+        let gdr = one("<CALL:4>Y21A<QSO_DATE:8>19880101<TIME_ON:4>1200<BAND:3>20m<MODE:2>CW<DXCC:3>229<EOR>");
+        assert!(country_names(&gdr).by_dxcc.is_some_and(|c| c.to_ascii_uppercase().contains("GERMAN")));
+        // No number: shown by the call; nothing to export by number.
+        let w1aw = one("<CALL:4>W1AW<QSO_DATE:8>20260101<TIME_ON:4>1200<BAND:3>20m<MODE:3>FT8<EOR>");
+        let n = country_names(&w1aw);
+        assert_eq!((n.by_dxcc, n.shown, n.call_dxcc), (None, Some("United States"), Some(291)));
+    }
+
+    /// A logged country text counts as naming an entity only when it clearly names one.
+    #[test]
+    fn a_country_text_names_an_entity_only_when_it_clearly_does() {
+        assert_eq!(country_text_dxcc("England"), Some(223));
+        assert_eq!(country_text_dxcc("WALES"), Some(294));
+        assert_eq!(country_text_dxcc("St Vincent"), Some(98), "spelling aside");
+        assert_eq!(country_text_dxcc("SAINT VINCENT"), Some(98));
+        assert_eq!(country_text_dxcc("NON-DXCC"), Some(0));
+        assert_eq!(country_text_dxcc("Germany"), None, "today's Germany and the deleted one: names neither");
+        assert_eq!(country_text_dxcc("UNITED STATES OF AMERICA"), None, "a spelling Nexus does not know");
+        assert_eq!(country_text_dxcc("Sicily"), None, "a WAE area is no DXCC entity");
+        assert_eq!(country_text_dxcc("  "), None);
+    }
+
+    /// Only a spelling is standardized away; location detail is not. Uploads send the number's name.
+    #[test]
+    fn a_spelling_is_standardized_and_location_detail_is_kept() {
+        let rec = |call: &str, dxcc: &str, country: &str| {
+            let mut a = format!("<CALL:{}>{call}<QSO_DATE:8>20260101<TIME_ON:4>1200<BAND:3>20m<MODE:3>FT8", call.len());
+            if !dxcc.is_empty() { a += &format!("<DXCC:{}>{dxcc}", dxcc.len()); }
+            if !country.is_empty() { a += &format!("<COUNTRY:{}>{country}", country.len()); }
+            tempo_core::logbook::parse_adif(&(a + "<EOR>")).into_iter().next().expect("a record")
+        };
+        for (call, dxcc, country) in [
+            ("W1AW", "291", "UNITED STATES OF AMERICA"), ("DL1AB", "230", "Germany"), ("DL1AB", "230", "FEDERAL REPUBLIC OF GERMANY"),
+            ("E73A", "501", "Bosnia and Herzegovina"), ("J88X", "98", "St Vincent"), ("UA3A", "54", "Russia"), ("W1AW", "291", ""),
+        ] {
+            assert!(spelling_only(&rec(call, dxcc, country)), "{country} is a spelling of DXCC {dxcc}'s name");
+        }
+        for (call, dxcc, country, why) in [
+            ("IT9ABC", "248", "Sicily", "a WAE area: finer than Italy"),
+            ("MW3WQZ", "223", "Wales", "another entity than the number's England"),
+            ("OT9K", "209", "NON-DXCC", "says no DXCC entity"),
+            ("W1AW", "", "UNITED STATES OF AMERICA", "no number: nothing to standardize to"),
+        ] {
+            assert!(!spelling_only(&rec(call, dxcc, country)), "{country}: {why}");
+        }
+        let sent = as_sent(&rec("W1AW", "291", "UNITED STATES OF AMERICA"));
+        assert_eq!((sent.country.as_deref(), sent.dxcc), (Some("United States"), Some(291)), "the number's name, the number unchanged");
+        let none = as_sent(&rec("W1AW", "", "UNITED STATES OF AMERICA"));
+        assert_eq!(none.country.as_deref(), Some("UNITED STATES OF AMERICA"), "no number: sent as logged");
+    }
+
+    /// The grid a station sent decides between its logged DXCC number and its call's entity.
+    #[test]
+    fn the_grid_sent_decides_the_dxcc_entity() {
+        assert_eq!(grid_dxcc(Some("IO71QX"), &[223, 294]), Some(294), "MW3WQZ: the grid is in Wales, not England");
+        assert_eq!(grid_dxcc(Some("EK66MM"), &[291, 80]), Some(80), "NG7E/HR9: Honduras");
+        assert_eq!(grid_dxcc(Some("DM68WU"), &[291, 110]), Some(291), "W0XC: Colorado, whatever cty.dat says of the call");
+        assert_eq!(grid_dxcc(Some("DM68WU"), &[110, 110]), Some(291), "...and logged as Hawaii, the grid still says the United States");
+        assert_eq!(grid_dxcc(Some("BP40"), &[291, 6]), Some(6), "W1AW/KL7: Alaska");
+        assert_eq!(grid_dxcc(None, &[223, 294]), None, "no grid: nothing to go on");
+        assert_eq!(grid_dxcc(Some("IO71QX"), &[294, 294]), None, "one candidate outside the US: nothing to decide");
+        assert_eq!(grid_dxcc(Some("ZZ99"), &[223, 294]), None, "not a grid");
     }
 
     #[test]

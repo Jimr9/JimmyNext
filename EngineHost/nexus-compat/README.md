@@ -59,6 +59,49 @@ stay pinned; do NOT import `main`. What the next stable upgrade needs:
   SET_CLOCK_CHECK uses Nexus's public `apply_settings` + `clear_clock_offset(true)`; ATU_STATUS
   reads PTT with Nexus's `Rig::read_ptt`. Both are public API -- check they still exist.
 
+## Nine-patch re-assessment -- 2026-10-17 (v1.18.0 -> v1.19.0 upgrade)
+
+Pin moved to stable **v1.19.0** (`02231438`; annotated tag object `de14f5cc`), nothing taken from
+`main` (137 commits past 1.19.0 at `534d1bb7`, remote/client-mode work outside the crates Jimmy
+uses). Every patch was tried against the pristine v1.19.0 files and EngineHost compiled against
+them before anything here changed.
+
+- **`tempo-app-station.patch` re-derived by hand.** 1.19 names a contact's COUNTRY by its DXCC
+  number (`station::country_from`, `fill_with(.., number, ..)`, `country_for` in `edit_ops`). The
+  keep-logged-location gate now wraps the new fill and the new edit line; same rule, same tests.
+  Jimmy does NOT call `set_dxcc_country_resolver`: that would also change how inserts, edits and
+  the background fill set COUNTRY. EngineHost calls the lookups directly instead
+  (`logbook_host::country_names`) and hands Jimmy `countryByDxcc` / `shownCountry` / `callDxcc` /
+  `callCountry` / `countryTextDxcc` / `countrySpellingOnly` with each LOG_ROWS row; nothing is
+  written to a contact. Country names are standardized to the DXCC number's name in the lists,
+  ADIF exports and uploads (`logbook_host::as_sent` for QRZ / Club Log / eQSL / HRDLog, as the
+  Nexus desktop's `log_queries::sent`); a logged text that is only a spelling variant is dropped,
+  one with location detail (WAE area, another entity, NON-DXCC) is kept in the export as
+  APP_JIMMY_LOGGED_COUNTRY and offered by the country check. DXCC numbers are never changed
+  without the operator's approval.
+- **`tempo-app-engine.patch`:** refreshed for offsets (one hunk needed fuzz 2); payload identical.
+- **The other seven** apply unchanged; upstream still lacks each (message.rs, inbox.rs,
+  rigctld_proc.rs and build.rs are untouched since 1.18).
+- **EngineHost compile fixes:** `LotwQuery.owncall` is gone (both LoTW downloads now ask for every
+  call on the account -- Jimmy always did); `eqsl::build_upload_body` takes a program version
+  (`external_data::EQSL_PROGRAM_VERSION`, keep it with the pin -- eQSL now sees PROGRAMID Nexus);
+  `eqsl::classify_upload` returns the refusal's reason too, now recorded on the contact.
+- **rustls 0.23.43 -> 0.23.46** in EngineHost's own Cargo.lock (RUSTSEC-2026-0346..0349). The pin
+  does not move it: EngineHost has its own lockfile.
+- **Behaviour Jimmy now follows:** `RadioStatus.slot_key_refused.tx_audio_failed` (the sound card's
+  output would not open; announced as "No transmit audio") and `slot_over_dropped` (an FT8/FT4
+  over the radio keyed after its period: dropped, TX stays on; announced first and every fifth).
+- **Merge fills:** `reconcile::apply_match` now also fills a BLANK DXCC and CQ zone from a
+  download row. `NexusReportPairing` strips DXCC and CQZ from paired rows as it did STATE and
+  COUNTRY; LoTW's values stay in APP_JIMMY_LOTW_*. Nexus's own `APP_NEXUS_LOTW_DXCC` is then not
+  written (it needs the row's DXCC).
+- **LoTW pairs by call** (`reconcile::pair_lotw`). `NexusReportPairing` takes the same rule, with
+  handoff 33's owner rule for a contact with no station call (`LogbookBooks.ConfirmationCall`).
+- **Not adopted:** Nexus's award counting (`awards::counted_entity`, LoTW's number first, WAE as
+  parent); Jimmy keeps its own per-award rules.
+- **Upstream's own warning** `capture_bounded is never used` (tempo-audio rigctld_proc.rs, a helper
+  used only off Windows) is not ours.
+
 ## Nine-patch re-assessment -- 2026-10-13 (v1.17.0 -> v1.18.0 upgrade)
 
 Pin moved to stable **v1.18.0** (`03ac4c3c`; annotated tag object `1e7e65ae`), nothing taken from
@@ -399,7 +442,7 @@ backoff only changes *when* that funnel runs, not whether it runs. See
 `jimmy_compat_rfpower_write_protection_survives_reopen_and_new_rigs_while_meters_flow` in
 `service.rs`'s test module for the regression proof.
 
-## Current patches (against Nexus `v1.18.0`, commit `03ac4c3c`)
+## Current patches (against Nexus `v1.19.0`, commit `02231438`)
 
 Nine patches since 2026-10-13, **one source file each** (the snapshot and solar-wind patches are retired -- see the v1.18.0 re-assessment above) -- (`prepare-nexus.ps1` and the `patches/` directory are
 the source of truth; the ten are itemised in the `###` sections below). Jimmy's downstream

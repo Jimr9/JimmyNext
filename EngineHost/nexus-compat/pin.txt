@@ -6,13 +6,16 @@
 # pin, and its "Checking a patch against a newer Nexus" section for what to do when this pin
 # is updated.
 #
-# This integration pins the newest official STABLE release tag, v1.18.0 (2026-10-13), by its
+# This integration pins the newest official STABLE release tag, v1.19.0 (2026-10-16), by its
 # exact commit. NEXUS_COMMIT is the real lock; NEXUS_TAG is the honest human reference.
 # prepare-nexus.ps1 clones --branch NEXUS_TAG --single-branch and then verifies the resolved
-# HEAD equals NEXUS_COMMIT exactly. v1.18.0 is an ANNOTATED tag (tag object 1e7e65ae); the
+# HEAD equals NEXUS_COMMIT exactly. v1.19.0 is an ANNOTATED tag (tag object de14f5cc); the
 # commit below is the peeled commit it points at, which is what HEAD resolves to.
 #
-# Upgraded 2026-10-13 from v1.17.0 (177e0b94): nine patches. propagation-solar-wind.patch retired
+# Upgraded 2026-10-17 from v1.18.0 (03ac4c3c): nine patches kept. tempo-app-station.patch re-derived
+# by hand (1.19 fills a contact's COUNTRY from its DXCC number; the keep-logged-location gate now
+# wraps the new fill and edit code, same rule); tempo-app-engine.patch refreshed (offsets only).
+# Earlier: upgraded 2026-10-13 from v1.17.0 (177e0b94): nine patches. propagation-solar-wind.patch retired
 # (#404 is fixed upstream) and tempo-app-snapshot.patch retired with Jimmy's own Fake-It restore:
 # Nexus 1.18 restores the dial itself after every over and reports a failure in the CAT status
 # text, which Jimmy now announces. The service and slot patches shrank to Status.tx_message and the
@@ -28,10 +31,12 @@
 # re-assessment.
 
 NEXUS_REPO=https://github.com/kd9taw/Nexus.git
-NEXUS_TAG=v1.18.0
-NEXUS_COMMIT=03ac4c3c0035384dc24d18d6ad299de59bea506f
+NEXUS_TAG=v1.19.0
+NEXUS_COMMIT=02231438baa41765eb13d82d5be6177cb38c8226
 
-# DISPOSITION: 2026-10-13 -- pinned AT stable v1.18.0 (operator approved the upgrade), nothing from main.
+# DISPOSITION: 2026-10-17 -- pinned AT stable v1.19.0 (operator approved the upgrade), nothing from main
+# (main reviewed at 137 commits past 1.19.0, 534d1bb7: remote/client-mode work, none in the crates Jimmy uses).
+# Was: 2026-10-13 -- pinned AT stable v1.18.0 (operator approved the upgrade), nothing from main.
 # Was: 2026-10-12 -- pinned AT stable v1.17.0 plus one named fix from main (solar wind, bdb832e4);
 # main reviewed at 592 commits past 1.17.0 (4b72d5a2), not imported. Was: 2026-10-04 -- pinned AT stable v1.16.0 (operator approved the upgrade). Was: 2026-09-29 -- stay pinned AT stable v1.15.0 (main reviewed at 191 commits past it;
 # see README.md "Next upgrade readiness"). Was: 2026-09-28 -- pinned AT the current stable tag v1.15.0. Re-review with

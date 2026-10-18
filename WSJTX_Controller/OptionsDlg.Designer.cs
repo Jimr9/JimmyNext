@@ -111,8 +111,7 @@ namespace WSJTX_Controller
                 "Decode",
                 "Frequencies",
                 "Notifications",
-                "Logbook Sync",
-                "Lookup Data",
+                "Logbooks and Lookups",
                 "Appearance",
                 "Station & Operator",
                 "Profiles"});
@@ -386,7 +385,7 @@ namespace WSJTX_Controller
             //
             // logbookSyncPanel
             //
-            this.logbookSyncPanel.AccessibleName = "Logbook Sync";
+            this.logbookSyncPanel.AccessibleName = "Logbooks and Lookups";
             this.logbookSyncPanel.AutoScroll = true;
             this.logbookSyncPanel.Dock       = System.Windows.Forms.DockStyle.Fill;
             this.logbookSyncPanel.Name       = "logbookSyncPanel";

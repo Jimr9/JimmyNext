@@ -1,8 +1,8 @@
 diff --git a/src/engine.rs b/src/engine.rs
-index dfb703b..cf5f7d7 100644
+index 410cfa59..6a9bb50e 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
-@@ -3157,6 +3157,8 @@ pub struct Engine {
+@@ -3242,6 +3242,8 @@ pub struct Engine {
      /// The last ingest's decodes as they were ON AIR (pre hound-split/rewrite)
      /// — what UDP consumers receive. Identical to `last_decodes` outside Hound.
      last_wire_decodes: Vec<modes::Decode>,
@@ -11,15 +11,15 @@ index dfb703b..cf5f7d7 100644
      /// Directed-CQ token for CQ runs ("DX", "NA", "POTA", …): applied to the
      /// run's CQ message at start AND on the return-to-CQ after each pileup
      /// contact. None = plain CQ. Sticky until the operator starts a plain run
-@@ -5588,6 +5590,7 @@ impl Engine {
+@@ -5770,6 +5772,7 @@ impl Engine {
              hrd_link_up: None,
              cq_dir: None,
              last_wire_decodes: Vec::new(),
 +            last_decodes_multiplexed: Vec::new(),
              tx_dial_shift_hz: 0,
+             prebuilt_over: None,
              tx_gate_gen: 0,
-             remote_receiver_gen: 0,
-@@ -9194,6 +9197,15 @@ impl Engine {
+@@ -9443,6 +9446,15 @@ impl Engine {
      /// The mode the radio loop should COMMAND: the operator's transient Phone override when set,
      /// else the band-derived policy (`settings.rig_mode`). Write-side canon for the rig `M` verb.
      pub fn rig_mode_effective(&self) -> String {
@@ -35,7 +35,7 @@ index dfb703b..cf5f7d7 100644
          // APRS parks the rig in FM regardless of the operating section it was navigated from — a
          // 2 m packet signal demodulated as USB is garbage, so this is a correctness gate, not a
          // preference. Gated on STILL being on 2 m: a knob-QSY (`observe_rig_freq`) or a manual
-@@ -9907,6 +9919,14 @@ impl Engine {
+@@ -10158,6 +10170,14 @@ impl Engine {
          self.settings.decode_depth = depth.clamp(1, 3);
      }
  
@@ -50,7 +50,7 @@ index dfb703b..cf5f7d7 100644
      /// Operator CW decode sensitivity in [0, 1] (0.5 = the original gates; higher catches
      /// weaker/off-pitch marks like the skimmer, lower rejects more noise).
      pub fn set_cw_sensitivity(&mut self, s: f32) {
-@@ -15522,6 +15542,18 @@ Pick the one you operate from on the Contesting tab in Settings.",
+@@ -16099,6 +16119,18 @@ Pick the one you operate from on the Contesting tab in Settings.",
          }
      }
  
@@ -69,7 +69,7 @@ index dfb703b..cf5f7d7 100644
      /// Send the delivery ACKs we owe: a 1-frame RR73 to each sender whose directed
      /// message we just fully received. Queued onto the chat broadcast path; the receiver
      /// (the original sender) sees it and marks the message delivered, ending the resend.
-@@ -25328,6 +25360,7 @@ contact yourself."
+@@ -26339,6 +26371,7 @@ contact yourself."
              self.persist_pending_msgs();
          }
          self.last_wire_decodes = fresh.clone();
@@ -77,7 +77,7 @@ index dfb703b..cf5f7d7 100644
          self.last_decodes = fresh;
          n
      }
-@@ -25440,7 +25473,7 @@ contact yourself."
+@@ -26451,7 +26484,7 @@ contact yourself."
              crate::settings::SpecialOp::Hound | crate::settings::SpecialOp::SuperHound
          );
          let wire_copy: Option<Vec<modes::Decode>> = hound_active.then(|| decodes.clone());
@@ -86,7 +86,7 @@ index dfb703b..cf5f7d7 100644
          let n = decodes.len();
          // Tally IR-HARQ rescues (messages recovered by combining retransmissions).
          self.harq_rescues += decodes
-@@ -25516,8 +25549,27 @@ contact yourself."
+@@ -26526,8 +26559,27 @@ contact yourself."
          if self.app.tier() == Tier::Js8 {
              self.js8_ingest(&decodes, slot);
          }
@@ -116,7 +116,7 @@ index dfb703b..cf5f7d7 100644
          self.last_decode_slot = Some(slot);
          // A period shown from before a band or mode change gives way to this context's own.
          self.late = None;
-@@ -25543,7 +25595,11 @@ contact yourself."
+@@ -26553,7 +26605,11 @@ contact yourself."
      /// also keeps the blast radius small — a bystander's free text containing ';' is only
      /// ever split while we are mid-contact, and even then `reattach` fires on nothing but an
      /// exact 2-token `<call> RR73/RRR/73` half.
@@ -129,7 +129,7 @@ index dfb703b..cf5f7d7 100644
          let fox_capable = self
              .tier_mode_kind(self.app.tier())
              .is_some_and(|k| modes::make_mode(k).capabilities().fox_hound);
-@@ -25557,7 +25613,8 @@ contact yourself."
+@@ -26567,7 +26623,8 @@ contact yourself."
              // Fox multiplexing is an FT8 DXpedition construct — the mode declares
              // `fox_hound` (FT8 only, matching WSJT-X). Free text may legitimately
              // contain ';' and must never be split when we are not working anybody.
@@ -139,7 +139,7 @@ index dfb703b..cf5f7d7 100644
          }
          // A Fox confirm half is the SENDER-LESS 2-token "K1ABC RR73" — re-add
          // the Fox's call so it parses as a standard Rr73 and passes the
-@@ -25582,8 +25639,15 @@ contact yourself."
+@@ -26592,8 +26649,15 @@ contact yourself."
          // contact — the quiet finish, the >1000 Hz initial offset — was already captured once at
          // `call_station_ctx`; this was the one live read. A QSO in flight keeps the rules it
          // started under, and the toggle governs the NEXT one.
@@ -157,7 +157,7 @@ index dfb703b..cf5f7d7 100644
                  return m;
              }
              let t: Vec<&str> = m.split_whitespace().collect();
-@@ -25595,6 +25659,7 @@ contact yourself."
+@@ -26605,6 +26669,7 @@ contact yourself."
              m
          };
          let mut out = Vec::with_capacity(decodes.len());
@@ -165,7 +165,7 @@ index dfb703b..cf5f7d7 100644
          for d in decodes {
              let halves = d
                  .message
-@@ -25602,22 +25667,56 @@ contact yourself."
+@@ -26612,22 +26677,56 @@ contact yourself."
                  .map(|(a, b)| (a.trim().to_string(), b.trim().to_string()));
              match halves {
                  Some((a, b)) if !a.is_empty() && !b.is_empty() => {
@@ -226,7 +226,7 @@ index dfb703b..cf5f7d7 100644
      }
  
      /// Fold a slot's decodes into the active mode's sequencer and, in QSO mode,
-@@ -26495,7 +26594,7 @@ contact yourself."
+@@ -27508,7 +27607,7 @@ contact yourself."
      #[cfg(any(test, feature = "test-util"))]
      pub(crate) fn ingest_decodes_for_test(&mut self, decodes: &[modes::Decode], slot: u64) {
          // Mirror the live path's Hound multi-payload split.
@@ -235,7 +235,7 @@ index dfb703b..cf5f7d7 100644
          let decodes = &decodes[..];
          for d in decodes {
              self.seen_decode = true;
-@@ -26532,6 +26631,7 @@ contact yourself."
+@@ -27545,6 +27644,7 @@ contact yourself."
              self.decode_history.pop_front();
          }
          self.last_decodes = decodes.to_vec();
@@ -243,8 +243,8 @@ index dfb703b..cf5f7d7 100644
      }
  
      /// Export the Field Day log in `format` ("cabrillo" or "adif"). `Err` unless
-@@ -26927,6 +27027,11 @@ contact yourself."
-         self.station.set_dxcc_resolver_shared(resolve)
+@@ -27948,6 +28048,11 @@ contact yourself."
+         self.station.set_dxcc_country_resolver(country)
      }
  
 +    /// JIMMY COMPAT: see `StationCore::keep_logged_location`.
@@ -255,7 +255,7 @@ index dfb703b..cf5f7d7 100644
      /// See [`StationCore::set_state_resolver`].
      pub fn set_state_resolver(
          &mut self,
-@@ -39977,6 +40082,37 @@ mod tests {
+@@ -41576,6 +41681,37 @@ mod tests {
          );
      }
  

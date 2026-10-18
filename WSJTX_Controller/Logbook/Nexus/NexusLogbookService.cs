@@ -258,7 +258,10 @@ namespace WSJTX_Controller
             var rows = Client.Rows();
             if (rows.Error != null)
                 return new ImportResult { Errors = "Nexus logbook: could not read the log to pair the download: " + rows.Error };
-            var prep = NexusReportPairing.Prepare(adifText, rows.Rows, nearbyUnique: source == "EQSL");
+            bool lotw = string.Equals(source, "LOTW", StringComparison.OrdinalIgnoreCase);
+            var prep = NexusReportPairing.Prepare(adifText, rows.Rows, nearbyUnique: source == "EQSL",
+                confirmationCall: lotw ? (Func<NexusQso, string>)(q => LogbookBooks.ConfirmationCall(q.StationCallsign)) : null,
+                nexusCall: lotw ? LogbookBooks.StationCallNow?.Invoke() : null);
             var result = ImportFile(prep.Text, source);
             // "Newly confirmed" = contacts that gained a confirmation (LoTW, QRZ, eQSL or card) in
             // this merge, read from the log itself: Nexus's own count covers LoTW and card only, and
@@ -273,6 +276,7 @@ namespace WSJTX_Controller
                 result.NewlyConfirmed = gained;
             }
             if (string.IsNullOrEmpty(result.Errors)) result.Proposed = KeepDownloadedLocations(prep, source, afterRows);
+            if (string.IsNullOrEmpty(result.Errors)) try { result.Proposed += CheckCountries(afterRows); } catch { }
             if (string.IsNullOrEmpty(result.Errors) && source == "EQSL") KeepEqslAg(prep);
             result.Held = prep.Held;
             result.HeldDetails.AddRange(prep.HeldDetails);
@@ -418,9 +422,26 @@ namespace WSJTX_Controller
         {
             var list = NexusDownloadedChanges.Load();
             var rows = Client.Rows();
-            if (rows.Error == null && rows.Rows != null && list.Prune(rows.Rows) > 0)
-                try { list.Save(); } catch { }
+            if (rows.Error == null && rows.Rows != null)
+            {
+                string before = string.Join("\n", list.Items.Select(p => p.Key + "|" + p.Proposed + "|" + p.Note));
+                foreach (var q in rows.Rows) list.CheckCountry(q, DateTime.UtcNow);   // the country check
+                list.Prune(rows.Rows);
+                if (string.Join("\n", list.Items.Select(p => p.Key + "|" + p.Proposed + "|" + p.Note)) != before)
+                    try { list.Save(); } catch { }
+            }
             return list;
+        }
+
+        // The country check over the whole log, kept with the proposals. Returns how many are new.
+        private int CheckCountries(NexusLogRows rows)
+        {
+            if (rows?.Error != null || rows?.Rows == null) return 0;
+            var list = NexusDownloadedChanges.Load();
+            int added = rows.Rows.Sum(q => list.CheckCountry(q, DateTime.UtcNow));
+            list.Prune(rows.Rows);
+            list.Save();
+            return added;
         }
 
         // Applies the chosen proposals through Nexus's guarded edit, one edit per contact; what
@@ -883,7 +904,8 @@ namespace WSJTX_Controller
             // Rows of confirmed contacts and repeated uploads of one contact are left out, not held
             // (2026-10-06: 241 such rows kept ~130 contacts "pending" and every sync slow).
             var prep = NexusReportPairing.Prepare(ownReport, rows.Rows.Where(q => !q.AwardConfirmed).ToList(),
-                settled: rows.Rows.Where(q => q.AwardConfirmed).ToList(), collapseSameMinute: true);
+                settled: rows.Rows.Where(q => q.AwardConfirmed).ToList(), collapseSameMinute: true,
+                confirmationCall: q => LogbookBooks.ConfirmationCall(q.StationCallsign), nexusCall: LogbookBooks.StationCallNow?.Invoke());
             NexusSyncDiagnostics.WriteList("held-lotw-own",
                 "LoTW own-records rows not used to mark uploads received, because Nexus could not be sure to pair them with the right contact", prep.HeldDetails);
             if (prep.Sent == 0) return 0;
@@ -972,6 +994,38 @@ namespace WSJTX_Controller
             return sb.Append("<EOH>").ToString();
         }
 
+        // An exported record's COUNTRY, as the contact's own DXCC number names it (Nexus 1.19), so a
+        // file never says one entity in DXCC and another in COUNTRY. A logged text that is only
+        // another spelling of that name is simply replaced (operator, 2026-10-17: no need to keep
+        // spelling variants); one that carries location detail -- a WAE area, another entity,
+        // "NON-DXCC" -- travels beside it as APP_JIMMY_LOGGED_COUNTRY (keepLogged), so no location
+        // is lost before the operator reviews it. A record with no DXCC name (no number, or one
+        // Nexus does not know) is left exactly as it is. Only the file changes -- never the
+        // contact. ADIF lengths are UTF-8 bytes, as Nexus writes them.
+        internal const string LoggedCountryTag = "APP_JIMMY_LOGGED_COUNTRY";
+
+        internal static string WithCountryByDxcc(string rec, string countryByDxcc, bool keepLogged)
+        {
+            if (string.IsNullOrEmpty(rec) || string.IsNullOrEmpty(countryByDxcc)) return rec;
+            string F(string tag, string value) => $"<{tag}:{Encoding.UTF8.GetByteCount(value)}>{value}";
+            var m = System.Text.RegularExpressions.Regex.Match(rec, @"<COUNTRY:(\d+)(?::[A-Za-z])?>",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (!m.Success) return rec.TrimEnd() + " " + F("COUNTRY", countryByDxcc);
+            int start = m.Index + m.Length, bytes = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture), chars = 0;
+            while (bytes > 0 && start + chars < rec.Length)
+            {
+                int step = char.IsHighSurrogate(rec[start + chars]) && start + chars + 1 < rec.Length ? 2 : 1;
+                bytes -= Encoding.UTF8.GetByteCount(rec.Substring(start + chars, step));
+                chars += step;
+            }
+            string logged = rec.Substring(start, chars);
+            if (string.Equals(logged, countryByDxcc, StringComparison.Ordinal)) return rec;
+            string keep = keepLogged && logged.Trim().Length > 0
+                && rec.IndexOf("<" + LoggedCountryTag + ":", StringComparison.OrdinalIgnoreCase) < 0
+                ? " " + F(LoggedCountryTag, logged) : "";
+            return rec.Substring(0, m.Index) + F("COUNTRY", countryByDxcc) + rec.Substring(start + chars).TrimEnd() + keep;
+        }
+
         public (int Written, string Note) ExportAdif(IList<int> ids, IList<string> sources, string outPath)
         {
             var wanted = R(db => db.GetExtraFieldForExport("APP_NEXUS_ID", ids, sources), new List<string>());
@@ -990,16 +1044,27 @@ namespace WSJTX_Controller
                     var id = System.Text.RegularExpressions.Regex.Match(rec, @"<APP_NEXUS_ID:(\d+)>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                     if (id.Success) byId[rec.Substring(id.Index + id.Length, int.Parse(id.Groups[1].Value))] = rec.Trim();
                 }
+                // The country each contact's DXCC number names (Nexus 1.19), for the file's COUNTRY.
+                var rows = Client.Rows();
+                var rowsById = rows.Error == null && rows.Rows != null
+                    ? rows.Rows.Where(q => q.Id != null).GroupBy(q => q.Id).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal)
+                    : null;
                 var sb = new StringBuilder(header).Append('\n');
                 int written = 0, missing = 0;
                 foreach (var nid in wanted)
                 {
-                    if (nid != null && byId.TryGetValue(nid, out var rec)) { sb.Append(rec).Append(" <eor>\n"); written++; }
+                    if (nid != null && byId.TryGetValue(nid, out var rec))
+                    {
+                        NexusQso q = null;
+                        rowsById?.TryGetValue(nid, out q);
+                        sb.Append(WithCountryByDxcc(rec, q?.CountryByDxcc, keepLogged: q != null && !q.CountrySpellingOnly)).Append(" <eor>\n"); written++;
+                    }
                     else missing++;
                 }
                 File.WriteAllText(outPath, sb.ToString(), new UTF8Encoding(false));
                 var notes = new List<string>();
                 if (missing > 0) notes.Add($"{missing} selected contact(s) not in Nexus's file");
+                if (rowsById == null) notes.Add("countries are as logged (the logbook could not be read for their DXCC names)");
                 if (reply.Saving > 0) notes.Add($"{reply.Saving} recent change(s) still being saved are not in the file");
                 if (reply.Held > 0) notes.Add($"{reply.Held} change(s) the logbook refused are not in the file");
                 return (written, notes.Count > 0 ? string.Join("; ", notes) + "." : null);
