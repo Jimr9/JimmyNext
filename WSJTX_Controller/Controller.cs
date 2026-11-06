@@ -7962,7 +7962,7 @@ namespace WSJTX_Controller
             {
                 e.SuppressKeyPress = true;
                 int idx = advTx1ListBox.SelectedIndex;
-                if (idx < 0) return;   // nothing selected: never the top station instead (NU7I, 2026-10-21)
+                if (idx < 0) { SayNoStationSelected(advTx1ListBox); return; }   // never the top station instead (NU7I, 2026-10-21)
                 wsjtxClient.NextCallFromTx1(idx);
                 MoveFocusToStatusIfEnabled();
             }
@@ -8006,10 +8006,25 @@ namespace WSJTX_Controller
             {
                 e.SuppressKeyPress = true;
                 int idx = advTx2ListBox.SelectedIndex;
-                if (idx < 0) return;   // nothing selected: never the top station instead (NU7I, 2026-10-21)
+                if (idx < 0) { SayNoStationSelected(advTx2ListBox); return; }   // never the top station instead (NU7I, 2026-10-21)
                 wsjtxClient.NextCallFromTx2(idx);
                 MoveFocusToStatusIfEnabled();
             }
+        }
+
+        // Enter/Space in a station list with nothing selected calls no one; say so, so the key
+        // isn't silently ignored (2026-11-06, after testers missed the old top-station call).
+        // Spoken from the list itself: focus stays put and the status box is untouched.
+        private static void SayNoStationSelected(ListBox lb)
+        {
+            try
+            {
+                lb.AccessibilityObject.RaiseAutomationNotification(
+                    System.Windows.Forms.Automation.AutomationNotificationKind.Other,
+                    System.Windows.Forms.Automation.AutomationNotificationProcessing.ImportantMostRecent,
+                    "No station selected.");
+            }
+            catch { }   // best effort: a screen reader without UIA notifications hears nothing
         }
 
         // Double-click on a station in the TX1/TX2/Raw Decodes lists does what Enter does there,
@@ -8071,7 +8086,7 @@ namespace WSJTX_Controller
             {
                 e.SuppressKeyPress = true;
                 int idx = advRawListBox.SelectedIndex;
-                if (idx < 0) return;
+                if (idx < 0) { SayNoStationSelected(advRawListBox); return; }
                 wsjtxClient.NextCallFromRawDecode(idx);
                 MoveFocusToStatusIfEnabled();
             }
