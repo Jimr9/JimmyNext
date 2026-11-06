@@ -36,7 +36,9 @@ namespace WSJTX_Controller
     // The header and each row sent are passed on as received -- except for that time, and that a row paired
     // with a logged contact has its STATE and COUNTRY taken out (2026-10-04): Nexus's merge fills a
     // BLANK logged state or country from the row, and the contact keeps what was logged, blanks
-    // included. The row's location is returned in Located, for the caller to keep apart.
+    // included. The row's location is returned in Located, for the caller to keep apart. Since
+    // Nexus 1.21 (2026-10-30) a LoTW row keeps its location (nexusFillsBlanks) and rows Nexus's own
+    // pairing settles are sent rather than held (nexusPairs) -- see Prepare.
     public static class NexusReportPairing
     {
         public class Result
@@ -160,10 +162,23 @@ namespace WSJTX_Controller
         // nexusCall the call Nexus takes a contact with none recorded as (the engine's own, the
         // profile's). A row whose contact Jimmy and Nexus would see under different calls -- only
         // a contact with no station call, while the profile is not the owner's -- is held.
+        // nexusPairs (a confirmation merge, Nexus 1.21, 2026-10-30): a row this guard cannot tie to
+        //   one contact by itself -- two contacts at its minute, another contact nearer, more than one
+        //   in Nexus's window, or two rows for one contact -- is SENT, not held: Nexus pairs it
+        //   nearest-first, no contact taken twice, which is the matching this guard used to stand in
+        //   for. Such a row is not in Located or Paired (which contact Nexus gives it is Nexus's call).
+        //   Still held: a row whose contact Jimmy and Nexus would see under different calls (the
+        //   owner rule above), and, with addsUnmatched (QRZ, whose merge ADDS a row it pairs with
+        //   nothing), a row Nexus would add beside a logged contact with that station, or a second
+        //   row for one contact -- a duplicate contact in the log.
+        // nexusFillsBlanks (LoTW, Nexus 1.21): a paired row keeps its location; Nexus's merge fills
+        //   only what the log leaves blank (reconcile::keep_lotw_detail, apply_match) and never a
+        //   value logged. Otherwise the fields that merge would fill are taken out (MergeFills).
         public static Result Prepare(string text, IReadOnlyList<NexusQso> logInOrder, bool nearbyUnique = false,
                                      IReadOnlyList<NexusQso> settled = null, bool collapseSameMinute = false,
                                      bool absentOnly = false, Func<NexusQso, string> confirmationCall = null,
-                                     string nexusCall = null)
+                                     string nexusCall = null, bool nexusPairs = false, bool addsUnmatched = false,
+                                     bool nexusFillsBlanks = false)
         {
             text = text ?? "";
             var m = Eoh.Match(text);
@@ -239,6 +254,9 @@ namespace WSJTX_Controller
             var result = new Result();
             var send = new List<(int Order, Row Row)>();
             void Hold(Row r, string why) { result.Held++; result.HeldDetails.Add($"{r.Label}: {why}"); }
+            string Sendable(string raw) => nexusFillsBlanks ? raw : WithoutMergeFills(raw);
+            // A row left to Nexus's own pairing (nexusPairs).
+            void ToNexus(Row r) { r.Raw = Sendable(r.Raw); send.Add((int.MaxValue, r)); }
 
             // Rows at a contact's minute, grouped by the contact's group.
             var matched = new Dictionary<string, List<(Row Row, Contact Contact)>>();
@@ -265,7 +283,12 @@ namespace WSJTX_Controller
                     }
                     else rowCall = null;   // neither names a call: paired as before, as Nexus does
                 }
-                if (at != null && at.Count > 1) { Hold(r, "more than one logged contact at this minute"); continue; }
+                if (at != null && at.Count > 1)
+                {
+                    if (nexusPairs) ToNexus(r);
+                    else Hold(r, "more than one logged contact at this minute");
+                    continue;
+                }
                 if (at != null && at.Count == 1)
                 {
                     var c = at[0];
@@ -275,7 +298,8 @@ namespace WSJTX_Controller
                         && same.Any(o => !ReferenceEquals(o, c) && Math.Abs(o.When - r.When.Value) < Math.Abs(c.When - r.When.Value)
                                          && (rowCall == null || SameCall(confirmationCall(logInOrder[o.Pos]), rowCall))))
                     {
-                        Hold(r, "another logged contact with this station is nearer to this time than the one at its minute");
+                        if (nexusPairs) ToNexus(r);
+                        else Hold(r, "another logged contact with this station is nearer to this time than the one at its minute");
                         continue;
                     }
                     // Nexus takes a contact with no station call as the profile's call; Jimmy as the
@@ -323,6 +347,8 @@ namespace WSJTX_Controller
                         g.Add((r, c));
                         continue;
                     }
+                    // More than one contact in Nexus's window: Nexus gives the row the nearest.
+                    if (nexusPairs && inWindow.Count > 1) { ToNexus(r); continue; }
                 }
                 if (nearbyUnique)
                 {
@@ -343,11 +369,15 @@ namespace WSJTX_Controller
                         g.Add((r, c));
                         continue;
                     }
+                    if (cands.Count > 1 && nexusPairs && !addsUnmatched) { ToNexus(r); continue; }   // none in Nexus's window: unmatched, nothing added
                     if (cands.Count > 1) { Hold(r, $"{cands.Count} logged contacts with this station and band that day or the day either side, none at this minute"); continue; }
                 }
                 bool near = callBandDays.Contains($"{r.CallBand}|{r.ModeClass}|{r.Day}") ||
                             callBandDays.Contains($"{r.CallBand}|{r.ModeClass}|{r.Day - 1}") ||
                             callBandDays.Contains($"{r.CallBand}|{r.ModeClass}|{r.Day + 1}");
+                // Further than Nexus's window from every contact with the station: a LoTW or eQSL merge
+                // reports it unmatched and changes nothing; a QRZ merge would add it as a new contact.
+                if (near && nexusPairs && !addsUnmatched) { ToNexus(r); continue; }
                 if (near) { Hold(r, "no logged contact at this minute, but others with this station and band that day or the day either side"); continue; }
                 if (absentOnly) r.Raw = WithoutTags(r.Raw, ConfirmationTags);
                 send.Add((int.MaxValue, r)); // a contact the log does not hold at all
@@ -366,7 +396,8 @@ namespace WSJTX_Controller
                 var taken = g.Value.Select(x => x.Contact).ToList();
                 if (taken.Distinct().Count() != taken.Count)
                 {
-                    foreach (var x in g.Value) Hold(x.Row, "two rows for one logged contact");
+                    if (nexusPairs && !addsUnmatched) foreach (var x in g.Value) ToNexus(x.Row);   // one contact each, nearest first
+                    else foreach (var x in g.Value) Hold(x.Row, "two rows for one logged contact");
                     continue;
                 }
                 foreach (var x in g.Value)
@@ -375,7 +406,7 @@ namespace WSJTX_Controller
                         .ToDictionary(t => t, t => x.Row.Fields[t].Trim(), StringComparer.OrdinalIgnoreCase);
                     result.Located.Add((logInOrder[x.Contact.Pos], loc, x.Row.Label));
                     result.Paired.Add((logInOrder[x.Contact.Pos], x.Row.Fields));
-                    x.Row.Raw = WithoutMergeFills(x.Row.Raw);
+                    x.Row.Raw = Sendable(x.Row.Raw);
                     send.Add((x.Contact.Pos, x.Row));
                 }
             }

@@ -1,8 +1,8 @@
 diff --git a/src/inbox.rs b/src/inbox.rs
-index 73fe1174c..578a13b8b 100644
+index 87c8995..c34f71f 100644
 --- a/src/inbox.rs
 +++ b/src/inbox.rs
-@@ -108,7 +108,17 @@ impl Inbox {
+@@ -114,7 +114,17 @@ impl Inbox {
              // Anything else is CONTENT — route a chunk to the reassembler and everything
              // else (bare broadcast, plain line) to push_text, which sorts a "DE <CALL>
              // <body>" broadcast from a directed line.
@@ -21,7 +21,7 @@ index 73fe1174c..578a13b8b 100644
                  && m.sender().is_none_or(looks_like_call)
                  && m.addressee().is_none_or(looks_like_call);
              if !is_standard {
-@@ -486,5 +496,11 @@ mod tests {
+@@ -492,5 +502,11 @@ mod tests {
          assert_eq!(m.from.as_deref(), Some("W9XYZ"));
          assert_eq!(m.to, None);
          assert_eq!(m.text, text::normalize("NET ON 7130 AT 0200Z"));

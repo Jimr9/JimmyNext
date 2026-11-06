@@ -456,6 +456,14 @@ namespace WSJTX_Controller
                     Exec($"ALTER TABLE qso ADD COLUMN {c} TEXT DEFAULT '';");
                 SetMeta("db_version", "12");
             }
+
+            // v13 (2026-10-31): the DARC WAE country each contact counts toward (its DARC prefix,
+            // "IT" for Sicily), worked out by Nexus as the read copy is rebuilt.
+            if (ver < 13)
+            {
+                Exec("ALTER TABLE qso ADD COLUMN wae_country TEXT DEFAULT '';");
+                SetMeta("db_version", "13");
+            }
         }
 
         // ── Meta ─────────────────────────────────────────────────────────────────
@@ -1168,6 +1176,25 @@ namespace WSJTX_Controller
         // The rows GetAdifFieldDicts would export (same ids / sources selection, same order), as
         // each row's value of one extra-field tag, or null where the row has none -- used while
         // Nexus keeps the log to pick Nexus's own exported records by APP_NEXUS_ID.
+        // Every row's value of one extra field, by that value: the read copy's row for each Nexus id
+        // (APP_NEXUS_ID), for the Logbook's clean-up tools (NexusLogTools, 2026-10-31).
+        public Dictionary<string, long> IdsByExtraValue(string tag)
+        {
+            lock (_lock)
+            {
+                var result = new Dictionary<string, long>(StringComparer.Ordinal);
+                using (var cmd = _conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT tag_value, qso_id FROM qso_extra_field WHERE tag_name = @tag;";
+                    cmd.Parameters.AddWithValue("@tag", tag);
+                    using (var r = cmd.ExecuteReader())
+                        while (r.Read())
+                            if (!r.IsDBNull(0)) result[r.GetString(0)] = r.GetInt64(1);
+                }
+                return result;
+            }
+        }
+
         public List<string> GetExtraFieldForExport(string tag, IEnumerable<int> ids, IEnumerable<string> sources = null)
         {
             var idList = ids?.Distinct().ToList();

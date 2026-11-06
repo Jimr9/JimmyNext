@@ -67,6 +67,11 @@ namespace WSJTX_Controller
         // 2026-09-26: (part of) a multi-answer transmission (Nexus/EngineHost fact -- see
         // DirectDecodeSemantics.MultiAnswer). Always false on the WsjtxMessage path.
         public bool MultiAnswer { get; set; }
+        // 2026-11-02: the sender's CQ WPX prefix and DARC WAE country, by Nexus's own rules (see
+        // DirectDecodeSemantics.WpxPrefix) -- what live award tags match a heard station against.
+        // Null on the WsjtxMessage path: Jimmy keeps no copy of either rule.
+        public string WpxPrefix { get; set; }
+        public string WaeCountry { get; set; }
 
         // 2026-09-26 (parser migration): how far into a standard QSO this message is, from the
         // message KIND -- same scale as the old WsjtxMessage.Progress (CQ 1, reply 2, report 3,
@@ -222,6 +227,8 @@ namespace WSJTX_Controller
                 d.IsRr73 = string.Equals(env.Signoff, "rr73", StringComparison.Ordinal);
                 d.Is73 = string.Equals(env.Signoff, "sevenThree", StringComparison.Ordinal);
                 d.CallForm = string.IsNullOrEmpty(env.CallForm) ? "unknown" : env.CallForm;
+                d.WpxPrefix = string.IsNullOrEmpty(env.WpxPrefix) ? null : env.WpxPrefix;
+                d.WaeCountry = string.IsNullOrEmpty(env.WaeCountry) ? null : env.WaeCountry;
 
                 // Prefer the envelope's own canonical kind where it maps 1:1.
                 switch (env.Kind)

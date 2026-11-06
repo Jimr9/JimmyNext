@@ -82,8 +82,9 @@
          Included only when building/publishing as "Jimmy Next" (the replay harness's own
          AssemblyName, see build.bat and JimmyNext.wxs), so the harness's documented Group 17
          workflow ("check 'Replay Test Award' in the Still Need tab") keeps working exactly
-         as before. -->
-    <None Include="RuleDefinitions\_ReplayTestAward.ini" Condition="'$(AssemblyName)' == 'Jimmy Next'">
+         as before. 2026-11-02: and only in Debug, since every build is "Jimmy Next" now, so the
+         name alone let it into the 2.0.86 installer (Release publish, JimmyNext.wxs). -->
+    <None Include="RuleDefinitions\_ReplayTestAward.ini" Condition="'$(AssemblyName)' == 'Jimmy Next' And '$(Configuration)' == 'Debug'">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

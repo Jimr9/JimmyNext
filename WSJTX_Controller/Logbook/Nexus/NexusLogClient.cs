@@ -75,6 +75,10 @@ namespace WSJTX_Controller
         // call's entity (EngineHost logbook_host::grid_dxcc); null when the grid does not tell.
         public uint? GridDxcc { get; set; }
         public string GridCountry { get; set; }
+        // From LOG_ROWS (2026-10-31, Nexus's award rules): the CQ WPX prefix the call counts for,
+        // and the DARC WAE country's prefix the contact counts toward (null outside Europe).
+        public string WpxPrefix { get; set; }
+        public string WaeCountry { get; set; }
         // Rust (String, String) tuples serialize as two-element arrays.
         public List<List<string>> Extra { get; set; } = new List<List<string>>();
 
@@ -138,12 +142,36 @@ namespace WSJTX_Controller
         public string Why { get; set; }      // why nothing was sent or recorded
     }
 
+    public class NexusLotwBatchReply
+    {
+        public string State { get; set; }    // ready | stamped | left | error | unknown
+        public string Batch { get; set; }    // LOTW_BATCH_PREPARE: the batch to name in its result
+        public int Signed { get; set; }      // contacts written to the TQSL file
+        public int Missing { get; set; }     // contacts asked for that are not in the logbook
+        public string Outcome { get; set; }  // stamped: pending | rejected | authfail
+        public string Detail { get; set; }   // stamped: cert | station-location | partial | record | unclassified
+        public string Why { get; set; }      // left: nothing-new | unclear | retry | unknown-batch | logbook closing
+        public int Stamped { get; set; }
+        public int Changed { get; set; }     // edited while TQSL signed: not stamped, still owed
+        public int Gone { get; set; }        // deleted meanwhile
+        public int Unrecorded { get; set; }  // the stamp could not be written: still owed
+    }
+
     public class NexusExportReply
     {
         public string State { get; set; }   // saved | error | unknown
         public string Why { get; set; }
         public int Saving { get; set; }     // recent changes the file lacks, still being saved
         public int Held { get; set; }       // recent changes the file lacks, refused by the store
+    }
+
+    public class NexusUploadRecord { public string Id { get; set; } public string Adif { get; set; } }
+
+    public class NexusUploadRecordsReply
+    {
+        public List<NexusUploadRecord> Records { get; set; } = new List<NexusUploadRecord>();
+        public int Missing { get; set; }    // asked for, not in the logbook
+        public string Error { get; set; }
     }
 
     public class NexusWriteReply
@@ -214,6 +242,16 @@ namespace WSJTX_Controller
             catch (JsonException e) { return new NexusUploadReply { State = "unknown", Why = e.Message }; }
         }
 
+        // The contacts listed in idsPath (one Nexus id per line), each written exactly as LOG_UPLOAD
+        // sends one -- for a batch upload (Club Log's putlogs).
+        public NexusUploadRecordsReply UploadRecords(string idsPath)
+        {
+            string resp = Send("LOG_UPLOAD_RECORDS " + JsonSerializer.Serialize(new { idsPath }, Json), ReadTimeoutMs);
+            if (resp == null || !resp.StartsWith("{")) return new NexusUploadRecordsReply { Error = resp ?? "no reply" };
+            try { return JsonSerializer.Deserialize<NexusUploadRecordsReply>(resp, Json); }
+            catch (JsonException e) { return new NexusUploadRecordsReply { Error = e.Message }; }
+        }
+
         // Nexus's own ADIF export of the whole log, written by EngineHost to adifPath.
         public NexusExportReply Export(string adifPath)
         {
@@ -234,6 +272,24 @@ namespace WSJTX_Controller
         public NexusWriteReply StampUpload(string id, string service, string outcome, long whenUnix, string detail = null) =>
             Write("LOG_STAMP_UPLOAD " + JsonSerializer.Serialize(new { id, service, outcome, whenUnix, detail }, Json));
 
+        // LoTW through Nexus (EngineHost lotw_batch.rs): the TQSL file for the contacts listed in
+        // idsPath (one Nexus id per line), written by Nexus to adifPath ...
+        public NexusLotwBatchReply LotwPrepare(string idsPath, string adifPath) =>
+            LotwBatch("LOTW_BATCH_PREPARE " + JsonSerializer.Serialize(new { idsPath, adifPath }, Json));
+
+        // ... and TQSL's result (exit code, its "Final Status" code, stderr in a file), judged and
+        // recorded on those contacts by Nexus.
+        public NexusLotwBatchReply LotwResult(string batch, int? code, int? statusCode, string stderrPath) =>
+            LotwBatch("LOTW_BATCH_RESULT " + JsonSerializer.Serialize(new { batch, code, statusCode, stderrPath }, Json));
+
+        private NexusLotwBatchReply LotwBatch(string line)
+        {
+            string resp = Send(line, WriteTimeoutMs);
+            if (resp == null || !resp.StartsWith("{")) return new NexusLotwBatchReply { State = "unknown", Why = resp ?? "no reply" };
+            try { return JsonSerializer.Deserialize<NexusLotwBatchReply>(resp, Json); }
+            catch (JsonException e) { return new NexusLotwBatchReply { State = "unknown", Why = e.Message }; }
+        }
+
         private NexusWriteReply Write(string line)
         {
             string resp = Send(line, WriteTimeoutMs);
@@ -241,6 +297,17 @@ namespace WSJTX_Controller
                 return new NexusWriteReply { State = "unknown", Why = resp ?? "no reply" };
             try { return JsonSerializer.Deserialize<NexusWriteReply>(resp, Json); }
             catch (JsonException e) { return new NexusWriteReply { State = "unknown", Why = e.Message }; }
+        }
+
+        // LOG_TOOL (EngineHost log_tools.rs, Nexus 1.21): the Logbook's clean-up tools, history and
+        // import preview. The answer's JSON, or a {"state":"error"} one when there was none whole.
+        // A scan or an import of a big log takes a while: five minutes.
+        public string Tool(object args)
+        {
+            string resp = Send("LOG_TOOL " + JsonSerializer.Serialize(args, Json), 300_000);
+            return resp != null && resp.StartsWith("{")
+                ? resp
+                : JsonSerializer.Serialize(new { state = "error", why = resp ?? "no reply from the logbook" });
         }
 
         public string Flush() => Send("LOG_FLUSH", WriteTimeoutMs);

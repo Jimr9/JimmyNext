@@ -77,6 +77,24 @@ namespace WSJTX_Controller
             return raw.Select(CanonicalPlace).Where(p => p != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
 
+        // A US state, DC or Canadian province as its two-letter code, from the code itself, its
+        // full name ("Kentucky", any capitals) or "US-KY"; null when the text names none of them.
+        // TQSL and LoTW take only the code: "KENTUCKY" as our own state refused every contact
+        // (KF4CCG's report, 2026-10-22).
+        internal static string StateCode(string text)
+        {
+            string t = (text ?? "").Trim();
+            if (t.Length == 0) return null;
+            foreach (var kv in PlaceNames)
+            {
+                string code = kv.Key.Substring(3);
+                if (string.Equals(t, code, StringComparison.OrdinalIgnoreCase) || string.Equals(t, kv.Key, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(t, kv.Value, StringComparison.OrdinalIgnoreCase))
+                    return code;
+            }
+            return null;
+        }
+
         internal static string PlaceName(string place) => PlaceNames.TryGetValue(place ?? "", out string n) ? n : place;
         internal static bool IsUsState(string place) => (place ?? "").StartsWith("US-", StringComparison.OrdinalIgnoreCase);
         // "US-ID" -> "ID": the code an award's own list of states or provinces holds.

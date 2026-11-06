@@ -97,7 +97,7 @@ namespace WSJTX_Controller
             "rawNewestFirst", "rawMaxRows", "callWaitingRowOrder", "rawDecodeRowOrder", "spotWatchRowOrder",
             "spotWatchSortKey", "listFontSize", "listBackColor", "listForeColor", "listAltRowColor", "appTheme", "appTextPercent", "rowSpacing", "showUsState",
             "editLogRowOrder", "smartWindowRowOrder", "potaSpotsRowOrder", "dxSpotsRowOrder", "whoHearsMeRowOrder", "advCallLayout", "advShowTx1", "advShowTx2", "advShowRaw", "showSpotWatch",
-            "keepTransmitListDuringTx", "keepListPositionDuringRefresh", "moveFocusToStatusOnCallSelect",
+            "keepTransmitListDuringTx", "moveFocusToStatusOnCallSelect",
         };
         // Calls and operating: who to call and how -- never radio, audio, decoder, station,
         // lookups or logins, and nothing about awards (award rules and which are on travel only

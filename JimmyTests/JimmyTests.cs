@@ -887,6 +887,45 @@ static class JimmyTests
                 r = Up("UP7", "CLUBLOG", 403, "Access denied");
                 Check("Club Log 403: false, recorded authfail", !r.ok && Outcome("UP7", u => u.Clublog) == "authfail", true);
 
+                // Club Log's batch (Alt+U, 2026-10-21): Nexus's record of each contact, exactly as the live
+                // upload sends it, and every detail the old batch record carried.
+                string cl1Seed = Path.Combine(work, "seed-cl.adi");
+                File.WriteAllText(cl1Seed, "test\n<eoh>\n" + F("CALL", "CL1") + F("BAND", "20m") + F("FREQ", "14.075500") + F("MODE", "FT8") +
+                    F("QSO_DATE", "20260901") + F("TIME_ON", "002000") + F("TIME_OFF", "002100") + F("RST_SENT", "-10") + F("RST_RCVD", "-12") +
+                    F("GRIDSQUARE", "FN42") + F("NAME", "Pat") + F("COMMENT", "nice signal") + F("TX_PWR", "50") + F("OPERATOR", "KB0UZT") +
+                    F("STATION_CALLSIGN", "KB0UZT") + F("MY_GRIDSQUARE", "EM48") + F("DXCC", "291") + F("STATE", "MA") +
+                    F("SIG", "POTA") + F("SIG_INFO", "US-1234") + F("STX_STRING", "1D MO") + F("SRX_STRING", "2A EMA") + " <eor>\n");
+                client.Import(cl1Seed);
+                NexusLogbook.Refresh(force: true);
+                string cl1Key = AdifImporter.BuildDedupKey("CL1", "20m", "FT8", "20260901", "002000");
+                LogbookBooks.StationCallNow = () => "KB0UZT";   // CL1 was made as KB0UZT (profile rule)
+                var q1 = svc.GetPendingUploads("CLUBLOG").Single(q => q.DedupKey == cl1Key);
+                LogbookBooks.StationCallNow = () => null;
+                string oldRec = AdifRecordBuilder.Build(q1.Callsign, q1.Band, q1.FreqHz, q1.Mode, q1.QsoDate, q1.TimeOn, q1.TimeOff,
+                    q1.RstSent, q1.RstRcvd, q1.Grid, q1.Name, q1.Comment, q1.TxPwr, q1.OperatorCall, q1.StationCall, q1.MyGrid, q1.ExchangeSent, q1.ExchangeRcvd);
+                string batchRec = svc.UploadBatchRecords(new[] { cl1Key, AdifImporter.BuildDedupKey("NOSUCH", "20m", "FT8", "20260901", "002000") },
+                    out var inBatch, out string batchWhy);
+                while (bodies.TryDequeue(out _)) { }
+                answers.Enqueue((200, "QSO OK", false));
+                bool cl1Live = svc.UploadThroughNexus(cl1Key, "CLUBLOG", creds, out var cl1Err);
+                bodies.TryDequeue(out var cl1Sent);
+                Console.WriteLine($"     CL1 CLUBLOG live: ok={cl1Live} err={cl1Err}");
+                int at = (cl1Sent.Body ?? "").IndexOf("&adif=", StringComparison.Ordinal);
+                string liveRec = at < 0 ? "" : WebUtility.UrlDecode(cl1Sent.Body.Substring(at + 6));
+                Console.WriteLine($"  club log batch record: {batchRec}");
+                Check("Club Log batch: the record is exactly what the live upload sends", batchRec != null && batchRec.Length > 0 && batchRec == liveRec, true);
+                Check("Club Log batch: only the contact found goes and may be marked", inBatch.Count == 1 && inBatch[0] == cl1Key && batchWhy == null, true);
+                // Times compared as times: the old record wrote HHMM (0020), Nexus HHMMSS (002000).
+                Dictionary<string, string> Fields(string rec) => AdifParser.Parse(rec).First().ToDictionary(kv => kv.Key.ToUpperInvariant(),
+                    kv => kv.Key.StartsWith("TIME_", StringComparison.OrdinalIgnoreCase) && kv.Value.Length == 4 ? kv.Value + "00" : kv.Value);
+                var oldF = Fields(oldRec); var newF = Fields(batchRec ?? "<eor>");
+                var lost = oldF.Where(kv => !newF.TryGetValue(kv.Key, out var v) || !string.Equals(v, kv.Value, StringComparison.OrdinalIgnoreCase))
+                    .Select(kv => $"{kv.Key}={kv.Value}->{(newF.TryGetValue(kv.Key, out var v2) ? v2 : "missing")}").ToList();
+                Console.WriteLine($"  old batch fields not carried the same: {(lost.Count == 0 ? "none" : string.Join(", ", lost))}");
+                Check("Club Log batch: every detail the old batch record sent is still sent, with the same value", lost.Count == 0, true);
+                Check("Club Log batch: and the details the old record left out (DXCC, state, park) now go too",
+                    newF.TryGetValue("DXCC", out var dx) && dx == "291" && newF.ContainsKey("STATE") && newF.TryGetValue("SIG_INFO", out var park) && park == "US-1234", true);
+
                 r = Up("UP8", "EQSL", 200, "Result: 1 out of 1 records added");
                 Check("eQSL added: true, recorded accepted", r.ok && Outcome("UP8", u => u.Eqsl) == "accepted" && r.path == "/eqsl", true);
                 r = Up("UP9", "EQSL", 200, "Error: The system is down until 1200Z");
@@ -939,10 +978,286 @@ static class JimmyTests
         }
     }
 
+    // LoTW through Nexus (2026-10-21): Alt+U's TQSL run with a STAND-IN tqsl (a .cmd that answers a
+    // chosen exit code and Final Status) -- no real TQSL, nothing reaches LoTW. Only the contacts
+    // TQSL really took are marked sent; everything else stays pending.
+    //   --nexus-lotw-tests <engine exe> <empty work dir>
+    static void NexusLotwUploadTests(string engineExe, string work)
+    {
+        Console.WriteLine("\n--- NexusLotwUploadTests (stand-in TQSL) ---");
+        Directory.CreateDirectory(work);
+        const int port = 58304;
+        string token = Guid.NewGuid().ToString("N");
+        string fake = Path.Combine(work, "tqsl.cmd"), sent = Path.Combine(work, "sent.adi");
+        void Tqsl(int code, params string[] stderr) => File.WriteAllText(fake, "@echo off\r\ncopy /y %8 \"" + sent + "\" >nul\r\n" +
+            string.Concat(stderr.Select(l => "echo " + l + " 1>&2\r\n")) + $"exit /b {code}\r\n");
+        NexusLogbook.Reset();
+        NexusLogbook.TestFolderOverride = Path.Combine(work, "NexusLog");
+        NexusLogbook.TestPortOverride = port;
+        NexusLogbook.TestForceActive = true;
+        TqslUploadClient.TestTqslPath = fake;
+        LogbookBooks.StationCallNow = () => "KB0UZT";
+        try
+        {
+            using (LogbookOnlyEngine.Start(engineExe, Path.Combine(work, "NexusLog"), Path.Combine(work, "appdata"), port, token))
+            {
+                var client = new NexusLogClient(port);
+                string F(string tag, string v) => $"<{tag}:{v.Length}>{v}";
+                string Rec(string call, string time, string station, string extra = "") =>
+                    F("CALL", call) + F("BAND", "20m") + F("MODE", "FT8") + F("QSO_DATE", "20260901") + F("TIME_ON", time) + F("RST_SENT", "-10") +
+                    F("STATION_CALLSIGN", station) + extra + " <eor>\n";
+                string seed = Path.Combine(work, "seed.adi");
+                File.WriteAllText(seed, "test\n<eoh>\n" + Rec("LT1", "001000", "KB0UZT") + Rec("LT2", "001100", "KB0UZT") + Rec("LT3", "001200", "KB0UZT") +
+                    Rec("LX9", "001300", "W9OTHER") + Rec("LH1", "001400", "KB0UZT", F("APP_JIMMY_TQSL_LOCATION", "Nowhere Jimmy Test")) +
+                    Rec("LE1", "001500", "KB0UZT"));
+                client.Import(seed);
+                NexusLogbook.Refresh(force: true);
+                var svc = new NexusLogbookService();
+                var row = new Func<string, NexusQso>(call => client.Rows().Rows.Single(q => q.Call == call));
+                string Lotw(string call) => row(call).Upload?.Lotw?.Outcome ?? "none";
+                var mine = new[] { "LT1", "LT2", "LT3" };
+                bool AllOwed() { NexusLogbook.Refresh(force: true); var p = svc.GetPendingUploads("LOTW").Select(q => q.Callsign).ToList(); return mine.All(p.Contains); }
+
+                // The edited-while-signing case first, on LE1 alone (the batch API Alt+U uses).
+                string keyLe1 = AdifImporter.BuildDedupKey("LE1", "20m", "FT8", "20260901", "001500");
+                string tmp = Path.Combine(work, "le1.adi");
+                var prep = svc.LotwPrepare(new[] { keyLe1 }, tmp);
+                var le1 = row("LE1"); le1.Comment = "edited while TQSL ran";
+                var edited = client.Edit(le1.Id, le1.EditKey, le1);
+                var res = svc.LotwResult(prep.Batch, 0, 0, "12:00:00 PM Final Status: Success (0)");
+                Console.WriteLine($"  edited: prep {prep.State}/{prep.Signed}, edit {edited.State}, result {res.State} stamped {res.Stamped} changed {res.Changed}");
+                Check("LoTW: a contact edited while TQSL signs it is not marked, and stays pending",
+                    prep.Signed == 1 && edited.State == "saved" && res.State == "stamped" && res.Stamped == 0 && res.Changed == 1 && Lotw("LE1") == "none", true);
+                var e1 = row("LE1"); e1.Comment = ""; client.Edit(e1.Id, e1.EditKey, e1);   // LE1 now goes with the batches below
+
+                async Task<(bool ok, TqslUploadClient c)> AltU()
+                {
+                    if (File.Exists(sent)) File.Delete(sent);
+                    var c = new TqslUploadClient();
+                    bool ok = await c.UploadPendingAsync("Home", svc);
+                    Console.WriteLine($"     ok={ok} count={c.LastUploadedCount?.ToString() ?? "-"} msg={c.LastError}");
+                    return (ok, c);
+                }
+
+                Tqsl(5, "Error: no certificate for callsign KB0UZT", "12:00:00 PM Final Status: Cannot sign QSOs (5)");
+                var r = AltU().Result;
+                Check("LoTW rejected (no certificate): failure said, certificate named, none marked sent, all still pending",
+                    !r.ok && r.c.LastError.Contains("callsign certificate") && mine.All(c => Lotw(c) == "authfail") && AllOwed(), true);
+
+                Tqsl(9, "12:00:00 PM Final Status: Some QSOs were not signed (9)");
+                r = AltU().Result;
+                Check("LoTW partial (some dropped, TQSL does not say which): none marked sent, all still pending",
+                    r.ok && r.c.LastUploadedCount == null && r.c.LastError.Contains("Some may have reached LoTW")
+                    && r.c.LastError.Contains("none were marked uploaded, so all 4 stay pending") && mine.All(c => Lotw(c) == "rejected") && AllOwed(), true);
+
+                Tqsl(8, "Duplicate QSO detected", "12:00:00 PM Final Status: No QSOs were uploaded (8)");
+                r = AltU().Result;
+                Check("LoTW duplicates (code 8): nothing marked, all still pending (date-range refusals look the same)",
+                    r.ok && r.c.LastError.Contains("all 4 stay pending") && mine.All(c => Lotw(c) == "rejected") && AllOwed(), true);
+
+                Tqsl(0, "12:00:00 PM Final Status: Success (0)");
+                r = AltU().Result;
+                string file = File.Exists(sent) ? File.ReadAllText(sent) : "";
+                NexusLogbook.Refresh(force: true);
+                var after = svc.GetPendingUploads("LOTW").Select(q => q.Callsign).ToList();
+                Check("LoTW success: every contact signed is marked sent and leaves the pending list",
+                    r.ok && mine.Concat(new[] { "LE1" }).All(c => Lotw(c) == "pending" && !after.Contains(c)), true);
+                Check("LoTW file: Nexus's records with the station callsign, header first",
+                    file.IndexOf("<eoh>", StringComparison.OrdinalIgnoreCase) >= 0 && mine.All(c => file.IndexOf($"<CALL:3>{c}", StringComparison.OrdinalIgnoreCase) >= 0)
+                    && file.IndexOf("<STATION_CALLSIGN:6>KB0UZT", StringComparison.OrdinalIgnoreCase) >= 0, true);
+                Check("LoTW: a contact held for its station location is not signed or marked, still pending, and said",
+                    file.IndexOf("<CALL:3>LH1", StringComparison.OrdinalIgnoreCase) < 0 && Lotw("LH1") == "none" && after.Contains("LH1")
+                    && (r.c.LastError ?? "").Contains("1 held"), true);
+                Check("LoTW: another station call's contact is not signed or marked (profile isolation)",
+                    file.IndexOf("<CALL:3>LX9", StringComparison.OrdinalIgnoreCase) < 0 && Lotw("LX9") == "none", true);
+                client.Shutdown(token);
+            }
+        }
+        finally
+        {
+            TqslUploadClient.TestTqslPath = null;
+            LogbookBooks.StationCallNow = () => null;
+            NexusLogbook.Reset();
+            NexusLogbook.TestFolderOverride = null; NexusLogbook.TestPortOverride = null; NexusLogbook.TestForceActive = null;
+        }
+    }
+
     // DXCC while Nexus keeps the log: the live-logged contact carries its DXCC entity / country /
     // continent (Club Log, as Jimmy's own import fills them), and the startup repair fills a contact
     // stored without one -- changing nothing else. Temp engine and data only.
     //   --nexus-dxcc-tests <engine exe> <empty work dir>
+    // 2026-10-31 (Nexus 1.21): the Logbook's Clean Up tools through LOG_TOOL (EngineHost
+    // log_tools.rs, NexusLogTools) on a real logbook-only engine -- import with its preview and
+    // Import new only, find and merge duplicates, history, Recently deleted and Restore, the check
+    // and its fixes, bulk edit, and Undo of whole changes. Temp engine and data only.
+    //   --nexus-logtool-tests <engine exe> <empty work dir>
+    static void NexusLogToolTests(string engineExe, string work)
+    {
+        Console.WriteLine("\n--- NexusLogToolTests ---");
+        const int port = 58304;
+        string token = Guid.NewGuid().ToString("N");
+        NexusLogbook.Reset();
+        NexusLogbook.TestFolderOverride = Path.Combine(work, "NexusLog");
+        NexusLogbook.TestPortOverride = port;
+        NexusLogbook.TestForceActive = true;
+        try
+        {
+            using (LogbookOnlyEngine.Start(engineExe, Path.Combine(work, "NexusLog"), Path.Combine(work, "appdata"), port, token))
+            {
+                var client = new NexusLogClient(port);
+                string F(string tag, string v) => $"<{tag}:{v.Length}>{v}";
+                string Q(string call, string band, string freq, string time, string grid, string comment = null) =>
+                    F("CALL", call) + F("BAND", band) + F("FREQ", freq) + F("MODE", "FT8") + F("QSO_DATE", "20261021") + F("TIME_ON", time) +
+                    F("GRIDSQUARE", grid) + (comment != null ? F("COMMENT", comment) : "") + " <eor>\n";
+                string seed = Path.Combine(work, "seed.adi");
+                File.WriteAllText(seed, "test\n<eoh>\n" +
+                    Q("W1AW", "20m", "14.074", "183300", "FN31") +
+                    Q("W1AW", "20m", "14.074", "183500", "FN31", "second copy") +   // the same contact, 2 minutes on
+                    Q("K1ABC", "20m", "14.074", "190000", "FN3") +                 // a grid that is no locator
+                    Q("N0XYZ", "20m", "7.074", "191000", "EN34"));                 // a band its frequency is not in
+                List<NexusQso> Rows() => client.Rows().Rows;
+                string Id(string call) => Rows().First(q => q.Call == call).Id;
+
+                using (var p = NexusLogTools.ImportPreview(seed))
+                    Check("import preview: 4 contacts, all new, nothing written", p.Ok && NexusLogTools.Num(p.Root, "contacts") == 4 && NexusLogTools.Num(p.Root, "new") == 4 && Rows().Count == 0, true);
+                string importRun;
+                using (var a = NexusLogTools.Import(seed, false, "test import"))
+                {
+                    importRun = NexusLogTools.Str(a.Root, "run");
+                    Check("import: 4 added as one run, with the no-loss report", a.Ok && NexusLogTools.Num(a.Root, "added") == 4 && importRun != null && a.Root.TryGetProperty("report", out _), true);
+                }
+                using (var a = NexusLogTools.Import(seed, true, "test import again"))
+                    Check("Import new only: nothing added, the 4 left as they are", a.Ok && NexusLogTools.Num(a.Root, "added") == 0 && Rows().Count == 4, true);
+
+                List<NexusLogTools.MergeAsk> asks;
+                using (var d = NexusLogTools.FindDuplicates(false))
+                {
+                    var groups = NexusLogTools.List(d.Root, "groups").ToList();
+                    Check("duplicates: one group, the two W1AW copies", d.Ok && groups.Count == 1 && NexusLogTools.List(groups[0], "copies").Count() == 2, true);
+                    asks = groups.Select(g => new NexusLogTools.MergeAsk
+                    {
+                        Keep = NexusLogTools.Str(g, "keep"),
+                        Copies = NexusLogTools.List(g, "copies").Select(c => (NexusLogTools.Str(c, "id"), NexusLogTools.Str(c, "revision"))).ToList(),
+                    }).ToList();
+                }
+                using (var m = NexusLogTools.Merge(asks))
+                    Check("merge: one W1AW left, holding the second copy's comment", m.Ok && Rows().Count(q => q.Call == "W1AW") == 1 && Rows().First(q => q.Call == "W1AW").Comment == "second copy", true);
+                // The merge kept the fuller copy, which already held the comment: that copy is not
+                // edited, so its history is its logging, by the import.
+                using (var h = NexusLogTools.History(Id("W1AW")))
+                {
+                    var entries = NexusLogTools.List(h.Root, "entries").ToList();
+                    Check("history: the kept contact's logging, by the import", h.Ok && entries.Count >= 1 &&
+                        NexusLogTools.Str(entries[0], "kind") == "create" && NexusLogTools.Str(entries[0], "source") == "import", true);
+                }
+                string goneId;
+                using (var del = NexusLogTools.RecentlyDeleted())
+                {
+                    var gone = NexusLogTools.List(del.Root, "entries").ToList();
+                    goneId = gone.Select(e => NexusLogTools.Str(e, "id")).FirstOrDefault();
+                    Check("Recently deleted: the merged-away W1AW copy", del.Ok && gone.Count == 1 && NexusLogTools.Str(gone[0], "call") == "W1AW", true);
+                }
+                // Nexus: a contact the log held beside it before the delete never stops it coming back.
+                using (var r = NexusLogTools.Restore(goneId, false, "test restore"))
+                    Check("restore: the merged-away copy back, beside the one kept", r.Ok && NexusLogTools.Num(r.Root, "changed") == 1 && Rows().Count(q => q.Call == "W1AW") == 2, true);
+                using (var r = NexusLogTools.Restore(goneId, false, "test restore again"))
+                    Check("restore again: nothing to put back, it is in the log", r.Ok && NexusLogTools.Num(r.Root, "changed") == 0 &&
+                        NexusLogTools.List(r.Root, "refused").Any(x => x.EnumerateArray().Skip(1).First().GetString() == "alreadyThere"), true);
+
+                List<NexusLogTools.Fix> fixes;
+                using (var c = NexusLogTools.Check())
+                {
+                    var problems = NexusLogTools.List(c.Root, "problems").ToList();
+                    bool Has(string call, string kind, string fix) => problems.Any(p => NexusLogTools.Str(p, "call") == call && NexusLogTools.Str(p, "kind") == kind && NexusLogTools.Str(p, "fixValue") == fix);
+                    Check("check: K1ABC's grid FN3, fix FN", Has("K1ABC", "Grid", "FN"), true);
+                    Check("check: N0XYZ's band 20m on 7.074 MHz, fix 40m", Has("N0XYZ", "BandFreq", "40m"), true);
+                    fixes = problems.Where(p => NexusLogTools.Flag(p, "hasFix")).Select(p => new NexusLogTools.Fix
+                    { Id = NexusLogTools.Str(p, "id"), Field = NexusLogTools.Str(p, "field"), Expect = NexusLogTools.Str(p, "current"), Value = NexusLogTools.Str(p, "fixValue") }).ToList();
+                }
+                string fixRun;
+                using (var f = NexusLogTools.ApplyFixes(fixes))
+                {
+                    fixRun = NexusLogTools.Str(f.Root, "run");
+                    Check("fixes made: K1ABC grid FN, N0XYZ on 40m", f.Ok && Rows().First(q => q.Call == "K1ABC").Grid == "FN" && Rows().First(q => q.Call == "N0XYZ").Band == "40m", true);
+                }
+                using (var u = NexusLogTools.UndoRun(fixRun, "undo fixes"))
+                    Check("undo the fixes: K1ABC's grid FN3 again, N0XYZ on 20m", u.Ok && Rows().First(q => q.Call == "K1ABC").Grid == "FN3" && Rows().First(q => q.Call == "N0XYZ").Band == "20m", true);
+
+                var ids = Rows().Select(q => q.Id).ToList();
+                var rig = new List<(string, string)> { ("MY_RIG", "IC-7300") };
+                using (var p = NexusLogTools.BulkPreview(ids, rig))
+                    Check("bulk preview: every contact changes, nothing moves call", p.Ok && NexusLogTools.Num(p.Root, "change") == ids.Count && NexusLogTools.Num(p.Root, "moves") == 0, true);
+                string bulkRun;
+                using (var b = NexusLogTools.BulkEdit(ids, rig, ids.Count, 0, null, "test bulk"))
+                {
+                    bulkRun = NexusLogTools.Str(b.Root, "run");
+                    Check("bulk edit: my rig on every contact, one run", b.Ok && Rows().All(q => q.MyRig == "IC-7300") && bulkRun != null, true);
+                }
+                using (var b = NexusLogTools.BulkEdit(ids, rig, ids.Count + 1, 0, null, "test bulk"))
+                    Check("bulk edit refused, nothing changed, when the contacts are not those previewed", !b.Ok, true);
+                Check("the bulk edit is listed for Undo a change", NexusLogTools.RecordedRuns().Any(r => r.Run == bulkRun), true);
+                using (var u = NexusLogTools.UndoRun(bulkRun, "undo bulk"))
+                    Check("undo the bulk edit: no rig again", u.Ok && Rows().All(q => string.IsNullOrEmpty(q.MyRig)), true);
+
+                // Update from callbook: Jimmy Next's lookup answer, Nexus's fill rule.
+                var one = new List<string> { Id("N0XYZ") };
+                var answers = new Dictionary<string, object>
+                {
+                    ["N0XYZ"] = NexusLogTools.AnswerOf("N0XYZ", new LookupRecord { Callsign = "N0XYZ", Name = "Pat", State = "MN", Grid = "EN35" }),
+                };
+                using (var p = NexusLogTools.CallbookPreview(one, null))
+                    Check("callbook preview: the call to look up", p.Ok && NexusLogTools.List(p.Root, "calls").Select(c => c.GetString()).SequenceEqual(new[] { "N0XYZ" }), true);
+                string fillRun;
+                using (var f = NexusLogTools.CallbookFill(one, answers, 1))
+                {
+                    fillRun = NexusLogTools.Str(f.Root, "run");
+                    var n = Rows().First(q => q.Call == "N0XYZ");
+                    Check("callbook fill: name and state filled, the logged grid kept", f.Ok && n.Name == "Pat" && n.State == "MN" && n.Grid == "EN34", true);
+                }
+                using (var u = NexusLogTools.UndoRun(fillRun, "undo fill"))
+                    Check("undo the fill: no name again", u.Ok && string.IsNullOrEmpty(Rows().First(q => q.Call == "N0XYZ").Name), true);
+                // Awards by Nexus's own keys (2026-10-31): WAE countries (Sicily apart from Italy) and
+                // CQ WPX prefixes, carried into the read copy and counted by Jimmy Next's rule engine.
+                string awards = Path.Combine(work, "awards.adi");
+                File.WriteAllText(awards, "test\n<eoh>\n" +
+                    Q("IT9ABC", "20m", "14.074", "200000", "JM77") + Q("I2ABC", "20m", "14.074", "200500", "JN45") +
+                    Q("PA/N8BJQ", "20m", "14.074", "201000", "JO22") + Q("N8BJQ/KH9", "20m", "14.074", "201500", "AK19"));
+                using (var a = NexusLogTools.Import(awards, false, "test awards")) Check("award contacts imported", a.Ok && NexusLogTools.Num(a.Root, "added") == 4, true);
+                NexusLogbook.Refresh();
+                var wae = RuleEngine.Evaluate(new RuleDefinition
+                {
+                    Id = "WAE_T", Name = "WAE test", FormatVersion = 1, Enabled = true, GroupBy = RuleGroupBy.WaeCountry,
+                    Target = RuleTargetType.Count, Threshold = 1, Confirmation = RuleConfirmation.None,
+                }, NexusLogbook.ProjectionPath, null);
+                Check("WAE: Sicily (IT) and Italy (I) are two countries", wae.WorkedItems != null && wae.WorkedItems.Contains("IT") && wae.WorkedItems.Contains("I"), true);
+                Check("WAE: a US station is no WAE country", wae.WorkedItems != null && !wae.WorkedItems.Any(w => w.StartsWith("W")), true);
+                var wpx = RuleEngine.Evaluate(new RuleDefinition
+                {
+                    Id = "WPX_T", Name = "WPX test", FormatVersion = 1, Enabled = true, GroupBy = RuleGroupBy.Prefix,
+                    Target = RuleTargetType.Count, Threshold = 1, Confirmation = RuleConfirmation.None,
+                }, NexusLogbook.ProjectionPath, null);
+                Check("WPX: PA/N8BJQ is PA0 and N8BJQ/KH9 is KH9, by CQ's rule", wpx.WorkedItems != null && wpx.WorkedItems.Contains("PA0") && wpx.WorkedItems.Contains("KH9") && !wpx.WorkedItems.Contains("N8"), true);
+                Check("WPX: every prefix in the log counts, not only one (W1 K1 N0 IT9 I2 PA0 KH9)", wpx.Worked == 7, true);
+
+                // A Cabrillo log made ADIF by Nexus's own reading, for Jimmy Next to mark as it marks every import.
+                string cbr = Path.Combine(work, "fd.log"), cbrAdi = Path.Combine(work, "fd.adi");
+                File.WriteAllText(cbr, "START-OF-LOG: 3.0\nCONTEST: ARRL-FD\nQSO: 7000 DG 2024-06-22 1805 W9XYZ 3A WI K1ABC 2A CT\nEND-OF-LOG:\n");
+                using (var p = NexusLogTools.ImportPreview(cbr))
+                    Check("Cabrillo: previewed as one contact", p.Ok && NexusLogTools.Str(p.Root, "format") == "cabrillo" && NexusLogTools.Num(p.Root, "contacts") == 1, true);
+                using (var c = NexusLogTools.ToAdif(cbr, cbrAdi))
+                    Check("Cabrillo: made ADIF, K1ABC on 40m", c.Ok && AdifParser.Parse(File.ReadAllText(cbrAdi)).Any(r => r["CALL"] == "K1ABC" && r["BAND"].Equals("40m", StringComparison.OrdinalIgnoreCase)), true);
+                Check("a portable call's answer carries no location",
+                    System.Text.Json.JsonSerializer.Serialize(NexusLogTools.AnswerOf("N0XYZ/P", new LookupRecord { Name = "Pat", State = "MN", Grid = "EN35" })).Contains("\"state\":null"), true);
+                client.Shutdown(token);
+            }
+        }
+        finally
+        {
+            NexusLogbook.Reset();
+            NexusLogbook.TestFolderOverride = null; NexusLogbook.TestPortOverride = null; NexusLogbook.TestForceActive = null;
+        }
+    }
+
     static void NexusDxccTests(string engineExe, string work)
     {
         Console.WriteLine("\n--- NexusDxccTests ---");
@@ -980,6 +1295,9 @@ static class JimmyTests
                     q.EditKey = null; q.Dxcc = null;
                     // Worked out from the DXCC number as the row is read (Nexus 1.19), not stored.
                     q.CountryByDxcc = null; q.ShownCountry = null; q.CallDxcc = null; q.CallCountry = null; q.CountryTextDxcc = null;
+                    // Also worked out as the row is read (2.0.86): once the repair sets DXCC 522, the logged
+                    // "Republic of Kosovo" is correctly seen as only a spelling of its name.
+                    q.CountrySpellingOnly = false;
                     q.Extra = q.Extra.Where(e => e.Count < 1 || !string.Equals(e[0], "CONT", StringComparison.OrdinalIgnoreCase)).ToList();
                     return System.Text.Json.JsonSerializer.Serialize(q, json);
                 }
@@ -993,6 +1311,29 @@ static class JimmyTests
                 Check("repair: Z62NS gets DXCC 522 and continent EU", z.Dxcc == 522 && z.ExtraValue("CONT") == "EU", true);
                 Check("repair: its country (already set) and everything else unchanged", Snap(Row("Z62NS")) == before, true);
                 Check("repair again: nothing left to fill", new NexusLogbookService().BackfillMissingEntities() == 0, true);
+
+                // 2026-10-31 (KF4CCG): our own state as typed -- a full name, and a county in the
+                // state box -- refused by TQSL; the startup repair gives each its code.
+                string seedOwn = Path.Combine(work, "seed-own.adi");
+                string Own(string call, string time, string state, string cnty, string note) =>
+                    F("CALL", call) + F("BAND", "40m") + F("MODE", "FT8") + F("QSO_DATE", "20261021") + F("TIME_ON", time) +
+                    F("MY_STATE", state) + (cnty != null ? F("MY_CNTY", cnty) : "") + F("MY_DXCC", "291") +
+                    F("APP_JIMMY_TQSL_LOCATION", "home") + F("APP_JIMMY_TQSL_LOC_FP", "KF4CCG|EM87|KY|BREATHITT|291|5|8") +
+                    F("APP_JIMMY_REVIEW", note) + " <eor>\n";
+                File.WriteAllText(seedOwn, "test\n<eoh>\n" +
+                    Own("W1IR", "183345", "KENTUCKY", "KENTUCKY,Breathitt", "our location differs from TQSL location 'home': state KENTUCKY vs KY") +
+                    Own("KB3CCJ", "183800", "BREATHITT", null, "our location differs from TQSL location 'home': state BREATHITT vs KY, grid EM87 vs EM88"));
+                client.Import(seedOwn);
+                var own = new NexusLogbookService().RepairOwnStates();
+                var w1ir = Row("W1IR"); var kb3 = Row("KB3CCJ");
+                Console.WriteLine($"  own state: {own.Fixed} fixed (was {string.Join(", ", own.Was)}); W1IR {w1ir.ExtraValue("MY_STATE")} {w1ir.ExtraValue("MY_CNTY")}; KB3CCJ {kb3.ExtraValue("MY_STATE")}");
+                Check("own state: KENTUCKY becomes KY, county KY,Breathitt, its review note gone",
+                    w1ir.ExtraValue("MY_STATE") == "KY" && w1ir.ExtraValue("MY_CNTY") == "KY,Breathitt" && w1ir.ExtraValue("APP_JIMMY_REVIEW") == null, true);
+                Check("own state: BREATHITT takes the recorded TQSL location's KY; the grid difference stays noted",
+                    kb3.ExtraValue("MY_STATE") == "KY" && kb3.ExtraValue("MY_CNTY") == null &&
+                    kb3.ExtraValue("APP_JIMMY_REVIEW") == "our location differs from TQSL location 'home': grid EM87 vs EM88", true);
+                Check("own state: the TQSL location is unchanged", kb3.ExtraValue("APP_JIMMY_TQSL_LOC_FP") == "KF4CCG|EM87|KY|BREATHITT|291|5|8", true);
+                Check("own state: the KY contact from before (Z62NS has none) untouched, and nothing left", own.Fixed == 2 && new NexusLogbookService().RepairOwnStates().Fixed == 0, true);
 
                 // 2026-09-28: a US contact stored without a state (KA1MXL on 80m stayed "WAS Needed").
                 string seedState = Path.Combine(work, "seed-state.adi");
@@ -1099,8 +1440,28 @@ static class JimmyTests
                     Console.WriteLine($"  lotw merge: {merged.Errors ?? "ok"}; K7PRK state {k7.State} lotw {k7.ExtraValue("APP_JIMMY_LOTW_STATE")}; W1AW state '{w1.State}' country '{w1.Country}' lotw {w1.ExtraValue("APP_JIMMY_LOTW_STATE")}");
                     Check("LoTW merge: confirmed, logged state kept, LoTW's state kept beside it",
                         k7.QslRcvd.Lotw && k7.State == "ID" && k7.ExtraValue("APP_JIMMY_LOTW_STATE") == "WY" && k7.ExtraValue("APP_JIMMY_LOTW_CNTY") == "WY,TETON", true);
-                    Check("LoTW merge: an imported blank state and country stay blank",
-                        w1.QslRcvd.Lotw && string.IsNullOrEmpty(w1.State) && w1.Country == null && w1.ExtraValue("APP_JIMMY_LOTW_STATE") == "CT", true);
+                    // LoTW fills what the log leaves blank (operator, 2026-10-23) -- since Nexus 1.21 by
+                    // Nexus's own merge (keep_lotw_detail, apply_match), which never touches a logged value.
+                    Check("LoTW merge: a blank state is filled from LoTW",
+                        w1.QslRcvd.Lotw && w1.State == "CT" && w1.ExtraValue("APP_JIMMY_LOTW_STATE") == "CT", true);
+                    Check("LoTW merge: a blank county is filled by Nexus; the disputed logged state stays and waits for review",
+                        k7.ExtraValue("CNTY") == "WY,TETON" && k7.State == "ID"
+                        && NexusDownloadedChanges.Load().Items.Any(p => p.Call == "K7PRK" && p.Field == "State" && !p.Declined)
+                        && !NexusDownloadedChanges.Load().Items.Any(p => p.Call == "K7PRK" && p.Field == "County"), true);
+
+                    // 2026-10-23 (operator): QRZ's location is no longer asked about. The row must still pair
+                    // (the diagnostics list names it) -- else "nothing proposed" would prove nothing.
+                    string qrzReport = "<eoh>\n" + F2("CALL", "W1AW") + F2("BAND", "80M") + F2("MODE", "FT8") + F2("QSO_DATE", "20260928") +
+                        F2("TIME_ON", "220000") + F2("STATE", "MA") + F2("CNTY", "MA,Essex") + F2("APP_QRZLOG_STATUS", "C") + " <eor>\n";
+                    var qrzMerged = new NexusLogbookService().MergeDownload(qrzReport, "QRZ");
+                    var diagFile = Directory.Exists(NexusSyncDiagnostics.Folder)
+                        ? new DirectoryInfo(NexusSyncDiagnostics.Folder).GetFiles("*location-qrz*").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault() : null;
+                    bool qrzSeen = diagFile != null && File.ReadAllText(diagFile.FullName).Contains("QRZ says MA");
+                    var w1After = client.Rows().Rows.Single(q => q.Call == "W1AW");
+                    Console.WriteLine($"  qrz merge: {qrzMerged.Errors ?? "ok"}; seen in diagnostics: {qrzSeen}; W1AW state {w1After.State} county '{w1After.ExtraValue("CNTY")}'");
+                    Check("QRZ merge: its location differences are not listed for review, and nothing is changed",
+                        qrzSeen && !NexusDownloadedChanges.Load().Items.Any(p => p.Service == "QRZ")
+                        && w1After.State == "CT" && string.IsNullOrEmpty(w1After.ExtraValue("CNTY")), true);
                 }
                 finally { NexusLogbookService.OurLocationFields = null; NexusLogbookService.OurPark = null; }
                 client.Shutdown(token);
@@ -1354,10 +1715,22 @@ static class JimmyTests
             Console.WriteLine("=== " + passed + " passed, " + failed + " failed ===");
             Environment.Exit(failed > 0 ? 1 : 0);
         }
+        if (args.Length >= 3 && args[0] == "--nexus-lotw-tests")
+        {
+            NexusLotwUploadTests(args[1], args[2]);
+            Console.WriteLine("=== " + passed + " passed, " + failed + " failed ===");
+            Environment.Exit(failed > 0 ? 1 : 0);
+        }
         if (args.Length >= 3 && args[0] == "--nexus-dxcc-tests")
         {
             NexusDxccTests(args[1], args[2]);
             Console.WriteLine("=== " + passed + " passed, " + failed + " failed ===");
+            Environment.Exit(failed > 0 ? 1 : 0);
+        }
+        if (args.Length >= 3 && args[0] == "--nexus-logtool-tests")
+        {
+            NexusLogToolTests(args[1], args[2]);
+            Console.WriteLine($"\n=== {passed} passed, {failed} failed ===");
             Environment.Exit(failed > 0 ? 1 : 0);
         }
         if (args.Length >= 3 && args[0] == "--nexus-pairing-tests")
@@ -1474,6 +1847,7 @@ static class JimmyTests
         RuleUniverseClubLogTests();
         ClubLogBigCtyResolutionTests();
         RuleEngineCoreTests();
+        AwardReviewTests();
         RuleEngineDateRangeTests();
         RuleEngineBandIndependenceTests();
         RuleEngineWorkedBandsTests();
@@ -9905,6 +10279,29 @@ static class JimmyTests
         var none = TqslUploadClient.ParseFinalStatus("no status line here at all");
         Check("missing status line yields null code (must be treated as failure, not assumed success)", none.Code == null, true);
         Check("empty stderr yields null code", TqslUploadClient.ParseFinalStatus("").Code == null, true);
+
+        // KF4CCG's report, 2026-10-22: our state as typed ("KENTUCKY") refused every contact.
+        string refused =
+            "This log has invalid QSO information\n" +
+            "The log being signed has 'US County State' set to value 'KENTUCKY' which is not valid on line 5\n" +
+            "This log has invalid QSO information\n" +
+            "The log being signed has 'US County State' set to value 'KENTUCKY' which is not valid on line 6\n" +
+            "No QSOs to upload\n  Final Status: No QSOs to upload(8)\n";
+        var r = TqslUploadClient.InvalidRefusals(refused);
+        Check("invalid refusals: one per contact", r.Count == 2, true);
+        CheckStr("invalid refusals: TQSL's reason, once", r.Why, "US County State KENTUCKY is not valid");
+        Check("invalid refusals: none in a plain code 8", TqslUploadClient.InvalidRefusals("Previously Signed QSO detected on line 5\nFinal Status: No QSOs to upload(8)").Count == 0, true);
+        CheckStr("own state: a full name is its code", StationSettings.NormalizeQthState(" Kentucky "), "KY");
+        CheckStr("own state: a code stays", StationSettings.NormalizeQthState("ky"), "KY");
+        CheckStr("own state: a province name is its code", StationSettings.NormalizeQthState("British Columbia"), "BC");
+        CheckStr("own state: anything else is kept as typed", StationSettings.NormalizeQthState("nsw"), "NSW");
+        CheckStr("own state: the recorded TQSL location's state", NexusLogbookService.RecordedTqslState("KF4CCG|EM87|KY|BREATHITT|291|5|8"), "KY");
+        Check("own state: no state in a missing fingerprint", NexusLogbookService.RecordedTqslState(Controller.TqslLocationMissing) == null, true);
+        CheckStr("own state: the review note loses the fixed difference",
+            NexusLogbookService.WithoutStateDifference("our location differs from TQSL location 'home': state KENTUCKY vs KY, grid EM87 vs EM88", "KENTUCKY", "KY"),
+            "our location differs from TQSL location 'home': grid EM87 vs EM88");
+        CheckStr("own state: a note left with no difference goes",
+            NexusLogbookService.WithoutStateDifference("our location differs from TQSL location 'home': state BREATHITT vs KY", "BREATHITT", "KY"), "");
     }
 
     // ── TqslUploadClient.ClassifyFinalStatus ────────────────────────────────────
@@ -10796,6 +11193,56 @@ static class JimmyTests
         {
             try { Directory.Delete(tmpRoot2, true); } catch { }
         }
+    }
+
+    // ── Award review, 2026-11-02 ──────────────────────────────────────────────
+    // Found by counting a real log against Nexus's own award fold: IOTA counted the "NONE" a log
+    // carries for no island; a count award limited to a fixed list had no still-needed list, so
+    // it could not be tracked live; WPX and WAE are now matched live by Nexus's keys.
+    static void AwardReviewTests()
+    {
+        Console.WriteLine("\n── Award review: IOTA NONE, limited lists, live WPX/WAE ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_AwardReview_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var db = new LogbookDb(tmpDb))
+            {
+                foreach (var (call, iota) in new[] { ("SV5ADM", "NONE"), ("G3ABC", "EU-005"), ("K1ABC", "") })
+                    SeedQso(db, new Dictionary<string, object>
+                    {
+                        ["callsign"] = call, ["band"] = "20m", ["mode"] = "FT8", ["qso_date"] = "20241201", ["time_on"] = "1200",
+                        ["state"] = "", ["country"] = "Test", ["dxcc"] = 291L, ["source"] = "MANUAL", ["iota"] = iota,
+                    });
+                var iotaR = RuleEngine.Evaluate(new RuleDefinition
+                {
+                    Id = "IOTA_T", Name = "IOTA test", FormatVersion = 1, Enabled = true, GroupBy = RuleGroupBy.Iota,
+                    Target = RuleTargetType.Count, Threshold = 100, Confirmation = RuleConfirmation.None,
+                }, tmpDb, null);
+                Check("IOTA: \"NONE\" is no island; EU-005 is one", iotaR.Worked == 1 && iotaR.WorkedItems.SequenceEqual(new[] { "EU-005" }), true);
+
+                InsertQso(db, "W5TX", "TX", dxcc: 291, zone: 5);
+                var limited = RuleEngine.Evaluate(new RuleDefinition
+                {
+                    Id = "LIMIT_T", Name = "Limited test", FormatVersion = 1, Enabled = true, GroupBy = RuleGroupBy.State,
+                    LimitTo = "US_50_STATES", Target = RuleTargetType.Count, Threshold = 10, Confirmation = RuleConfirmation.None,
+                }, tmpDb, null);
+                Check("a count award limited to a list: the list is its still-needed list (49 left)",
+                      limited.StillNeeded != null && limited.StillNeeded.Count == 49 && !limited.StillNeeded.Contains("TX"), true);
+            }
+        }
+        catch (Exception ex) { Console.WriteLine($"  FAIL  AwardReviewTests threw: {ex.GetType().Name}: {ex.Message}"); failed++; }
+        finally { try { File.Delete(tmpDb); } catch { } }
+
+        var wae = MakeTags(RuleGroupBy.WaeCountry, "IT", "GM/S");
+        Check("live WAE: Sicily (IT) still needed -> tagged", AwardMatcher.Match(wae, "IT9ABC", null, null, () => 0, () => 0, waeCountry: "IT") == "TEST_RULE", true);
+        Check("live WAE: Italy (I) already worked -> not tagged", AwardMatcher.Match(wae, "I2ABC", null, null, () => 0, () => 0, waeCountry: "I") == null, true);
+        Check("live WAE: no country (outside Europe) -> not tagged", AwardMatcher.Match(wae, "K1ABC", null, null, () => 0, () => 0) == null, true);
+        var wpx = MakeTags(RuleGroupBy.Prefix);
+        wpx["TEST_RULE"].WorkedSet = new HashSet<string>(new[] { "K1", "PA0" }, StringComparer.OrdinalIgnoreCase);
+        Check("live WPX: a prefix not yet worked -> tagged", AwardMatcher.Match(wpx, "IT9ABC", null, null, () => 0, () => 0, wpxPrefix: "IT9") == "TEST_RULE", true);
+        Check("live WPX: a prefix already worked -> not tagged", AwardMatcher.Match(wpx, "PA/N8BJQ", null, null, () => 0, () => 0, wpxPrefix: "PA0") == null, true);
+        Check("live tracking allowed for WPX and WAE", RuleEngine.SupportsLiveTag(new RuleDefinition { GroupBy = RuleGroupBy.Prefix })
+              && RuleEngine.SupportsLiveTag(new RuleDefinition { GroupBy = RuleGroupBy.WaeCountry }), true);
     }
 
     // ── RuleEngine core evaluation ────────────────────────────────────────────
@@ -13949,6 +14396,71 @@ static class JimmyTests
                 wc.TestSetLoggedCallTx("W4HHN", false);
                 wc.TestShowStatus();
                 Check("Logged while receiving: still waits for the end of the receive period", view.CoordinatedSpeakCount == 0, true);
+                wc.TestSetLoggedCallTx(null, false);
+            }
+
+            // 2026-10-22 (K4LLL, Nexus 1.20): the 73 went out while "Sending R -05" was said -- the
+            // engine keyed it between two polls, so Jimmy never saw it queued. The words now name
+            // the over on the air (the newest own row of this transmission); an own row from the
+            // previous over is not this one's.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                string Mine(string m, long at) => @"{ ""mine"": true, ""message"": """ + m + @""", ""txAt"": " + at + " }";
+                string Snap(string rows) => @"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""txEnabled"": true, ""tuning"": false, ""catOk"": true, ""slot"": 501 },
+                    ""qso"": { ""state"": ""awaitRr73"", ""dxcall"": ""K4LLL"", ""txNow"": ""K4LLL KB0UZT R-05"" },
+                    ""recentDecodes"": [" + rows + "] }";
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(Snap(Mine("K4LLL KB0UZT R-05", now - 15) + "," + Mine("K4LLL KB0UZT 73", now))));
+                wc.TestShowStatus();
+                Check("On the air: the 73 being sent is named, not the R -05 last seen queued",
+                    (view.LastStatusText ?? "").Contains("7 3") && !(view.LastStatusText ?? "").Contains("R -05"), true);
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(Snap(Mine("K4LLL KB0UZT 73", now - 15))));
+                wc.TestShowStatus();
+                Check("On the air: a previous over's row is not this one's -- the queued message is named",
+                    (view.LastStatusText ?? "").Contains("R -05"), true);
+            }
+
+            // 2026-10-22: the after-receive moment waits for the period's full pass (Nexus 1.20 moves
+            // the slot at the early pass, ~12.9 s), and an over that starts first takes it at its start.
+            {
+                Check("After-receive wait: FT8 early pass at 12.9 s waits for the full pass",
+                    Math.Abs(WsjtxClient.AfterRxWaitSecs(2100, 15.0) - 1.75) < 0.01, true);
+                Check("After-receive wait: FT8 past the full pass, FT4 past its pass, a previous period's late fold, other modes: none",
+                    WsjtxClient.AfterRxWaitSecs(100, 15.0) == 0 && WsjtxClient.AfterRxWaitSecs(1000, 7.5) == 0
+                    && WsjtxClient.AfterRxWaitSecs(14000, 15.0) == 0 && WsjtxClient.AfterRxWaitSecs(5000, 30.0) == 0
+                    && WsjtxClient.AfterRxWaitSecs(0, 15.0) == 0, true);
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                string Snap(bool tx, int slot) => @"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": " + (tx ? "true" : "false") + @", ""tuning"": false, ""catOk"": true,
+                    ""slot"": " + slot + @", ""nextSlotMs"": 2100, ""trPeriodSecs"": 15.0 }, ""recentDecodes"": [] }";
+                int before = wc.TestAfterRxFired;
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(Snap(false, 501)));
+                bool heldAtEarlyPass = wc.TestAfterRxFired == before;
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(Snap(true, 501)));
+                Check("After-receive: not at the early pass, said as the next over starts",
+                    heldAtEarlyPass && wc.TestAfterRxFired == before + 1, true);
+            }
+
+            // 2026-10-22 (K4LLL): the contact logged, and the closing decode's render a few ms later
+            // in the SAME poll replaced the waiting "Logged QSO" line in the speech batch. Every
+            // render of that poll carries the logged clause; the next poll's does not.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                wc.TestSetLoggedCallTx("W4HHN", true);
+                wc.TestShowStatus();
+                bool first = (view.LastStatusText ?? "").IndexOf("logged", StringComparison.OrdinalIgnoreCase) >= 0;
+                wc.TestShowStatus();
+                bool sameCycle = (view.LastStatusText ?? "").IndexOf("logged", StringComparison.OrdinalIgnoreCase) >= 0;
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""tuning"": false, ""catOk"": true, ""slot"": 502 }, ""recentDecodes"": [] }"));
+                wc.TestShowStatus();
+                bool nextPoll = (view.LastStatusText ?? "").IndexOf("logged", StringComparison.OrdinalIgnoreCase) >= 0;
+                Check("Logged line: carried by a second render of the same poll, not by the next poll",
+                    first && sameCycle && !nextPoll, true);
                 wc.TestSetLoggedCallTx(null, false);
             }
 
@@ -20912,6 +21424,14 @@ static class JimmyTests
                 .Contains(f.Field, StringComparer.OrdinalIgnoreCase)), true);
         CheckStr("a power that is not a number is refused",
             BulkEditDlg.Validate(new Dictionary<string, string> { ["power"] = "lots" }) ?? "", "Power is not a number of watts.");
+        // 2026-10-31: power, rig, grid and a POTA/SOTA park go to Nexus's own bulk edit; the rest stays Jimmy Next's.
+        var split = new Dictionary<string, string> { ["power"] = "100", ["myGrid"] = "en34", ["myProgram"] = "POTA", ["myRef"] = "us-1234; US-5678", ["comment"] = "c" };
+        var toNexus = BulkEditDlg.TakeNexusChanges(split);
+        Check("bulk edit: power, grid and a POTA park to Nexus, as its fields",
+            toNexus.Count == 3 && toNexus.Contains(("TX_PWR", "100")) && toNexus.Contains(("MY_GRIDSQUARE", "EN34")) && toNexus.Contains(("MY_POTA_REF", "US-1234,US-5678")), true);
+        Check("bulk edit: the comment stays Jimmy Next's own", split.Count == 1 && split.ContainsKey("comment"), true);
+        var wwff = new Dictionary<string, string> { ["myProgram"] = "WWFF", ["myRef"] = "KFF-1234" };
+        Check("bulk edit: another program's park stays Jimmy Next's own", BulkEditDlg.TakeNexusChanges(wwff).Count == 0 && wwff.Count == 2, true);
     }
 
     // Customization package (2026-10-01): settings safety -- only the allowed parts travel, a
@@ -21613,7 +22133,11 @@ static class JimmyTests
     {
         Console.WriteLine("\n── Licence class: setting, ownership, engine argument, transmit lock ──");
         CheckStr("a class is stored in lower case", StationSettings.NormalizeLicenseClass(" General "), "general");
-        CheckStr("an unknown word is 'not set', never a guessed class", StationSettings.NormalizeLicenseClass("advanced"), "");
+        CheckStr("an unknown word is 'not set', never a guessed class", StationSettings.NormalizeLicenseClass("conditional"), "");
+        var nov = new StationSettings { LicenseClass = "novice" };
+        CheckStr("Novice (Nexus 1.21) goes to the engine as it is", nov.EngineLicenseClass, "novice");
+        CheckStr("...and has a readable name", nov.LicenseClassName, "United States, Novice");
+        CheckStr("Advanced is a class too", StationSettings.NormalizeLicenseClass("Advanced"), "advanced");
         var st = new StationSettings();
         CheckStr("not set: the engine gets no class", st.EngineLicenseClass, "");
         st.LicenseClass = "open";
@@ -21884,6 +22408,25 @@ static class JimmyTests
                 Check("matching: a tighter window holds a row outside it", NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null), far).Held == 1, true);
                 NexusReportPairing.MatchMinutes = 45;
                 Check("matching: never more than Nexus's 30 minutes", NexusReportPairing.MatchMinutes == 30, true);
+                NexusReportPairing.MatchMinutes = NexusReportPairing.DefaultMatchMinutes;
+
+                // Nexus 1.21 (2026-10-30): a merge leaves to Nexus's own nearest-first pairing what
+                // the guard cannot settle by itself -- except a QRZ row Nexus would add as a duplicate.
+                var twoNearPaired = NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null), twoNear, nexusPairs: true);
+                Check("nexus pairs: two contacts within 30 minutes: sent to Nexus, not located", twoNearPaired.Sent == 1 && twoNearPaired.Held == 0 && twoNearPaired.Located.Count == 0, true);
+                var lotwDupes = NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null) + Row("KV2J", "1501", null), lone, nexusPairs: true);
+                Check("nexus pairs: two LoTW rows for one contact: both sent (Nexus takes the contact once)", lotwDupes.Sent == 2 && lotwDupes.Held == 0, true);
+                var qrzDupes = NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null) + Row("KV2J", "1501", null), lone, nexusPairs: true, addsUnmatched: true);
+                Check("nexus pairs: two QRZ rows for one contact: both held (the second would be added)", qrzDupes.Held == 2 && qrzDupes.Sent == 0, true);
+                var farDay = new List<NexusQso> { new NexusQso { Id = "d", Call = "KV2J", Band = "20m", Mode = "FT8", WhenUnix = At(120) } };
+                Check("nexus pairs: a LoTW row past Nexus's window from the day's contact is sent (unmatched there)",
+                    NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null), farDay, nexusPairs: true).Sent == 1, true);
+                Check("nexus pairs: a QRZ row past the window is held (it would be added beside the contact)",
+                    NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null), farDay, nexusPairs: true, addsUnmatched: true).Held == 1, true);
+                var withLoc = NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null, F("STATE", "NY") + F("CQZ", "5")), lone, nexusPairs: true, nexusFillsBlanks: true);
+                Check("nexus fills blanks: a LoTW row keeps its location for Nexus's merge", withLoc.Text.Contains("<STATE:2>NY") && withLoc.Text.Contains("<CQZ:1>5"), true);
+                var noLoc = NexusReportPairing.Prepare("<eoh>" + Row("KV2J", "1500", null, F("STATE", "NY")), lone, nexusPairs: true, addsUnmatched: true);
+                Check("QRZ rows still lose the fields Nexus's merge would fill", noLoc.Text.Contains("<STATE:"), false);
             }
             finally { NexusReportPairing.MatchMinutes = NexusReportPairing.DefaultMatchMinutes; }
 

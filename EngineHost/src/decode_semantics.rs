@@ -148,6 +148,13 @@ pub struct DecodeSemantics {
     /// by assumption). Empty for every other decode.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<DecodeSemantics>,
+    /// The sender's CQ WPX prefix and DARC WAE country (2026-11-02), by Nexus's own rules
+    /// (`logbook_host::call_award_keys`) -- what Jimmy's live award tags match a heard station
+    /// against. Absent when the sender is unknown or the rule gives none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wpx_prefix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wae_country: Option<&'static str>,
 }
 
 impl DecodeSemantics {
@@ -230,6 +237,12 @@ impl DecodeSemantics {
             }
         };
 
+        // A hashed compound sender keeps its brackets (module header); its keys are its call's.
+        let (wpx_prefix, wae_country) = match from.as_deref().map(|f| f.trim_matches(|c| c == '<' || c == '>')) {
+            Some(c) if message::is_callsign(c) => crate::logbook_host::call_award_keys(c, None),
+            _ => (None, None),
+        };
+
         DecodeSemantics {
             schema_version: SCHEMA_VERSION,
             raw_message: raw_message.to_string(),
@@ -245,6 +258,8 @@ impl DecodeSemantics {
             qso_relation,
             multi_answer,
             parts: parts.unwrap_or_default(),
+            wpx_prefix,
+            wae_country,
         }
     }
 
@@ -311,6 +326,18 @@ mod tests {
         assert_eq!(s.grid.as_deref(), Some("FN42"));
         assert_eq!(s.call_form, SemCallForm::Standard);
         assert!(!s.addressed_to_me);
+    }
+
+    #[test]
+    fn a_heard_station_carries_its_wpx_prefix_and_wae_country() {
+        let sicily = sem("CQ IT9ABC JM67");
+        assert_eq!(sicily.wpx_prefix.as_deref(), Some("IT9"));
+        assert_eq!(sicily.wae_country, Some("IT"), "Sicily counts apart from Italy");
+        let us = sem("W9XYZ K1ABC FN42");
+        assert_eq!(us.wpx_prefix.as_deref(), Some("K1"));
+        assert_eq!(us.wae_country, None, "not in Europe");
+        let free = sem("TNX FER QSO 73");
+        assert_eq!((free.wpx_prefix, free.wae_country), (None, None));
     }
 
     #[test]

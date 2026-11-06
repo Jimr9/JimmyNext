@@ -1,0 +1,64 @@
+diff --git a/src/qso.rs b/src/qso.rs
+index aa98125..56ed030 100644
+--- a/src/qso.rs
++++ b/src/qso.rs
+@@ -840,6 +840,14 @@ impl Station {
+         if self.state == State::Done {
+             self.pending = None;
+         }
++        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): our closing RR73 goes once, as
++        // WSJT-X sends it (RR73 is a 73 message, `message_is_73`). Left queued it went out every
++        // slot at a silent partner outside a CQ run; a repeated report re-queues it (#59's arms
++        // in `observe`), and a CQ run resumes from Confirming as before. An RRR is not a 73
++        // message and keeps going, as in WSJT-X.
++        if self.state == State::Confirming && matches!(self.pending, Some(Msg::Rr73 { .. })) {
++            self.pending = None;
++        }
+     }
+ 
+     fn log(&mut self, s: String) {
+@@ -1521,6 +1529,44 @@ mod start_context_tests {
+         assert_eq!(s.state, State::Confirming, "still closing, not finished");
+     }
+ 
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): THE CLOSING RR73 GOES ONCE.
++    ///
++    /// The test above stands in for "we transmit our closing over" with `s.pending = None` —
++    /// but the real `after_tx` cleared `pending` only at `Done`, so outside a CQ run (a station
++    /// that called us, answered with Enter) our RR73 stayed queued, uncapped, and went out every
++    /// slot until the partner's 73 or the watchdog, with nothing heard (live 2026-10-21: three
++    /// RR73s at a silent partner). WSJT-X counts RR73 as a 73 message (`message_is_73`) and does
++    /// not send it again unless the partner repeats their report (the arms above).
++    #[test]
++    fn jimmy_compat_the_closing_rr73_goes_once_unless_the_partner_asks_again() {
++        let mut s = start("KD9TAW W9XYZ R-02", -8);
++        assert_eq!(s.pending_text().as_deref(), Some("W9XYZ KD9TAW RR73"));
++        s.after_tx(); // our RR73 is on the air
++        assert_eq!(s.state, State::Confirming, "the contact is made; waiting for their 73");
++        assert!(s.outgoing_rv().is_none(), "nothing more to send at a silent partner");
++        s.observe(&[]); // a silent period changes nothing
++        assert!(s.outgoing_rv().is_none(), "still nothing to send");
++        // They did not copy it and ask again: the roger goes again, once (issue #59's arm).
++        s.observe(&[dec("KD9TAW W9XYZ R-02", -8)]);
++        assert_eq!(s.pending_text().as_deref(), Some("W9XYZ KD9TAW RR73"));
++        s.after_tx();
++        assert!(s.outgoing_rv().is_none(), "the re-sent roger goes once too");
++        s.observe(&[dec("KD9TAW W9XYZ 73", -8)]);
++        assert_eq!(s.state, State::Done, "their 73 still closes it");
++    }
++
++    /// ...but an RRR is not a 73 message: WSJT-X keeps it going until the partner's 73, and so
++    /// does Nexus (the 73 that answers it depends on our RRR being the over on the air).
++    #[test]
++    fn jimmy_compat_a_closing_rrr_is_not_a_73_and_keeps_going() {
++        let mut s = Station::start(ME, MY_GRID, DX, Some((&Msg::parse("KD9TAW W9XYZ R-02"), -8)), false, false);
++        s.confirm_with_rrr = true;
++        s.observe(&[dec("KD9TAW W9XYZ R-02", -8)]); // re-queue as RRR under the RRR setting
++        assert_eq!(s.pending_text().as_deref(), Some("W9XYZ KD9TAW RRR"));
++        s.after_tx();
++        assert_eq!(s.pending_text().as_deref(), Some("W9XYZ KD9TAW RRR"), "RRR still queued");
++    }
++
+     /// The same for a BARE repeated report (no R prefix) — the partner never got as far as
+     /// rogering us, so they are still asking for the step before.
+     #[test]

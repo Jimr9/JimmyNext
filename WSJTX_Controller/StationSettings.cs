@@ -36,12 +36,16 @@ namespace WSJTX_Controller
         // callsign and grid (SharedSettings "Station"), and never carried in a support package.
         public string LicenseClass { get; set; } = "";
 
-        internal static readonly string[] LicenseClassValues = { "", "technician", "general", "extra", "open" };
+        // Novice and Advanced since Nexus 1.21 (grandfathered US classes; the lockout holds each to
+        // its own segments). Stored as the word, so their place in the list is free.
+        internal static readonly string[] LicenseClassValues = { "", "novice", "technician", "general", "advanced", "extra", "open" };
         internal static readonly string[] LicenseClassNames =
         {
             "Not set, no transmit limits",
+            "United States, Novice",
             "United States, Technician",
             "United States, General",
+            "United States, Advanced",
             "United States, Amateur Extra",
             "Outside the United States, no limits applied",
         };
@@ -50,9 +54,15 @@ namespace WSJTX_Controller
             string v = (value ?? "").Trim().ToLowerInvariant();
             return System.Array.IndexOf(LicenseClassValues, v) >= 0 ? v : "";
         }
-        // The word the engine is given: one of its three classes, or "" for no lockout.
+        // Our state or province as LoTW takes it: a US state's or Canadian province's full name
+        // becomes its code ("Kentucky" -> "KY"); anything else is kept as typed, in capitals
+        // (another country's own region codes).
+        internal static string NormalizeQthState(string value) =>
+            SpotRows.StateCode(value) ?? (value ?? "").Trim().ToUpperInvariant();
+        // The word the engine is given: one of its five classes, or "" for no lockout.
         internal string EngineLicenseClass =>
-            LicenseClass == "technician" || LicenseClass == "general" || LicenseClass == "extra" ? LicenseClass : "";
+            LicenseClass == "technician" || LicenseClass == "general" || LicenseClass == "extra" ||
+            LicenseClass == "novice" || LicenseClass == "advanced" ? LicenseClass : "";
         internal string LicenseClassName
         {
             get { int i = System.Array.IndexOf(LicenseClassValues, LicenseClass ?? ""); return LicenseClassNames[i < 0 ? 0 : i]; }
@@ -63,7 +73,7 @@ namespace WSJTX_Controller
             if (ini.KeyExists("stationOperatorCall")) OperatorCallsign = ini.Read("stationOperatorCall");
             if (ini.KeyExists("stationOperatorName")) OperatorName = ini.Read("stationOperatorName");
             if (ini.KeyExists("stationContestEmail")) ContestEmail = ini.Read("stationContestEmail");
-            if (ini.KeyExists("stationQthState")) QthState = ini.Read("stationQthState");
+            if (ini.KeyExists("stationQthState")) QthState = NormalizeQthState(ini.Read("stationQthState"));
             if (ini.KeyExists("stationCounty")) County = ini.Read("stationCounty");
             if (ini.KeyExists("stationArrlSection")) ArrlSection = ini.Read("stationArrlSection");
             if (ini.KeyExists("stationCqZone")) CqZone = ini.Read("stationCqZone");

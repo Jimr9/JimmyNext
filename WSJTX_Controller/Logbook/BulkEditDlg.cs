@@ -62,9 +62,10 @@ namespace WSJTX_Controller
             var intro = new TextBox
             {
                 Multiline = true, ReadOnly = true, BorderStyle = BorderStyle.None, BackColor = SystemColors.Control,
-                Width = 460, Height = 84, TabIndex = tab++, AccessibleName = "About bulk edit",
+                Width = 460, Height = 110, TabIndex = tab++, AccessibleName = "About bulk edit",
                 Text = $"Check each field to change on all {count} selected contacts and type its new value. " +
-                       "A checked field left blank is cleared. The logbook is backed up first. " +
+                       "A checked field left blank is cleared. Power, rig, grid and a POTA or SOTA park are one change " +
+                       "that Clean Up, Undo a change takes back; for the other fields the logbook is backed up first. " +
                        "Field changes are not sent again to QRZ, Club Log or LoTW; to send contacts again, " +
                        "check the services under Mark not sent to.",
             };
@@ -170,6 +171,41 @@ namespace WSJTX_Controller
             var names = services.Select(s => NotSentServices.First(x => x.Service == s).Label).ToList();
             return names.Count == 1 ? names[0] : string.Join(", ", names.Take(names.Count - 1)) + " and " + names[names.Count - 1];
         }
+
+        // The changes Nexus's own bulk edit makes (2026-10-31, Nexus 1.21: one change, one Undo;
+        // tempo_core cleanup::BULK_FIELDS): power, rig, grid, and a POTA or SOTA park set or
+        // cleared with its program. Taken out of `changes`; what is left (comment, notes, another
+        // program's park, a park reference without its program) stays Jimmy Next's own edit.
+        internal static List<(string Field, string Value)> TakeNexusChanges(Dictionary<string, string> changes)
+        {
+            var nexus = new List<(string, string)>();
+            void Move(string key, string field, Func<string, string> form)
+            {
+                if (!changes.TryGetValue(key, out string v)) return;
+                nexus.Add((field, v == null ? null : form(v)));
+                changes.Remove(key);
+            }
+            Move("power", "TX_PWR", v => v);
+            Move("myRig", "MY_RIG", v => v);
+            Move("myGrid", "MY_GRIDSQUARE", v => v.ToUpperInvariant());
+            if (changes.TryGetValue("myProgram", out string program) && changes.ContainsKey("myRef"))
+            {
+                string field = string.Equals(program, "POTA", StringComparison.OrdinalIgnoreCase) ? "MY_POTA_REF"
+                             : string.Equals(program, "SOTA", StringComparison.OrdinalIgnoreCase) ? "MY_SOTA_REF" : null;
+                if (field != null)
+                {
+                    string r = changes["myRef"];
+                    nexus.Add((field, r == null ? null : NormalizeParks(r)));
+                    changes.Remove("myProgram");
+                    changes.Remove("myRef");
+                }
+            }
+            return nexus;
+        }
+
+        // "us-1234; US-5678" -> "US-1234,US-5678", as an activation stamps a two-fer.
+        private static string NormalizeParks(string text) =>
+            string.Join(",", text.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries).Select(p => p.Trim().ToUpperInvariant()));
 
         // Puts the changes into one contact; true when anything actually changed. Touches only the
         // fields above -- everything else the contact holds is left exactly as it was.

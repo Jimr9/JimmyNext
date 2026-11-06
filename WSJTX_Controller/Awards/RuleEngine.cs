@@ -26,7 +26,7 @@ namespace WSJTX_Controller
         public int    EffectiveThreshold;  // Target=Count only; def.Threshold, or the resolved
                                             // value when def.ThresholdFrom is set (e.g. Honor
                                             // Roll's "current active DXCC entities minus 9")
-        public List<string> StillNeeded;   // Target=All only; null if not resolvable
+        public List<string> StillNeeded;   // Target=All, or a LimitTo list; null otherwise
 
         // Worked but not (yet) confirmed -- workedSet minus confirmedSet. Unlike StillNeeded,
         // this is computed for EVERY GroupBy'd rule regardless of Target type (All or Count),
@@ -85,13 +85,16 @@ namespace WSJTX_Controller
         // lookup). Used by Controller.RefreshStillNeedCache() to decide whether the currently
         // selected Still Need Rule Definition can drive live decode tagging, and by the Still
         // Need tab to show the user whether their selection is doing so. GroupBy kinds not
-        // listed here (County, Grid, Iota, SigInfo, DarcDok, Prefix, None, ...) have no such
+        // listed here (County, Grid, Iota, SigInfo, DarcDok, None, ...) have no such
         // field available cheaply at decode time -- those rules still work fine in the Still
         // Need tab's static checklist, just not for live tagging.
         public static readonly HashSet<RuleGroupBy> LiveTagSupportedGroupBys = new HashSet<RuleGroupBy>
         {
             RuleGroupBy.Callsign, RuleGroupBy.State, RuleGroupBy.CqZone,
             RuleGroupBy.Continent, RuleGroupBy.Dxcc,
+            // 2026-11-02: the heard station's WPX prefix and WAE country, by Nexus's own rules,
+            // ride on each decode's envelope (SemanticDecode.WpxPrefix / WaeCountry).
+            RuleGroupBy.Prefix, RuleGroupBy.WaeCountry,
         };
 
         // Whether a decode can be live-tagged against this definition's still-needed items at
@@ -418,7 +421,7 @@ namespace WSJTX_Controller
 
             using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = $"SELECT callsign, wpx_prefix, ({confirmExpr}), band, {Evidence.Columns} FROM qso {where};";
+                cmd.CommandText = $"SELECT callsign, wpx_prefix, ({confirmExpr}), band, {Evidence.RowColumns} FROM qso {where};";
                 foreach (var p in parms) cmd.Parameters.Add(p);
                 using (var r = cmd.ExecuteReader())
                 {
@@ -426,8 +429,9 @@ namespace WSJTX_Controller
                     {
                         string call = r.IsDBNull(0) ? "" : r.GetString(0);
                         if (call.Length == 0) continue;
-                        string storedPfx = r.IsDBNull(1) ? "" : r.GetString(1);
-                        string pfx = storedPfx.Length > 0 ? storedPfx : WpxPrefixOf(call);
+                        // The contact's own PFX, else the prefix Nexus's CQ WPX rule gives its call
+                        // (propagation::wpx, filled as the read copy is built, 2026-10-31).
+                        string pfx = (r.IsDBNull(1) ? "" : r.GetString(1)).Trim().ToUpperInvariant();
                         if (pfx.Length == 0) continue;
 
                         workedSet.Add(pfx);
@@ -514,11 +518,14 @@ namespace WSJTX_Controller
             // it's logged, so hunting and live tags never chase a station already worked. A
             // confirmed-basis checklist's completion is ApplyTarget's; what it still waits for
             // (worked, no accepted confirmation yet) is AwaitingConfirmation.
-            if (def.Target == RuleTargetType.All && universe != null)
+            // A count or levels award limited to a fixed list (WAE's 73 countries, Honor Roll's
+            // current entities, WANA's) has that list as its checklist too (2026-11-02).
+            var checklist = def.Target == RuleTargetType.All ? universe : limitTo;
+            if (checklist != null)
             {
-                result.StillNeeded = universe.Where(u => !workedSet.Contains(u)).OrderBy(u => u).ToList();
+                result.StillNeeded = checklist.Where(u => !workedSet.Contains(u)).OrderBy(u => u).ToList();
                 if (def.Basis == RuleBasis.Confirmed)
-                    result.AwaitingConfirmation = universe.Where(u => workedSet.Contains(u) && !confirmedSet.Contains(u))
+                    result.AwaitingConfirmation = checklist.Where(u => workedSet.Contains(u) && !confirmedSet.Contains(u))
                         .OrderBy(u => u).ToList();
             }
 
@@ -619,6 +626,7 @@ namespace WSJTX_Controller
                 case RuleGroupBy.Iota:      return "UPPER(TRIM(iota))";
                 case RuleGroupBy.SigInfo:   return "UPPER(TRIM(sig_info))";
                 case RuleGroupBy.DarcDok:   return "UPPER(TRIM(darc_dok))";
+                case RuleGroupBy.WaeCountry: return "UPPER(TRIM(wae_country))";
                 case RuleGroupBy.Callsign:  return "callsign";
                 default: throw new InvalidOperationException("GroupByExpression not applicable for " + def.GroupBy);
             }
@@ -638,9 +646,11 @@ namespace WSJTX_Controller
                 case RuleGroupBy.County:    whereParts.Add($"{CountyExpression(def)} GLOB '[A-Z][A-Z],?*'"); break;
                 case RuleGroupBy.Grid:      whereParts.Add($"{ValidGrid4(GridText(def))}"); break;
                 case RuleGroupBy.Grid4:     whereParts.Add($"{ValidGrid4(GridText(def))}"); break;
-                case RuleGroupBy.Iota:      whereParts.Add("TRIM(iota) != ''"); break;
+                // A real reference only (AF-004): logs carry "NONE" for no island (2026-11-02).
+                case RuleGroupBy.Iota:      whereParts.Add("UPPER(TRIM(iota)) GLOB '[A-Z][A-Z]-[0-9][0-9][0-9]'"); break;
                 case RuleGroupBy.SigInfo:   whereParts.Add("TRIM(sig_info) != ''"); break;
                 case RuleGroupBy.DarcDok:   whereParts.Add("TRIM(darc_dok) != ''"); break;
+                case RuleGroupBy.WaeCountry: whereParts.Add("TRIM(wae_country) != ''"); break;
                 case RuleGroupBy.Callsign:  whereParts.Add("callsign != ''"); break;
                 case RuleGroupBy.Prefix:    whereParts.Add("callsign != ''"); break;
                     // None: no filter.
@@ -676,6 +686,13 @@ namespace WSJTX_Controller
                 new[] { RuleConfirmationSources.Lotw, RuleConfirmationSources.Qrz, RuleConfirmationSources.Eqsl,
                         RuleConfirmationSources.EqslAg, RuleConfirmationSources.Card }
                 .Select(src => $"MAX(CASE WHEN {SourceExpression(src)} THEN 1 ELSE 0 END)"));
+            // The same, one row at a time: for a query with no GROUP BY (GroupBy=Prefix). MAX()
+            // there made the whole query one aggregate row, so WPX counted a single prefix
+            // (found 2026-10-31).
+            public static readonly string RowColumns = string.Join(", ",
+                new[] { RuleConfirmationSources.Lotw, RuleConfirmationSources.Qrz, RuleConfirmationSources.Eqsl,
+                        RuleConfirmationSources.EqslAg, RuleConfirmationSources.Card }
+                .Select(src => $"(CASE WHEN {SourceExpression(src)} THEN 1 ELSE 0 END)"));
             public HashSet<string> Lotw = New(), Qrz = New(), Eqsl = New(), EqslAg = New(), Card = New();
             private static HashSet<string> New() => new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -730,54 +747,6 @@ namespace WSJTX_Controller
             if (digits.Length == 8) return digits + (isEnd ? "2359" : "0000");
             int hh = int.Parse(digits.Substring(8, 2)), mm = int.Parse(digits.Substring(10, 2));
             return hh < 24 && mm < 60 ? digits : null;
-        }
-
-        // ── WPX-style prefix derivation ─────────────────────────────────────────
-
-        // Standard CQ WPX prefix: the callsign up to and including its last digit,
-        // with "/" portable designators handled per WPX contest rules -- a numeric
-        // suffix (e.g. "/4") replaces the numeral, a longer alphanumeric prefix
-        // before the slash (e.g. "PJ4/K1ABC") is used as-is, and non-numeric
-        // suffixes with no digit of their own (e.g. "/P", "/QRP") are ignored.
-        // Only used as a fallback when the ADIF PFX field wasn't supplied by the
-        // source data (stored in qso.wpx_prefix, which always takes precedence).
-        public static string WpxPrefixOf(string callsign)
-        {
-            if (string.IsNullOrWhiteSpace(callsign)) return "";
-            callsign = callsign.Trim().ToUpperInvariant();
-            var parts = callsign.Split('/');
-
-            string basisCall = parts[0];
-            string overrideSuffix = null;
-
-            if (parts.Length >= 2)
-            {
-                string second = parts[1];
-                if (second.Length > 0 && second.Length <= 2 && second.All(char.IsDigit))
-                    overrideSuffix = second;
-                // else if it's a longer alphanumeric prefix (e.g. "PJ4/K1ABC"),
-                // basisCall already defaults to parts[0] ("PJ4"), which is correct.
-                // else (e.g. "/P", "/QRP", "/MM") -- no digit, ignore, keep parts[0].
-            }
-
-            string prefix = RawPrefix(basisCall);
-
-            if (overrideSuffix != null)
-            {
-                string letters = new string(prefix.TakeWhile(c => !char.IsDigit(c)).ToArray());
-                if (letters.Length == 0) letters = prefix;
-                prefix = letters + overrideSuffix;
-            }
-
-            return prefix;
-        }
-
-        private static string RawPrefix(string call)
-        {
-            int lastDigit = -1;
-            for (int i = 0; i < call.Length; i++)
-                if (char.IsDigit(call[i])) lastDigit = i;
-            return lastDigit < 0 ? call : call.Substring(0, lastDigit + 1);
         }
     }
 }

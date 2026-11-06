@@ -6,13 +6,23 @@
 # pin, and its "Checking a patch against a newer Nexus" section for what to do when this pin
 # is updated.
 #
-# This integration pins the newest official STABLE release tag, v1.19.0 (2026-10-16), by its
+# This integration pins the newest official STABLE release tag, v1.21.0 (2026-10-26), by its
 # exact commit. NEXUS_COMMIT is the real lock; NEXUS_TAG is the honest human reference.
 # prepare-nexus.ps1 clones --branch NEXUS_TAG --single-branch and then verifies the resolved
-# HEAD equals NEXUS_COMMIT exactly. v1.19.0 is an ANNOTATED tag (tag object de14f5cc); the
+# HEAD equals NEXUS_COMMIT exactly. v1.21.0 is an ANNOTATED tag (tag object 9cd7759a); the
 # commit below is the peeled commit it points at, which is what HEAD resolves to.
 #
-# Upgraded 2026-10-17 from v1.18.0 (03ac4c3c): nine patches kept. tempo-app-station.patch re-derived
+# Upgraded 2026-10-30 from v1.20.0 (0eb7c3a1): ten patches kept, same payload. tempo-app-engine.patch
+# re-anchored by hand at its two same-slot accumulation hunks (1.21 calls note_band_activity beside
+# them); the other nine apply as they were. Jimmy Next retired its own copies of what 1.21 now does:
+# LoTW's blank-location fill (Nexus's keep_lotw_detail), the explicit 1900-01-01 LoTW since-date
+# (tempo_core::lotw's FULL_HISTORY_SINCE), and the pairing guard's holds that Nexus's nearest-first
+# pairing settles (see README.md).
+# Earlier: upgraded 2026-10-22 from v1.19.0 (02231438): ten patches kept. tempo-app-engine.patch lost
+# last_own_tx_text and tempo-audio-service.patch its Status.tx_message hunk (1.20 fills the WSJT-X
+# Status TX fields itself); the engine's same-slot accumulation re-derived for 1.20's streamed
+# decodes (rows on screen only -- the WSJT-X wire list stays upstream's). The other eight unchanged.
+# Earlier: upgraded 2026-10-17 from v1.18.0 (03ac4c3c): nine patches kept. tempo-app-station.patch re-derived
 # by hand (1.19 fills a contact's COUNTRY from its DXCC number; the keep-logged-location gate now
 # wraps the new fill and edit code, same rule); tempo-app-engine.patch refreshed (offsets only).
 # Earlier: upgraded 2026-10-13 from v1.17.0 (177e0b94): nine patches. propagation-solar-wind.patch retired
@@ -31,10 +41,14 @@
 # re-assessment.
 
 NEXUS_REPO=https://github.com/kd9taw/Nexus.git
-NEXUS_TAG=v1.19.0
-NEXUS_COMMIT=02231438baa41765eb13d82d5be6177cb38c8226
+NEXUS_TAG=v1.21.0
+NEXUS_COMMIT=a5777aef0797c78decb8d4cdbc1dfefb34bcd44f
 
-# DISPOSITION: 2026-10-17 -- pinned AT stable v1.19.0 (operator approved the upgrade), nothing from main
+# DISPOSITION: 2026-10-30 -- pinned AT stable v1.21.0 (operator asked for the upgrade), nothing from main
+# (main 437 commits past 1.21.0, not reviewed).
+# Was: 2026-10-22 -- pinned AT stable v1.20.0 (operator asked for the upgrade), nothing from main
+# (main 2 commits past 1.20.0 at d5466de6: manual and contact-address text only).
+# Was: 2026-10-17 -- pinned AT stable v1.19.0 (operator approved the upgrade), nothing from main
 # (main reviewed at 137 commits past 1.19.0, 534d1bb7: remote/client-mode work, none in the crates Jimmy uses).
 # Was: 2026-10-13 -- pinned AT stable v1.18.0 (operator approved the upgrade), nothing from main.
 # Was: 2026-10-12 -- pinned AT stable v1.17.0 plus one named fix from main (solar wind, bdb832e4);

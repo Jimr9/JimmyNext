@@ -1345,6 +1345,80 @@ namespace WSJTX_Controller
             SetCallInProg(engineCall);
         }
 
+        // The over on the air now, for the "Sending ..." words only (2026-10-22). curTxMsg is the
+        // message the engine last showed QUEUED, and Nexus 1.20 can key one, or switch the over
+        // mid-air, between two polls -- K4LLL, 2026-10-22: the 73 went out while "Sending R -05"
+        // was said, because Jimmy never saw the 73 queued. Nexus adds each over it keys, and each
+        // mid-over switch, to the snapshot as a Mine row stamped with the second it went out.
+        // curTxMsg still drives every QSO decision; this only names what is being sent.
+        private string _onAirTxMsg;
+        private long _txStartedUnix;
+        // Counts DirectApplyStatus polls: renders of the same poll share one value (ShowStatus's
+        // logged-line carry, WsjtxClient.Display.cs).
+        private long _directPollSeq;
+
+        private void TrackOnAirTxMsg(DirectSnapshot snap, bool txStarted)
+        {
+            if (!transmitting) { _onAirTxMsg = null; return; }
+            if (txStarted) _txStartedUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            DirectDecodeRow newest = null;
+            if (snap.RecentDecodes != null)
+                foreach (var row in snap.RecentDecodes)
+                    if (row != null && row.Mine && row.TxAt.HasValue && !string.IsNullOrEmpty(row.Message)
+                        && (newest == null || row.TxAt.Value >= newest.TxAt.Value))
+                        newest = row;
+            // This transmission's own over only: keyed at most a poll before Jimmy saw it start.
+            string before = _onAirTxMsg;
+            _onAirTxMsg = newest != null && newest.TxAt.Value >= _txStartedUnix - 2
+                ? WsjtxMessage.NormalizeDecodedMessage(newest.Message) : null;
+            if (!txStarted && before != null && _onAirTxMsg != null && _onAirTxMsg != before)
+                AnnounceOverSwitched(_onAirTxMsg);
+        }
+
+        // A late decode switched the over already on the air (Nexus 1.20's mid-over switch): said
+        // once, as the "Sending ..." notification, wherever focus is (operator, 2026-10-22). With
+        // the status box focused its own render already says it, so it is not said twice.
+        private void AnnounceOverSwitched(string onAir)
+        {
+            DebugOutput($"{Time()} [TX] the over on the air switched to '{onAir}'");
+            if (_statusForegroundLast) return;
+            var sem = SemanticDecode.FromWsjtxMessage(onAir, myCall);
+            string words = SpacifyPayload(NarrationText.StructuredPayload(sem) ?? NarrationText.ResidualDisplayText(onAir));
+            if (string.IsNullOrEmpty(words)) return;
+            Notify?.Publish(new TxMessageChangedEvent(sem?.To ?? "", words,
+                bandIdx != null ? $"{bands[(int)bandIdx]}m" : "", mode ?? ""));
+        }
+
+        // The after-receive speech moment (SpeakWhen.AfterRx), 2026-10-22. Nexus 1.20 moves the
+        // snapshot's slot at a period's FIRST decode -- the early pass, ~12.9 s into an FT8
+        // period -- and its full pass (14.40 s; FT4 6.048 s) often brings the reply that matters
+        // later (K4LLL's +11 came 1.1 s after the line was said, and waited 28 s). Everything else
+        // a new slot does stays where it was; only the speech moment waits for the full pass, and
+        // a transmission that starts first takes it at its start. Other modes: as before.
+        private DateTime? _afterRxDueUtc;
+        internal int TestAfterRxFired { get; private set; }
+
+        internal static double AfterRxWaitSecs(ulong nextSlotMs, double trPeriodSecs)
+        {
+            double done = Math.Abs(trPeriodSecs - 15.0) < 0.01 ? 14.65
+                        : Math.Abs(trPeriodSecs - 7.5) < 0.01 ? 6.3 : -1;
+            if (done < 0 || nextSlotMs == 0 || nextSlotMs > trPeriodSecs * 1000) return 0;
+            double pos = trPeriodSecs - nextSlotMs / 1000.0;
+            // A fold in the first half of a period is the PREVIOUS period's late decode: say it now.
+            return pos < trPeriodSecs / 2 ? 0 : Math.Max(0, done - pos);
+        }
+
+        private void ScheduleAfterRx(DirectRadioStatus radio) =>
+            _afterRxDueUtc = DateTime.UtcNow.AddSeconds(radio == null ? 0 : AfterRxWaitSecs(radio.NextSlotMs, radio.TrPeriodSecs));
+
+        private void FireAfterRxIfDue(bool force)
+        {
+            if (_afterRxDueUtc == null || (!force && DateTime.UtcNow < _afterRxDueUtc.Value)) return;
+            _afterRxDueUtc = null;
+            TestAfterRxFired++;
+            Notify?.OnPeriodBoundary();
+        }
+
         private void DirectApplyStatus(DirectSnapshot snap)
         {
             StationLocation.RefreshIfDue();   // POTA spots and Nexus's grid table, once a minute, off this thread
@@ -1971,12 +2045,17 @@ namespace WSJTX_Controller
             bool wasTransmitting = transmitting;
             transmitting = radio.Transmitting;
             bool transmittingChanged = wasTransmitting != transmitting;
+            TrackOnAirTxMsg(snap, transmittingChanged && transmitting);
+            _directPollSeq++;
             // Direct mode's own real transmitting-flag transition -- edge-triggered (only on an
             // actual change), matching the UDP path's ProcessTxStart/ProcessTxEnd exactly. See
             // NotificationCenter.OnTransmittingChanged's own comment.
             // Item 2: the physical radio.Transmitting edge is what SpeechCoordinator uses to
             // release AfterTx items and to DROP a still-pending AfterRx routine summary (stale RX
             // chatter must not be spoken once an over has begun) -- see OnPhysicalTxChanged.
+            // An after-receive moment still waiting is said before the over starts (it would be
+            // dropped as stale receive chatter once the over has begun).
+            if (transmittingChanged && transmitting) FireAfterRxIfDue(force: true);
             if (transmittingChanged) Notify?.OnTransmittingChanged(transmitting);
             // Root-caused live, 2026-09-17 (advanced-list TX1/TX2 "not clearing" report): with
             // "Keep transmit list during transmit" unchecked, ShowAdvancedQueue's own
@@ -2613,7 +2692,7 @@ namespace WSJTX_Controller
         private void DirectApplyDecodes(DirectSnapshot snap)
         {
             _directReceiveCycleCompletedThisTick = false;
-            if (snap.RecentDecodes == null || myCall == null) return;
+            if (snap.RecentDecodes == null || myCall == null) { FireAfterRxIfDue(force: false); return; }
 
             // AppSnapshot.recentDecodes is "signals decoded in the most recent RX slot" -- a
             // full-slot list that gets REPLACED each slot, not appended to. When the slot
@@ -2622,6 +2701,7 @@ namespace WSJTX_Controller
             // slot count as a new decode again, exactly like the UDP path's own 'New' field.
             if (snap.Radio != null && snap.Radio.Slot != _directLastSlotSeen)
             {
+                FireAfterRxIfDue(force: true);   // the previous period's, if it is somehow still waiting
                 _directLastSlotSeen = snap.Radio.Slot;
                 _directSeenDecodeSignatures.Clear();
                 _directReceiveCycleCompletedThisTick = true;
@@ -2929,7 +3009,7 @@ namespace WSJTX_Controller
             if (_directReceiveCycleCompletedThisTick)
             {
                 _directReceiveCycleCompletedThisTick = false;
-                Notify?.OnPeriodBoundary();
+                ScheduleAfterRx(snap.Radio);   // said by FireAfterRxIfDue once the full pass is in
                 FeedTargetMonitorsPeriodComplete(_directLastSlotSeen, directTargetMonitorEvenSlot, transmitting);
 
                 // One re-sort per period if a last-heard-refresh changed the order and the
@@ -3006,6 +3086,7 @@ namespace WSJTX_Controller
             // three separate micro-batches instead of one joined utterance. Runs every tick
             // (ServicePendingAutoStart above does too); a no-op when the Now-batch has nothing
             // open or gap-waiting.
+            FireAfterRxIfDue(force: false);   // the after-receive moment, once the full pass is in
             Notify?.OnDecodePassComplete();
         }
 
@@ -4408,6 +4489,10 @@ namespace WSJTX_Controller
         // RR73 part credited to the frame's own hashed sender). Null/empty otherwise. Replaces
         // Jimmy's own text split of these frames.
         public List<DirectDecodeSemantics> Parts { get; set; }
+        // 2026-11-02: the sender's CQ WPX prefix and DARC WAE country prefix ("IT" Sicily), by
+        // Nexus's own rules (EngineHost logbook_host::call_award_keys). Null when none.
+        public string WpxPrefix { get; set; }
+        public string WaeCountry { get; set; }
     }
 
     // Mirrors the QSO-relevant slice of tempo-app::dto::QsoStatus (Rust) -- only the fields
@@ -4462,6 +4547,10 @@ namespace WSJTX_Controller
         public double DialMhz { get; set; }
         public bool Transmitting { get; set; }
         public ulong Slot { get; set; }
+        // Milliseconds to the next T/R boundary, and the period length (RadioStatus.next_slot_ms,
+        // tr_period_secs): where in its period the radio is, for the after-receive speech moment.
+        public ulong NextSlotMs { get; set; }
+        public double TrPeriodSecs { get; set; }
         // Receive / transmit audio offsets in Hz -- the green / red waterfall markers
         // (tempo-app/src/dto.rs: RadioStatus.rx_offset_hz / tx_offset_hz, both default 1500).
         // Already present in every SNAPSHOT; Jimmy Next reads them for the accessible Rx/Tx
@@ -4606,6 +4695,9 @@ namespace WSJTX_Controller
         // Jimmy skips these rows (laptop report 2026-09-29: "VA7QI KB0UZT EN34" at SNR 0 kept
         // appearing as a heard station every period after the call was cancelled).
         public bool Mine { get; set; }
+        // For a Mine row: the Unix second that over went out (DecodeRow.tx_at). A mid-over switch
+        // (Nexus 1.20) adds a second row stamped when it switched. Null for received decodes.
+        public long? TxAt { get; set; }
         public string From { get; set; }
         public int Snr { get; set; }
         public double DtSec { get; set; }

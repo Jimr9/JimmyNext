@@ -338,6 +338,30 @@ fn after_durable(durability: logstore::Durability, detail: serde_json::Value) ->
     }
 }
 
+/// `make` through the write gate (log_tools.rs): refused once SHUTDOWN has begun, as every write.
+pub(crate) fn gated<T>(host: &LogHost, make: impl FnOnce() -> T) -> Result<T, ()> {
+    let gate = host.writes.lock().unwrap_or_else(|e| e.into_inner());
+    if gate.closed {
+        return Err(());
+    }
+    let made = make();
+    drop(gate);
+    Ok(made)
+}
+
+/// [`after_durable`] for an answer that is already JSON (log_tools.rs): the answer with `state`
+/// "saved", or "unconfirmed" and `why`.
+pub(crate) fn after_durable_json(durability: logstore::Durability, mut answer: serde_json::Value) -> serde_json::Value {
+    match durability.wait(DURABLE_WAIT) {
+        Ok(()) => answer["state"] = serde_json::json!("saved"),
+        Err(why) => {
+            answer["state"] = serde_json::json!("unconfirmed");
+            answer["why"] = serde_json::json!(why);
+        }
+    }
+    answer
+}
+
 fn refusal(r: tempo_app::station::RowRefusal) -> WriteReply {
     use tempo_app::station::RowRefusal;
     match r {
@@ -657,6 +681,15 @@ pub fn log_stamp(host: &LogHost, engine: &Mutex<Engine>, args: LogStampArgs) -> 
     after_durable(durability, serde_json::json!({ "id": args.id }))
 }
 
+/// `f` under the write gate, as every logbook write here runs; `None` once SHUTDOWN has closed it.
+pub(crate) fn while_open<T>(host: &LogHost, f: impl FnOnce() -> T) -> Option<T> {
+    let gate = host.writes.lock().unwrap_or_else(|e| e.into_inner());
+    if gate.closed {
+        return None;
+    }
+    Some(f())
+}
+
 /// TEST ONLY: a local fake server LOG_UPLOAD posts to instead of the services, set only in a
 /// logbook-only start (--no-radio) with JIMMY_TEST_UPLOAD_BASE (an http://127.0.0.1:PORT). Nexus's
 /// transports accept HTTPS only (by design), so the fake is reached by `test_post` below; every
@@ -691,7 +724,7 @@ fn test_post(base: &str, path: &str, body: String) -> Result<(u16, String), Stri
 fn send_qrz(body: String) -> Result<String, String> {
     match UPLOAD_TEST_BASE.get() {
         Some(base) => test_post(base, "/qrz", body).map(|(_, b)| b),
-        None => propagation::live::qrz::post_form(tempo_core::qrz::QRZ_LOGBOOK_URL, body),
+        None => propagation::live::qrz::post_form(tempo_core::qrz::QRZ_LOGBOOK_URL, crate::external_data::EQSL_PROGRAM_VERSION, body),
     }
 }
 
@@ -821,7 +854,7 @@ pub fn log_upload(host: &LogHost, engine: &Mutex<Engine>, args: LogUploadArgs) -
         Ok(None) => return serde_json::json!({ "state": "unsent", "why": "no such contact" }),
         Err(e) => return serde_json::json!({ "state": "unsent", "why": e }),
     };
-    let adif = tempo_core::logbook::adif_record(&as_sent(&row));
+    let adif = upload_record(&row);
     let (service, outcome, detail, message) = match args.service.as_str() {
         "qrz" => {
             if args.qrz_key.trim().is_empty() {
@@ -934,6 +967,49 @@ pub fn log_upload(host: &LogHost, engine: &Mutex<Engine>, args: LogUploadArgs) -
         "message": message,
         "durable": durable,
     })
+}
+
+/// One contact as every logging service is sent it: Nexus's outbound record of the contact as
+/// sent (`as_sent`). LOG_UPLOAD's live path and LOG_UPLOAD_RECORDS' batch both use this, so a
+/// contact reads the same at a service whichever way it went.
+fn upload_record(row: &QsoRecord) -> String {
+    tempo_core::logbook::adif_record(&as_sent(row))
+}
+
+/// LOG_UPLOAD_RECORDS' argument: a file of Nexus ids, one per line (the control line is 8 KB).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadRecordsArgs {
+    pub ids_path: String,
+}
+
+/// LOG_UPLOAD_RECORDS: the contacts named, each as [`upload_record`] writes it, for a batch upload
+/// (Club Log's putlogs). Reply: {"records":[{"id","adif"}],"missing":N} | {"error":why}.
+pub fn upload_records(engine: &Mutex<Engine>, args: UploadRecordsArgs) -> serde_json::Value {
+    let text = match std::fs::read_to_string(&args.ids_path) {
+        Ok(t) => t,
+        Err(e) => return serde_json::json!({ "error": format!("could not read the contact list: {e}") }),
+    };
+    let mut ids = Vec::new();
+    let mut missing = 0usize;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match line.parse::<RecordId>() {
+            Ok(id) => ids.push(id),
+            Err(_) => missing += 1,
+        }
+    }
+    // Read off the store with the Engine lock released.
+    let rows = lock(engine).log_rows();
+    let found = match tempo_app::station::rows_named(&rows, &ids) {
+        Ok(f) => f,
+        Err(e) => return serde_json::json!({ "error": format!("could not read the logbook: {e}") }),
+    };
+    missing += ids.len() - found.len();
+    let records: Vec<serde_json::Value> = found
+        .iter()
+        .filter_map(|r| Some(serde_json::json!({ "id": r.id?.to_string(), "adif": upload_record(r) })))
+        .collect();
+    serde_json::json!({ "records": records, "missing": missing })
 }
 
 /// The contest block's own ADIF tags (Nexus's `contest_fields`). Nexus's desktop contact shape
@@ -1188,6 +1264,24 @@ pub struct LogRowsArgs {
     pub limit: usize,
 }
 
+/// The award keys Nexus's own rules give a contact (propagation::wpx / propagation::wae): its CQ
+/// WPX prefix and its DARC WAE country's prefix, `None` where the rule gives none (not a callsign;
+/// outside Europe). The WAE country is the DXCC entity the contact counts toward, its record's
+/// number first, refined to the WAE-only area its call names (IT9 Sicily, GM/S Shetland ...).
+pub fn award_keys(r: &QsoRecord) -> (Option<String>, Option<&'static str>) {
+    call_award_keys(&r.call, r.dxcc)
+}
+
+/// The same keys for a call alone (a station heard has no record, so `dxcc` is `None` and its
+/// entity comes from the call -- as Nexus's own `mark_award_needs` does for its Needed board).
+pub fn call_award_keys(call: &str, dxcc: Option<u32>) -> (Option<String>, Option<&'static str>) {
+    let wpx = propagation::wpx::wpx_prefix(call);
+    let fields = propagation::awards::RecordFields { dxcc, ..Default::default() };
+    let wae = propagation::wae::wae_country(propagation::dxcc::resolve(call).as_ref(), &fields)
+        .map(|i| propagation::wae::COUNTRIES[i as usize].0);
+    (wpx, wae)
+}
+
 /// LOG_ROWS: the log's contacts in log order, as Nexus reads them -- after waiting for every
 /// change this process made before the question to be committed, and saying whether it was.
 pub fn rows_json(engine: &Mutex<Engine>, args: &LogRowsArgs) -> String {
@@ -1209,6 +1303,7 @@ pub fn rows_json(engine: &Mutex<Engine>, args: &LogRowsArgs) -> String {
                     let key = tempo_core::logbook::QsoEdit::project(&r).key();
                     let contest = contest_tags(&r);
                     let names = country_names(&r);
+                    let (wpx, wae) = award_keys(&r);
                     let mut v = serde_json::to_value(LoggedQso::from(r)).unwrap_or_default();
                     v["editKey"] = serde_json::Value::String(key);
                     v["countryByDxcc"] = serde_json::json!(names.by_dxcc);
@@ -1219,6 +1314,11 @@ pub fn rows_json(engine: &Mutex<Engine>, args: &LogRowsArgs) -> String {
                     v["countrySpellingOnly"] = serde_json::json!(names.spelling_only);
                     v["gridDxcc"] = serde_json::json!(names.grid_dxcc);
                     v["gridCountry"] = serde_json::json!(names.grid_country);
+                    // 2026-10-31 (Nexus 1.21's award rules, for Jimmy's own award rules): the CQ
+                    // WPX prefix the call counts for, and the DARC WAE country the contact counts
+                    // toward (its DARC prefix, "IT" for Sicily), both worked out as the row is read.
+                    v["wpxPrefix"] = serde_json::json!(wpx);
+                    v["waeCountry"] = serde_json::json!(wae);
                     if let Some(extra) = v["extra"].as_array_mut() {
                         extra.extend(contest.into_iter().map(|(k, val)| serde_json::json!([k, val])));
                     }
@@ -1388,6 +1488,25 @@ mod tests {
     }
 
     const T0: u64 = 1_790_000_000;
+
+    /// Each row carries Nexus's own award keys: CQ's WPX prefix (the portable designator counts,
+    /// a call with no numeral takes a zero) and DARC's WAE country (Sicily apart from Italy).
+    #[test]
+    fn a_row_carries_its_wpx_prefix_and_wae_country() {
+        let keys = |call: &str| award_keys(&QsoRecord::from(qso(call, T0, "20m")));
+        assert_eq!(keys("N8BJQ/KH9").0.as_deref(), Some("KH9"));
+        assert_eq!(keys("PA/N8BJQ").0.as_deref(), Some("PA0"));
+        assert_eq!(keys("W1AW").0.as_deref(), Some("W1"));
+        assert_eq!(keys("IT9ABC").1, Some("IT"));
+        assert_eq!(keys("I2ABC").1, Some("I"));
+        assert_eq!(keys("W1AW").1, None, "outside Europe");
+        let d = TempDir::new("awardkeys");
+        let (eng, host) = launch(&d.0);
+        assert_eq!(log_qso(&host, &eng, args("k-1", qso("GM3ABC", T0, "20m"))).state, "saved");
+        let v = rows(&eng);
+        assert_eq!(v["rows"][0]["wpxPrefix"], "GM3");
+        assert_eq!(v["rows"][0]["waeCountry"], "GM");
+    }
 
     #[test]
     fn a_logged_contact_is_saved_readable_and_a_resend_is_not_logged_twice() {

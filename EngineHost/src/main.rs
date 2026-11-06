@@ -322,6 +322,8 @@ mod decode_semantics;
 mod external_data;
 mod live_feeds;
 mod logbook_host;
+mod log_tools;
+mod lotw_batch;
 mod wsjtx_out;
 
 use tempo_app::engine::Engine;
@@ -1385,13 +1387,23 @@ fn handle_control_connection(
                     // was written unconditionally, so a refused reply was indistinguishable from
                     // a real one on Jimmy Next's side. Propagate the real outcome instead --
                     // same shape every other fallible command in this match already uses.
-                    let result = engine.lock().unwrap_or_else(|e| e.into_inner()).call_station_ctx(
-                        &a.dxcall,
-                        a.dxgrid.as_deref(),
-                        a.reply_msg.as_deref(),
-                        a.reply_snr,
-                        a.dx_freq_hz,
-                    );
+                    // 2026-10-31 (Nexus 1.21): while a contest session is active, Nexus's own
+                    // `work_station` -- a CQ picked in the contest's S&P is answered with the
+                    // contest's exchange and logged in it (1.21's S&P answers no CQ by itself, and
+                    // `call_station_ctx` would leave the contest for a plain QSO). Otherwise, and
+                    // for anything that is not a contest CQ, it is `call_station_ctx` as before.
+                    let in_contest = contest_bridge_state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .active_session_instance_id()
+                        .is_some();
+                    let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                    let result = if in_contest {
+                        eng.work_station(&a.dxcall, a.dxgrid.as_deref(), a.reply_msg.as_deref(), a.reply_snr, a.dx_freq_hz)
+                    } else {
+                        eng.call_station_ctx(&a.dxcall, a.dxgrid.as_deref(), a.reply_msg.as_deref(), a.reply_snr, a.dx_freq_hz)
+                    };
+                    drop(eng);
                     let _ = writeln!(stream, "{}", reply_wire_response(result));
                 }
                 Err(e) => {
@@ -1419,7 +1431,26 @@ fn handle_control_connection(
             // directed-CQ token Jimmy's own NextDirCq() already resolved (e.g. "DX"), or None
             // for a plain CQ -- see parse_call_cq_line's own comment for why this can no longer
             // silently reject the plain-CQ case.
-            let result = engine.lock().unwrap_or_else(|e| e.into_inner()).call_cq(dir);
+            // 2026-10-31 (Nexus 1.21): while a contest session is active, Call CQ is the
+            // contest's Running (`start_running_with_cq`: "CQ FD", the contest's own sequencer),
+            // as in Nexus -- 1.21's Running turns TX off after each contact, and this is how it
+            // calls again. Never a plain CQ in a contest. Outside one, call_cq as above.
+            let in_contest = contest_bridge_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .active_session_instance_id()
+                .is_some();
+            let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+            // A contact the contest's sequencer is working is never restarted by it: the run
+            // goes on by itself, and nothing is lost.
+            let result = if !in_contest {
+                eng.call_cq(dir)
+            } else if eng.snapshot().field_day.as_ref().is_some_and(|fd| fd.dxcall.is_some()) {
+                Ok(())
+            } else {
+                eng.start_running_with_cq(dir)
+            };
+            drop(eng);
             let _ = writeln!(stream, "{}", reply_wire_response(result));
         } else if line == "HALT_TX" {
             engine.lock().unwrap_or_else(|e| e.into_inner()).halt_tx();
@@ -1873,6 +1904,25 @@ fn handle_control_connection(
                 Ok(r) => { let _ = writeln!(stream, "{}", serde_json::to_string(&r).unwrap_or_default()); }
                 Err(e) => { let _ = writeln!(stream, "ERR {name}: {e}"); }
             }
+        } else if let Some(json) = line.strip_prefix("LOG_TOOL ") {
+            // The Logbook's clean-up tools, history and import preview (log_tools.rs, Nexus 1.21).
+            // A duplicate scan or an import of a big log takes a while: its own thread, like
+            // LOG_UPLOAD, so the accept loop and the SNAPSHOT poll never wait on it.
+            match &log_host {
+                None => { let _ = writeln!(stream, "ERR logbook not enabled"); }
+                Some(host) => {
+                    let host = host.clone();
+                    let engine = engine.clone();
+                    let json = json.to_string();
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        let reply = log_tools::run(&host, &engine, &json);
+                        let _ = writeln!(stream, "{reply}");
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                    });
+                    return;
+                }
+            }
         } else if let Some(json) = line.strip_prefix("LOG_UPLOAD ") {
             // Real network I/O (a service can take up to a minute): its own thread, like
             // EQSL_UPLOAD, so the accept loop and Jimmy's SNAPSHOT poll never wait on it.
@@ -1891,6 +1941,13 @@ fn handle_control_connection(
                     return;
                 }
             }
+        } else if let Some(json) = line.strip_prefix("LOG_UPLOAD_RECORDS ") {
+            // A batch upload's records (Club Log), written as LOG_UPLOAD writes one.
+            match (&log_host, serde_json::from_str::<logbook_host::UploadRecordsArgs>(json)) {
+                (None, _) => { let _ = writeln!(stream, "ERR logbook not enabled"); }
+                (Some(_), Err(e)) => { let _ = writeln!(stream, "ERR bad LOG_UPLOAD_RECORDS args: {e}"); }
+                (Some(_), Ok(a)) => { let _ = writeln!(stream, "{}", logbook_host::upload_records(&engine, a)); }
+            }
         } else if let Some(json) = line.strip_prefix("LOG_EXPORT ") {
             match (&log_host, serde_json::from_str::<logbook_host::LogFileArgs>(json)) {
                 (None, _) => { let _ = writeln!(stream, "ERR logbook not enabled"); }
@@ -1904,6 +1961,20 @@ fn handle_control_connection(
                     let reply = logbook_host::flush(&engine, logbook_host::DURABLE_WAIT);
                     let _ = writeln!(stream, "{}", serde_json::to_string(&reply).unwrap_or_default());
                 }
+            }
+        } else if let Some(json) = line.strip_prefix("LOTW_BATCH_PREPARE ") {
+            // LoTW through Nexus (lotw_batch.rs): the TQSL file, written from Nexus's contacts.
+            match (&log_host, serde_json::from_str::<lotw_batch::PrepareArgs>(json)) {
+                (None, _) => { let _ = writeln!(stream, "ERR logbook not enabled"); }
+                (Some(_), Err(e)) => { let _ = writeln!(stream, "ERR bad LOTW_BATCH_PREPARE args: {e}"); }
+                (Some(_), Ok(a)) => { let _ = writeln!(stream, "{}", lotw_batch::prepare(&engine, a)); }
+            }
+        } else if let Some(json) = line.strip_prefix("LOTW_BATCH_RESULT ") {
+            // ...and what TQSL's result means for those contacts, recorded on them by Nexus.
+            match (&log_host, serde_json::from_str::<lotw_batch::ResultArgs>(json)) {
+                (None, _) => { let _ = writeln!(stream, "ERR logbook not enabled"); }
+                (Some(_), Err(e)) => { let _ = writeln!(stream, "ERR bad LOTW_BATCH_RESULT args: {e}"); }
+                (Some(host), Ok(a)) => { let _ = writeln!(stream, "{}", lotw_batch::result(host, &engine, a)); }
             }
         } else if line == "SHUTDOWN" || line.starts_with("SHUTDOWN ") {
             // Graceful exit (logbook migration plan 6.1; Jimmy starts using it in Phase 4), in the
@@ -2229,10 +2300,13 @@ fn tx_audio_source(data: bool) -> String {
 }
 
 /// Jimmy's licence class word as Nexus's own LicenseClass, by the same rule as Nexus's
-/// Engine::set_license_class: the three United States classes, anything else Open (no lockout).
+/// Engine::set_license_class: the five United States classes (Novice and Advanced since Nexus
+/// 1.21), anything else Open (no lockout).
 fn license_class(word: &str) -> tempo_app::settings::LicenseClass {
     use tempo_app::settings::LicenseClass;
     match word.trim().to_ascii_lowercase().as_str() {
+        "novice" => LicenseClass::Novice,
+        "advanced" => LicenseClass::Advanced,
         "technician" => LicenseClass::Technician,
         "general" => LicenseClass::General,
         "extra" => LicenseClass::Extra,

@@ -1,19 +1,8 @@
 diff --git a/src/service.rs b/src/service.rs
-index 3db1845..d5c656d 100644
+index dc40594..0447e38 100644
 --- a/src/service.rs
 +++ b/src/service.rs
-@@ -13138,7 +13138,9 @@ impl RadioLoop {
-                     // T/R period (s), mode-driven: FT1 = 4, FT4 ≈ 8, FT8/DX1 = 15.
-                     tr_period: eng.active_slot_secs().round() as u32,
-                     config_name: "Default",
--                    tx_message: "",
-+                    // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): the message on the
-+                    // air, for a UDP logger following the contact.
-+                    tx_message: eng.last_own_tx_text(),
-                 });
-                 if !fd_new.is_empty() {
-                     let ctx = FdWsjtxCtx {
-@@ -31107,6 +31109,57 @@ mod tests {
+@@ -36501,6 +36501,57 @@ mod tests {
          );
      }
  

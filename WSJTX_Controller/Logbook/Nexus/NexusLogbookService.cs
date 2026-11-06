@@ -245,10 +245,10 @@ namespace WSJTX_Controller
 
         // Nexus's own import for the source: LoTW / QRZ / eQSL downloads merge (monotonic; QRZ also
         // adds what the log lacks, as Jimmy's QRZ download always did); everything else imports.
-        // A LoTW or QRZ download merged so that every confirmation lands on its own contact:
-        // NexusReportPairing hands Nexus only the rows its pairing is certain to put on the contact
-        // at the same minute; the rest are held (nothing changes for them), counted, and saved for
-        // review under NexusLog\diagnostics. Contacts still queued for Nexus are sent first, so the
+        // A LoTW, QRZ or eQSL download is paired by Nexus itself (nearest in time, since 1.18);
+        // NexusReportPairing holds back only what Nexus cannot settle for Jimmy -- a contact Jimmy
+        // and Nexus would see under different calls, a QRZ row Nexus would add as a duplicate --
+        // counted and saved for review under NexusLog\diagnostics; nothing changes for those. Contacts still queued for Nexus are sent first, so the
         // pairing sees the whole log; if any stay queued, nothing is merged.
         public ImportResult MergeDownload(string adifText, string source)
         {
@@ -261,7 +261,8 @@ namespace WSJTX_Controller
             bool lotw = string.Equals(source, "LOTW", StringComparison.OrdinalIgnoreCase);
             var prep = NexusReportPairing.Prepare(adifText, rows.Rows, nearbyUnique: source == "EQSL",
                 confirmationCall: lotw ? (Func<NexusQso, string>)(q => LogbookBooks.ConfirmationCall(q.StationCallsign)) : null,
-                nexusCall: lotw ? LogbookBooks.StationCallNow?.Invoke() : null);
+                nexusCall: lotw ? LogbookBooks.StationCallNow?.Invoke() : null,
+                nexusPairs: true, addsUnmatched: source == "QRZ", nexusFillsBlanks: lotw);
             var result = ImportFile(prep.Text, source);
             // "Newly confirmed" = contacts that gained a confirmation (LoTW, QRZ, eQSL or card) in
             // this merge, read from the log itself: Nexus's own count covers LoTW and card only, and
@@ -364,6 +365,7 @@ namespace WSJTX_Controller
         private int KeepDownloadedLocations(NexusReportPairing.Result prep, string source, NexusLogRows afterRows)
         {
             var proposals = NexusDownloadedChanges.Load();
+            proposals.Items.RemoveAll(p => p.Service == "QRZ");   // QRZ is no longer asked about (2026-10-23)
             int proposed = 0;
             var after = afterRows?.Error == null && afterRows != null
                 ? afterRows.Rows.Where(q => q.Id != null).GroupBy(q => q.Id).ToDictionary(g => g.Key, g => g.First())
@@ -385,8 +387,12 @@ namespace WSJTX_Controller
                 if (logged.Dxcc.HasValue && logged.Dxcc.Value > 0) Cmp("DXCC", logged.Dxcc.Value.ToString(), V("DXCC"));
                 if (notes.Count > 0) differs.Add($"{label}: {string.Join("; ", notes)}");
                 // The same differences, and county, zones and grid, as proposals to review --
-                // judged against the contact as it is after the merge.
-                proposed += proposals.Note(source, logged.Id != null && after.TryGetValue(logged.Id, out var current) ? current : logged, loc, DateTime.UtcNow);
+                // judged against the contact as it is after the merge. Not QRZ's (operator,
+                // 2026-10-23): its location is a callbook entry, often a home address, and asking
+                // about every one was more than anyone will review; it stays in the diagnostics list
+                // above and, for a contact QRZ confirms, beside it (APP_JIMMY_QRZ_*).
+                if (source != "QRZ")
+                    proposed += proposals.Note(source, logged.Id != null && after.TryGetValue(logged.Id, out var current) ? current : logged, loc, DateTime.UtcNow);
 
                 // Kept for each service that now confirms the contact (2026-10-05: QRZ and eQSL too,
                 // as APP_JIMMY_QRZ_* / APP_JIMMY_EQSL_*). Awards use LoTW's; the others are kept and
@@ -413,6 +419,9 @@ namespace WSJTX_Controller
                 $"{source} rows whose location differs from the logged contact -- the logged location was kept", differs);
             try { proposals.Save(); } catch { proposed = 0; }   // not saved = not there to review; never fails the download
             if (changed) NexusLogbook.Refresh();
+            // A field the log left blank, LoTW's merge has already filled (Nexus 1.21's
+            // keep_lotw_detail; NexusReportPairing leaves a LoTW row's location in): judged against
+            // the contact after the merge, it is not proposed. What is left are real differences.
             return proposed;
         }
 
@@ -425,6 +434,7 @@ namespace WSJTX_Controller
             if (rows.Error == null && rows.Rows != null)
             {
                 string before = string.Join("\n", list.Items.Select(p => p.Key + "|" + p.Proposed + "|" + p.Note));
+                list.Items.RemoveAll(p => p.Service == "QRZ");   // QRZ is no longer asked about (2026-10-23)
                 foreach (var q in rows.Rows) list.CheckCountry(q, DateTime.UtcNow);   // the country check
                 list.Prune(rows.Rows);
                 if (string.Join("\n", list.Items.Select(p => p.Key + "|" + p.Proposed + "|" + p.Note)) != before)
@@ -671,6 +681,39 @@ namespace WSJTX_Controller
 
         // ── Uploads (Nexus's own upload state) ─────────────────────────────────────────
 
+        // Club Log's batch (Alt+U, 2026-10-21): the pending contacts' records written by Nexus,
+        // exactly as the live upload writes each one (EngineHost LOG_UPLOAD_RECORDS), in the order
+        // given. `included` is the dedup keys whose record is in the text -- the only ones a
+        // successful upload may mark. Null text, with why, when the logbook could not be read.
+        public string UploadBatchRecords(IEnumerable<string> dedupKeys, out List<string> included, out string why)
+        {
+            included = new List<string>();
+            why = null;
+            var byId = new Dictionary<string, string>();
+            foreach (string key in dedupKeys)
+            {
+                string id = NexusIdForDedupKey(key);
+                if (!string.IsNullOrEmpty(id) && !byId.ContainsKey(id)) byId[id] = key;
+            }
+            if (byId.Count == 0) return "";
+            string idsPath = Path.Combine(Path.GetTempPath(), $"JimmyUploadIds_{Guid.NewGuid():N}.txt");
+            try
+            {
+                File.WriteAllLines(idsPath, byId.Keys);
+                var reply = Client.UploadRecords(idsPath);
+                if (reply.Error != null) { why = reply.Error; return null; }
+                var sb = new StringBuilder();
+                foreach (var r in reply.Records)
+                {
+                    if (r.Id == null || !byId.TryGetValue(r.Id, out string key)) continue;
+                    sb.Append(r.Adif);
+                    included.Add(key);
+                }
+                return sb.ToString();
+            }
+            finally { try { File.Delete(idsPath); } catch { } }
+        }
+
         // HRDLog included: its upload time is kept on each contact (APP_JIMMY_HRDLOG_UL, the read
         // copy's hrdlog_uploaded_at), recorded by Nexus's LOG_UPLOAD.
         // Handoff 33: nothing at all for an export-only logbook, and only contacts made as the
@@ -759,6 +802,39 @@ namespace WSJTX_Controller
             finally { if (saved) NexusLogbook.Refresh(); }
         }
 
+        // LoTW through Nexus (2026-10-21, EngineHost lotw_batch.rs): Nexus writes the TQSL file for
+        // these contacts (by dedup key) to adifPath, as its own desktop writes a batch. A contact
+        // Nexus cannot name is left out and counted in Missing.
+        public NexusLotwBatchReply LotwPrepare(IEnumerable<string> dedupKeys, string adifPath)
+        {
+            var ids = dedupKeys.Select(NexusIdForDedupKey).ToList();
+            int unnamed = ids.Count(string.IsNullOrEmpty);
+            string idsPath = Path.Combine(Path.GetTempPath(), $"JimmyLotwIds_{Guid.NewGuid():N}.txt");
+            try
+            {
+                File.WriteAllLines(idsPath, ids.Where(i => !string.IsNullOrEmpty(i)));
+                var reply = Client.LotwPrepare(idsPath, adifPath);
+                reply.Missing += unnamed;
+                return reply;
+            }
+            finally { try { File.Delete(idsPath); } catch { } }
+        }
+
+        // TQSL's result for a prepared batch, judged by Nexus and recorded by Nexus on each contact
+        // still as it was signed -- the only place a LoTW upload is now marked.
+        public NexusLotwBatchReply LotwResult(string batch, int? exitCode, int? statusCode, string stderr)
+        {
+            string errPath = Path.Combine(Path.GetTempPath(), $"JimmyLotwErr_{Guid.NewGuid():N}.txt");
+            try
+            {
+                File.WriteAllText(errPath, stderr ?? "", new UTF8Encoding(false));
+                var reply = Client.LotwResult(batch, exitCode, statusCode, errPath);
+                if (reply.State == "stamped") NexusLogbook.Refresh();
+                return reply;
+            }
+            finally { try { File.Delete(errPath); } catch { } }
+        }
+
         public LogbookDb.UploadSyncStatus GetUploadSyncStatus(string service) =>
             R(db => db.GetUploadSyncStatus(service), new LogbookDb.UploadSyncStatus());
 
@@ -841,6 +917,80 @@ namespace WSJTX_Controller
             }
             if (n > 0) NexusLogbook.Refresh();
             return n;
+        }
+
+        // Our own state on contacts as LoTW takes it (KF4CCG's report, 2026-10-22): TQSL refuses a
+        // contact whose MY_STATE is not a state code, and Jimmy Next used to log the profile's state
+        // as typed. A full name becomes its code ("KENTUCKY" -> "KY", MY_CNTY "KENTUCKY,Breathitt"
+        // -> "KY,Breathitt"). Anything else that is no state (a county typed in the state box) takes
+        // the state of the TQSL location recorded with the contact -- the one it is signed with,
+        // which TQSL requires it to match. Otherwise the contact is left as it is. Only for a
+        // station in the United States or Canada; the review note that named the difference loses
+        // it. Returns the contacts changed and the old values replaced.
+        public (int Fixed, List<string> Was) RepairOwnStates()
+        {
+            var was = new List<string>();
+            var rows = Client.Rows();
+            if (rows.Error != null) return (0, was);
+            int n = 0;
+            foreach (var q in rows.Rows)
+            {
+                string my = (q.ExtraValue("MY_STATE") ?? "").Trim();
+                if (my.Length == 0) continue;
+                string myDxcc = (q.ExtraValue("MY_DXCC") ?? "").Trim();
+                if (myDxcc.Length > 0 && myDxcc != "291" && myDxcc != "6" && myDxcc != "110" && myDxcc != "1") continue;
+                string code = SpotRows.StateCode(my) ?? RecordedTqslState(q.ExtraValue("APP_JIMMY_TQSL_LOC_FP"));
+                if (code == null || string.Equals(code, my, StringComparison.Ordinal)) continue;
+
+                SetExtra(q, "MY_STATE", code);
+                string cnty = q.ExtraValue("MY_CNTY") ?? "";
+                int comma = cnty.IndexOf(',');
+                if (comma > 0 && string.Equals(cnty.Substring(0, comma).Trim(), my, StringComparison.OrdinalIgnoreCase))
+                    SetExtra(q, "MY_CNTY", code + cnty.Substring(comma));
+                string note = q.ExtraValue("APP_JIMMY_REVIEW");
+                if (note != null) SetExtra(q, "APP_JIMMY_REVIEW", WithoutStateDifference(note, my, code));
+                if (Client.Edit(q.Id, q.EditKey, q).State == "saved")
+                {
+                    n++;
+                    string old = my.ToUpperInvariant();
+                    if (!was.Contains(old)) was.Add(old);
+                }
+            }
+            if (n > 0) NexusLogbook.Refresh();
+            return (n, was);
+        }
+
+        // The state in a recorded TQSL location fingerprint (TqslStationData.Location.Fingerprint:
+        // call|grid|state|county|dxcc|cqz|ituz), when it is a state code; else null.
+        internal static string RecordedTqslState(string fingerprint)
+        {
+            var parts = (fingerprint ?? "").Split('|');
+            return parts.Length == 7 ? SpotRows.StateCode(parts[2]) : null;
+        }
+
+        // A review note without "state OLD vs NEW" once the contact says NEW; a location note left
+        // with no difference goes, and an empty note is removed.
+        internal static string WithoutStateDifference(string note, string oldState, string newState)
+        {
+            const string Lead = "our location differs from TQSL location ";
+            var kept = new List<string>();
+            foreach (string part in (note ?? "").Split(new[] { "; " }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                int colon = part.IndexOf("': ", StringComparison.Ordinal);
+                if (!part.StartsWith(Lead, StringComparison.Ordinal) || colon < 0) { kept.Add(part); continue; }
+                var diffs = part.Substring(colon + 3).Split(new[] { ", " }, StringSplitOptions.RemoveEmptyEntries)
+                    .Where(d => !string.Equals(d, $"state {oldState} vs {newState}", StringComparison.OrdinalIgnoreCase)).ToList();
+                if (diffs.Count > 0) kept.Add(part.Substring(0, colon + 3) + string.Join(", ", diffs));
+            }
+            return string.Join("; ", kept);
+        }
+
+        // Sets an ADIF extra on a contact; an empty value removes it.
+        private static void SetExtra(NexusQso q, string tag, string value)
+        {
+            q.Extra = q.Extra ?? new List<List<string>>();
+            q.Extra.RemoveAll(e => e.Count == 2 && string.Equals(e[0], tag, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrEmpty(value)) q.Extra.Add(new List<string> { tag, value });
         }
 
         // ── Reads (the projection) ─────────────────────────────────────────────────────
@@ -930,16 +1080,12 @@ namespace WSJTX_Controller
         // different account starts with everything. full: everything again.
         private static string LotwHighWaterKey(string user) => "lotwLastQsl|" + (user ?? "").Trim().ToUpperInvariant();
 
-        // A full download asks "since 1900-01-01" in so many words: given no date, LoTW uses a
-        // "system supplied default" -- the account's last download -- and sends only what came
-        // after it (2026-10-02: the first run, with no high-water yet, got 1 confirmation, not the
-        // history; the old Jimmy client always sent the explicit date for this reason).
-        private const string LotwEverything = "1900-01-01";
-
+        // A full download sends no date: Nexus's own request then asks LoTW for everything since
+        // 1900-01-01 (tempo_core::lotw FULL_HISTORY_SINCE, since Nexus 1.18 -- #399), where LoTW
+        // given no date at all would send only what came after the account's last download.
         public static (string adif, string highWater, string error) DownloadLotwConfirmations(string user, string pass, bool full)
         {
             string since = full ? null : NexusLogbook.GetMeta(LotwHighWaterKey(user));
-            if (string.IsNullOrWhiteSpace(since)) since = LotwEverything;
             var r = new ExternalDataClient().DownloadLotw(user, pass, since, null, out string error);
             return r == null ? (null, null, error) : (r.Adif ?? "", r.HighWater, null);
         }

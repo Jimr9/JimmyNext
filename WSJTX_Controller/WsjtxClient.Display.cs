@@ -1061,9 +1061,23 @@ namespace WSJTX_Controller
             return frags;
         }
 
+        // The logged line's one-shot fields, kept for the other renders of the SAME poll
+        // (2026-10-22, K4LLL): Nexus 1.20 can finish a contact before Jimmy reads the closing
+        // decode, so the render that logs it is followed a few ms later by the decode's own render,
+        // which replaced the waiting "Logged QSO with ..." line in the speech batch. That render now
+        // carries the logged clause too. A later poll never does.
+        private (string call, string sent, string received, long poll) _loggedCarry;
+        // Whether the status box had focus at the last render (its "Now" speech then reaches the
+        // operator) -- read by AnnounceOverSwitched, WsjtxClient.Direct.cs.
+        private bool _statusForegroundLast;
+
         private void ShowStatus()
         {
             _clauseTextsThisRender.Clear();
+            if (loggedCall == null && _loggedCarry.call != null && _loggedCarry.poll == _directPollSeq)
+                (loggedCall, loggedSentReport, loggedReceivedReport) = (_loggedCarry.call, _loggedCarry.sent, _loggedCarry.received);
+            else if (_loggedCarry.poll != _directPollSeq)
+                _loggedCarry = default;
             // Read before the render's reset block clears it (see the speech timing below).
             bool loggedThisRender = loggedCall != null;
             string status = "";
@@ -1678,8 +1692,18 @@ namespace WSJTX_Controller
                                 // Not after a stop (operator, 2026-10-02): once transmit is off, a radio
                                 // still unkeying is not "sending" -- C91RU's halted call said
                                 // "Sending EN34" twice after Smart Mode had stopped it.
-                                if (curTxMsg != null && ((transmitting && txEnabled) || loggedCall != null))
+                                // 2026-10-22: while transmitting, the words name the over on the
+                                // air (_onAirTxMsg, WsjtxClient.Direct.cs), which can differ from
+                                // the last message seen queued.
+                                string onAir = transmitting ? _onAirTxMsg : null;
+                                if ((curTxMsg != null || onAir != null) && ((transmitting && txEnabled) || loggedCall != null))
                                 {
+                                    string p;
+                                    if (onAir != null && onAir != curTxMsg)
+                                        p = SpacifyPayload(NarrationText.StructuredPayload(SemanticDecode.FromWsjtxMessage(onAir, myCall))
+                                            ?? NarrationText.ResidualDisplayText(onAir));
+                                    else
+                                    {
                                     // Stage 7b: structured Nexus-semantic formatting off the
                                     // cached _curTxMsgSemantic (set alongside curTxMsg itself --
                                     // see its own Phase C comment above) instead of re-splitting
@@ -1688,7 +1712,8 @@ namespace WSJTX_Controller
                                     if (curTxPayload == null)
                                         curTxPayload = NarrationText.StructuredPayload(_curTxMsgSemantic)
                                             ?? NarrationText.ResidualDisplayText(curTxMsg);
-                                    string p = SpacifyPayload(curTxPayload);
+                                    p = SpacifyPayload(curTxPayload);
+                                    }
                                     // "Transmit message" clause -- clean phrase ("sending 73");
                                     // ShowStatus adds the ", " separator. Disabled -> absent.
                                     // Phase C (2026-09-14): reads _curTxMsgSemantic (cached the
@@ -2030,6 +2055,7 @@ namespace WSJTX_Controller
                             DebugOutput($"{spacer}status:'{status}'");
 
                             _wasTransmittingLastShowStatus = transmitting;
+                            if (loggedCall != null) _loggedCarry = (loggedCall, loggedSentReport, loggedReceivedReport, _directPollSeq);
                             loggedCall = null;
                             loggedSentReport = null;
                             loggedReceivedReport = null;
@@ -2083,6 +2109,7 @@ namespace WSJTX_Controller
                 // really foregrounded right now.
                 bool foregroundNow = StatusView.RenderStatusVisible(bandMode, status, foreColor, backColor,
                     isIdleReceiveCycleSummaryRender);
+                _statusForegroundLast = foregroundNow;
 
                 // SPEECH goes through the one SpeechCoordinator as an ordered set of clause
                 // fragments (see BuildRoutineFragments). The "_base" skeleton uses the global

@@ -917,6 +917,9 @@ namespace WSJTX_Controller
             public RuleGroupBy     GroupBy;
             public HashSet<string> Set;              // still-needed (never worked); Target=All only
             public HashSet<string> UnconfirmedSet;    // worked but not confirmed; any Target type
+            // An open-ended award (WPX: any prefix counts, so there is no checklist): what is
+            // already worked -- a heard item NOT in it is needed. Null for every other award.
+            public HashSet<string> WorkedSet;
         }
         public Dictionary<string, ActiveAwardTag> activeAwardTags = new Dictionary<string, ActiveAwardTag>();
 

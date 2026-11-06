@@ -9,7 +9,10 @@ namespace WSJTX_Controller
     public enum RuleGroupBy
     {
         None, Dxcc, Country, State, CqZone, ItuZone, Continent, County,
-        Grid, Grid4, Iota, Prefix, Callsign, SigInfo, DarcDok
+        Grid, Grid4, Iota, Prefix, Callsign, SigInfo, DarcDok,
+        // DARC's Worked All Europe country (2026-10-31): Nexus's WAE list, by DARC prefix ("IT"
+        // Sicily, "GM/S" Shetland), worked out by Nexus as the read copy is built.
+        WaeCountry
     }
 
     // Which QSL source(s) count as "confirmed". None means the award doesn't

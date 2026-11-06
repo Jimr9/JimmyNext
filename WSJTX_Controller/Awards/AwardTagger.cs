@@ -179,10 +179,12 @@ namespace WSJTX_Controller
             // Stage A6: Continent now comes from d.EffectiveClassification() (Jimmy's own
             // ClassificationEngine, resolved via LookupManager -- same source CqZone/Dxcc
             // below already use) instead of directly off the wire.
+            var sem = d.EffectiveSemantic(_wc.myCall);
             return AwardMatcher.Match(
                 _wc.activeAwardTags, call, state, d.EffectiveClassification().Continent,
                 cqZoneLookup: () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.CqZone ?? 0; },
-                dxccLookup:   () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.Dxcc   ?? 0; });
+                dxccLookup:   () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.Dxcc   ?? 0; },
+                wpxPrefix: sem.WpxPrefix, waeCountry: sem.WaeCountry);
         }
 
         // Same as MatchedAwardRuleId, against each active award's UnconfirmedSet instead of its
@@ -194,10 +196,12 @@ namespace WSJTX_Controller
 
             string state = ResolveAwardState(d, call);
 
+            var sem = d.EffectiveSemantic(_wc.myCall);
             return AwardMatcher.MatchUnconfirmed(
                 _wc.activeAwardTags, call, state, d.EffectiveClassification().Continent,
                 cqZoneLookup: () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.CqZone ?? 0; },
-                dxccLookup:   () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.Dxcc   ?? 0; });
+                dxccLookup:   () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.Dxcc   ?? 0; },
+                wpxPrefix: sem.WpxPrefix, waeCountry: sem.WaeCountry);
         }
 
         // Category tag shown in the call-waiting row (e.g. "New DXCC", "WAS Needed"). WAS_NEEDED/

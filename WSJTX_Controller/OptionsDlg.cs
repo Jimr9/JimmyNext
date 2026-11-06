@@ -64,7 +64,6 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox rawPriorityTagsCheckBox;
         private System.Windows.Forms.CheckBox rawNewestFirstCheckBox;
         private System.Windows.Forms.CheckBox keepTransmitListDuringTxCheckBox;
-        private System.Windows.Forms.CheckBox keepListPositionDuringRefreshCheckBox;
         private List<System.Windows.Forms.Control> _advUiDependentControls;
 
         // Sounds tab state
@@ -1125,6 +1124,7 @@ namespace WSJTX_Controller
         {
             if (!ValidateHotkeys()) return;
             if (!ValidateOtherPrograms()) return;
+            if (!ValidateStationState()) return;
             // Setup's Finish: an empty Operator callsign starts as the Station callsign (the
             // Station & Operator page in Options keeps them separate for a guest operator).
             if (InSetupMode && _stationOperatorCallTextBox != null && _engineMyCallTextBox != null
@@ -1254,19 +1254,6 @@ namespace WSJTX_Controller
             advUiPanel.Controls.Add(layoutGroup);
             y += 165;
 
-            keepListPositionDuringRefreshCheckBox = new System.Windows.Forms.CheckBox
-            {
-                Text = "Keep list position during refresh",
-                AccessibleName = "Keep list position during refresh",
-                AutoSize = true,
-                Location = new System.Drawing.Point(left + 8, y),
-                TabIndex = 23,
-                Checked = ctrl.keepListPositionDuringRefresh,
-                Font = font
-            };
-            advUiPanel.Controls.Add(keepListPositionDuringRefreshCheckBox);
-            y += 24;
-
             // ── Group: Message types ──────────────────────────────────────────────
             var msgGroup = new System.Windows.Forms.GroupBox
             {
@@ -1385,7 +1372,6 @@ namespace WSJTX_Controller
             if (ctrl.wsjtxClient != null) ctrl.wsjtxClient.rawPriorityTags = ctrl.rawPriorityTags;
             ctrl.rawNewestFirst    = rawNewestFirstCheckBox?.Checked ?? false;
             ctrl.keepTransmitListDuringTx = keepTransmitListDuringTxCheckBox?.Checked ?? false;
-            ctrl.keepListPositionDuringRefresh = keepListPositionDuringRefreshCheckBox?.Checked ?? false;
             int rawMax = (int)(rawMaxRowsNumeric?.Value ?? 100);
             ctrl.rawMaxRows = Math.Max(10, Math.Min(5000, rawMax));
             // "Max queued calls" (_maxQueuedCallsNumeric) moved to the General tab, 2026-08-21 --
@@ -3224,6 +3210,31 @@ namespace WSJTX_Controller
                 .Select(p => p.Trim().ToUpperInvariant())
                 .Where(p => System.Text.RegularExpressions.Regex.IsMatch(p, @"^[A-Z0-9]{1,4}-\d{4,5}$")).Distinct());
 
+        // Our state for a station in the United States or Canada must be a state or province (its
+        // name is turned into its code on save): anything else is refused by TQSL on every contact,
+        // as KF4CCG's county in the state box was (2026-10-22). Asked, not forced -- No (the
+        // default) goes back to the box.
+        private bool ValidateStationState()
+        {
+            if (_stationQthStateTextBox == null || InSetupMode) return true;
+            string typed = _stationQthStateTextBox.Text.Trim();
+            if (typed.Length == 0 || SpotRows.StateCode(typed) != null) return true;
+            string call = (_engineMyCallTextBox?.Text ?? "").Trim();
+            if (call.Length == 0) call = ctrl.wsjtxClient?.myCall ?? "";
+            int dxcc = 0; string country = "", cont = "";
+            if (call.Length > 0) AdifImporter.FillEntityGaps(call.ToUpperInvariant(), ref dxcc, ref country, ref cont);
+            if (dxcc != 291 && dxcc != 6 && dxcc != 110 && dxcc != 1) return true;
+            if (MessageBox.Show(this, $"{typed.ToUpperInvariant()} is not a state or province. LoTW needs its two-letter code, such as KY; a county goes in the County box.\n\nSave it anyway?",
+                    "State/Province", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes) return true;
+            for (Control p = _stationQthStateTextBox; p != null; p = p.Parent)
+            {
+                int idx = _categoryPanels.IndexOf(p);
+                if (idx >= 0) { _categoryListBox.SelectedIndex = idx; break; }
+            }
+            _stationQthStateTextBox.Focus();
+            return false;
+        }
+
         internal void SaveStationOperatorTab()
         {
             if (_stationOperatorCallTextBox == null) return;
@@ -3231,7 +3242,7 @@ namespace WSJTX_Controller
             ctrl.Station.OperatorCallsign = _stationOperatorCallTextBox.Text.Trim().ToUpperInvariant();
             ctrl.Station.OperatorName = _stationOperatorNameTextBox.Text.Trim();
             ctrl.Station.ContestEmail = _stationContestEmailTextBox.Text.Trim();
-            ctrl.Station.QthState = _stationQthStateTextBox.Text.Trim().ToUpperInvariant();
+            ctrl.Station.QthState = StationSettings.NormalizeQthState(_stationQthStateTextBox.Text);
             ctrl.Station.County = _stationCountyTextBox.Text.Trim();
             ctrl.Station.ArrlSection = _stationArrlSectionTextBox.Text.Trim().ToUpperInvariant();
             ctrl.Station.CqZone = _stationCqZoneTextBox.Text.Trim();

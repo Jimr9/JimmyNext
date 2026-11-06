@@ -43,6 +43,10 @@ namespace WSJTX_Controller
         // Reset to null at the top of each UploadPendingAsync call.
         public int? LastUploadedCount { get; private set; }
 
+        // TEST ONLY (JimmyTests' --nexus-upload-tests): a stand-in for tqsl.exe that answers with a
+        // chosen exit code and status, so no real TQSL ever runs and nothing reaches LoTW.
+        internal static string TestTqslPath;
+
         // Checks the standard install paths first, falling back to a registry uninstall-key
         // lookup. Returns null (not an exception) if TQSL isn't installed; callers must degrade
         // to a clear status message, not a crash.
@@ -99,11 +103,9 @@ namespace WSJTX_Controller
             return null;
         }
 
-        // Signs and uploads every QSO LogbookDb has marked pending for "LOTW". Builds one ADIF
-        // file (AdifExporter.Header() + AdifRecordBuilder.Build() per record -- the same
-        // per-record builder CatchUpQrz/CatchUpClubLog/CatchUpHrdLog already use, so this stays
-        // consistent with the rest of the upload-catch-up family rather than switching to the
-        // separate ID-based export path the Logbook window's manual ADIF export uses instead).
+        // Signs and uploads every QSO pending for "LOTW". Jimmy picks the contacts and the station
+        // location for each (PlanBatches); since 2026-10-21 Nexus writes each batch's file from its
+        // own contacts and records TQSL's result on them (EngineHost lotw_batch.rs).
         public async Task<bool> UploadPendingAsync(string stationLocation, ILogbookService db)
         {
             LastError = null;
@@ -114,12 +116,12 @@ namespace WSJTX_Controller
                 LastError = LogbookBooks.UploadsBlockedMessage;
                 return false;
             }
-            if (TestModeGuard.IsTestMode)
+            if (TestModeGuard.IsTestMode && TestTqslPath == null)
             {
                 LastError = "Blocked: JIMMY_TEST_DB_PATH is set (test mode) -- no real TQSL invocation allowed.";
                 return false;
             }
-            string tqslPath = LocateTqsl();
+            string tqslPath = TestTqslPath ?? LocateTqsl();
             if (tqslPath == null)
             {
                 LastError = "TQSL was not found. Install TrustedQSL to upload to LoTW.";
@@ -220,20 +222,34 @@ namespace WSJTX_Controller
         {
             LastError = null;
             LastUploadedCount = null;
-            var sb = new StringBuilder();
-            sb.Append(AdifExporter.Header());
-            foreach (var q in pending)
+            var nexus = db as NexusLogbookService;
+            if (nexus == null)
             {
-                sb.Append(AdifRecordBuilder.Build(
-                    q.Callsign, q.Band, q.FreqHz, q.Mode, q.QsoDate, q.TimeOn, q.TimeOff,
-                    q.RstSent, q.RstRcvd, q.Grid, q.Name, q.Comment, q.TxPwr,
-                    q.OperatorCall, q.StationCall, q.MyGrid, q.ExchangeSent, q.ExchangeRcvd));
+                LastError = "The logbook is not open, so nothing was signed.";
+                return false;
             }
 
             string tempFile = Path.Combine(Path.GetTempPath(), $"JimmyLotw_{Guid.NewGuid():N}.adi");
             try
             {
-                File.WriteAllText(tempFile, sb.ToString());
+                // Nexus writes the file from its own contacts (2026-10-21) -- the same record every
+                // other service gets, as Nexus's desktop signs it -- and remembers each contact as
+                // it was signed, for the result below.
+                var prep = nexus.LotwPrepare(pending.Select(q => q.DedupKey), tempFile);
+                if (prep.State != "ready")
+                {
+                    LastError = $"The LoTW upload file could not be made ({prep.Why ?? prep.State}); nothing was signed.";
+                    LogFailure("Prepare failed", LastError, "");
+                    return false;
+                }
+                string notFound = prep.Missing > 0
+                    ? $" {NotificationTemplateEngine.Pluralize(prep.Missing, "contact")} could not be found in the logbook and stay pending."
+                    : "";
+                if (prep.Signed == 0)
+                {
+                    LastError = "Nothing was signed." + notFound;
+                    return false;
+                }
 
                 string args = "-d -u -a compliant -x -l " + Quote(stationLocation) + " " + Quote(tempFile);
                 var psi = new ProcessStartInfo
@@ -247,7 +263,7 @@ namespace WSJTX_Controller
                 };
 
                 string stderrText;
-                int exitCode;
+                int? exitCode;
                 using (var proc = Process.Start(psi))
                 {
                     // TQSL's own docs: with -x, status is routed to stderr and the process
@@ -296,10 +312,19 @@ namespace WSJTX_Controller
                     }
                     stderrText = stderrTask.Result;
                     bool exited = proc.WaitForExit(5000);
-                    exitCode = exited ? proc.ExitCode : -1;
+                    exitCode = exited ? proc.ExitCode : (int?)null;
                 }
 
                 var (code, description) = ParseFinalStatus(stderrText);
+                // What to mark is Nexus's decision now (EngineHost lotw_batch.rs judge(): Nexus's
+                // reading of TQSL's exit code, never a sent mark on code 8 or on a result whose
+                // exit code and Final Status line disagree), recorded only on contacts still as
+                // they were signed. The wording below stays Jimmy's, from the Final Status line.
+                var res = nexus.LotwResult(prep.Batch, exitCode, code, stderrText);
+                int notMarked = res.State == "stamped" ? res.Changed + res.Gone + res.Unrecorded : 0;
+                string extra = notFound + (notMarked > 0
+                    ? $" {NotificationTemplateEngine.Pluralize(notMarked, "contact")} changed while TQSL was signing and stay pending."
+                    : "");
 
                 // Release-audit finding, 2026-08-20 (release blocker): codes 8/9/14 used to be
                 // treated identically to 0 (full success) and blanket-marked the ENTIRE `pending`
@@ -327,27 +352,64 @@ namespace WSJTX_Controller
                 // "already handled" now. This trades a merely cosmetic "pending count doesn't
                 // shrink as fast" for ruling out a silent, effectively permanent data-integrity
                 // false positive.
+                // Since 2026-10-21 Nexus applies that rule (and stamps 9/14 "rejected", which keeps
+                // the contacts pending); this switch only words the result.
                 switch (ClassifyFinalStatus(code))
                 {
                     case FinalStatusOutcome.MarkAllUploaded:
-                        db.MarkUploaded(pending.Select(q => q.DedupKey), "LOTW", DateTime.UtcNow);
-                        // Code 0 is unambiguous: every submitted pending record was signed and
-                        // saved/uploaded, so the pending count IS the uploaded count.
-                        LastUploadedCount = pending.Count;
+                        if (res.State == "stamped" && res.Outcome == "pending")
+                        {
+                            // The contacts Nexus marked: those still as they were signed.
+                            LastUploadedCount = res.Stamped;
+                            LastError = extra.Length > 0 ? $"{NotificationTemplateEngine.Pluralize(res.Stamped, "QSO")} uploaded.{extra}" : null;
+                            return true;
+                        }
+                        LastError = "TQSL reported success, but it could not be recorded on the contacts, so none were " +
+                            "marked uploaded; they will be offered again next time." + extra;
+                        LogFailure("Success not recorded", $"{LastError} (exit code {exitCode?.ToString() ?? "none"}; {res.State} {res.Why})", stderrText);
                         return true;
 
                     case FinalStatusOutcome.AmbiguousLeaveUnmarked:
-                        LastError = $"TQSL reported: {description ?? "no description"} (code {code}) -- " +
-                            "some QSOs may not have actually been uploaded (already-uploaded and out-of-date-range " +
-                            "QSOs are reported the same way); none were marked uploaded this run, so they will be " +
-                            "retried, or confirmed as already uploaded, next time.";
+                    {
+                        // 2026-10-21: said plainly -- what may have happened at LoTW, and that nothing
+                        // was marked, so every contact stays pending and goes again.
+                        string these = NotificationTemplateEngine.Pluralize(prep.Signed, "contact");
+                        string stay = prep.Signed == 1 ? "it stays pending" : $"all {prep.Signed} stay pending";
+                        // 2026-10-31 (KF4CCG): contacts TQSL refused as invalid are said as TQSL
+                        // said them, not as "already at LoTW".
+                        var (refused, why) = InvalidRefusals(stderrText);
+                        if (refused > 0)
+                        {
+                            int others = prep.Signed - refused;
+                            LastError = $"TQSL refused {NotificationTemplateEngine.Pluralize(refused, "contact")}: {why}." +
+                                (why.IndexOf("State", StringComparison.OrdinalIgnoreCase) >= 0
+                                    ? " Your own state must be its two-letter code, such as KY; check State/Province in Options, Station & Operator." : "") +
+                                (others <= 0 ? ""
+                                    : code == 8 ? $" The other {others} {(others == 1 ? "is" : "are")} already at LoTW or outside your certificate's dates."
+                                    : $" TQSL does not say which of the other {others} reached LoTW (code {code}).") +
+                                $" None were marked uploaded, so {stay} and will be offered again next time." + extra;
+                            LogFailure("Contacts refused as invalid -- not marked uploaded", LastError, stderrText);
+                            return true;
+                        }
+                        LastError = (code == 8
+                            ? $"TQSL sent nothing new (code 8): the {these} {(prep.Signed == 1 ? "is" : "are")} already at LoTW or outside your certificate's dates. " +
+                              $"None were marked uploaded, so {stay} and will be offered again next time."
+                            : code == 9
+                            ? $"TQSL sent only some of the {these} and does not say which (code 9). Some may have reached LoTW, " +
+                              $"but none were marked uploaded, so {stay} and will be offered again next time; LoTW ignores any it already has."
+                            : $"TQSL reported: {description ?? "no description"} (code {code}). Some of the {these} may have reached LoTW, " +
+                              $"but TQSL does not say which, so none were marked uploaded; {stay} and will be offered again next time.") + extra;
                         LogFailure("Partial/ambiguous status -- not marked uploaded", LastError, stderrText);
                         return true;
+                    }
 
                     default:
-                        LastError = code.HasValue
+                        LastError = (code.HasValue
                             ? $"TQSL reported: {description ?? "no description"} (code {code})."
-                            : $"TQSL exited (code {exitCode}) without a parseable status line.";
+                            : $"TQSL exited (code {exitCode?.ToString() ?? "none"}) without a parseable status line.")
+                            + (res.Detail == "cert" ? " Check the callsign certificate in TQSL."
+                               : res.Detail == "station-location" ? " Check the station location in TQSL." : "")
+                            + extra;
                         LogFailure("Upload failed", LastError, stderrText);
                         return false;
                 }
@@ -390,6 +452,18 @@ namespace WSJTX_Controller
             return (code, description);
         }
 
+        // The contacts TQSL refused as invalid ("The log being signed has 'US County State' set to
+        // value 'KENTUCKY' which is not valid on line 5", one per contact), and what was wrong in
+        // TQSL's words: "US County State KENTUCKY is not valid". (0, "") when there are none.
+        public static (int Count, string Why) InvalidRefusals(string stderrText)
+        {
+            var found = Regex.Matches(stderrText ?? "", @"has '([^']+)' set to value '([^']*)' which is not valid");
+            if (found.Count == 0) return (0, "");
+            var why = found.Cast<Match>().Select(m => $"{m.Groups[1].Value} {m.Groups[2].Value} is not valid")
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            return (found.Count, string.Join("; ", why));
+        }
+
         public enum FinalStatusOutcome
         {
             // Only code 0 ("success: all qsos submitted were signed and saved or signed and
@@ -423,7 +497,7 @@ namespace WSJTX_Controller
         {
             try
             {
-                string dir = Path.Combine(
+                string dir = TestTqslPath != null ? Path.GetDirectoryName(TestTqslPath) : Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     System.Reflection.Assembly.GetExecutingAssembly().GetName().Name);
                 Directory.CreateDirectory(dir);

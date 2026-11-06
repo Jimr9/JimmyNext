@@ -1,0 +1,76 @@
+; DARC Worked All Europe -- the 73 current WAE countries, by DARC prefix (what Nexus names each contact's WAE country by).
+; From Nexus 1.21 (propagation/src/wae.rs), transcribed there from DARC's "Offizielle WAE-Laenderliste":
+; https://www.darc.de/der-club/referate/dx/diplome/wae-diplom/wae-laenderliste/ (read 2026-10-24).
+1A        ; Sov Mil Order of Malta
+3A        ; Monaco
+4O        ; Montenegro
+4U1I      ; ITU HQ
+4U1V      ; Vienna Intl Ctr
+9A        ; Croatia
+9H        ; Malta
+C3        ; Andorra
+CT        ; Portugal
+CU        ; Azores
+DL        ; Fed. Rep. of Germany
+E7        ; Bosnia-Herzegovina
+EA        ; Spain
+EA6       ; Balearic Islands
+EI        ; Ireland
+ER        ; Moldova
+ES        ; Estonia
+EU        ; Belarus
+F         ; France
+G         ; England
+GD        ; Isle of Man
+GI        ; Northern Ireland
+GJ        ; Jersey
+GM        ; Scotland
+GM/S      ; Shetland Islands
+GU        ; Guernsey
+GW        ; Wales
+HA        ; Hungary
+HB        ; Switzerland
+HB0       ; Liechtenstein
+HV        ; Vatican City
+I         ; Italy
+IS        ; Sardinia
+IT        ; Sicily
+JW        ; Svalbard
+JW/B      ; Bear Island
+JX        ; Jan Mayen
+LA        ; Norway
+LX        ; Luxembourg
+LY        ; Lithuania
+LZ        ; Bulgaria
+OE        ; Austria
+OH        ; Finland
+OH0       ; Aland Islands
+OJ0       ; Market Reef
+OK        ; Czech Republic
+OM        ; Slovak Republic
+ON        ; Belgium
+OY        ; Faroe Islands
+OZ        ; Denmark
+PA        ; Netherlands
+R1FJ      ; Franz Josef Land
+S5        ; Slovenia
+SM        ; Sweden
+SP        ; Poland
+SV        ; Greece
+SV/A      ; Mount Athos
+SV5       ; Dodecanese
+SV9       ; Crete
+T7        ; San Marino
+TA1       ; European Turkey
+TF        ; Iceland
+TK        ; Corsica
+UA        ; European Russia
+UA2       ; Kaliningrad
+UR        ; Ukraine
+YL        ; Latvia
+YO        ; Romania
+YU        ; Serbia
+Z6        ; Republic of Kosovo
+Z3        ; North Macedonia
+ZA        ; Albania
+ZB        ; Gibraltar

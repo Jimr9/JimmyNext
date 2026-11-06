@@ -1,8 +1,8 @@
 diff --git a/src/slot.rs b/src/slot.rs
-index 796c385..6d603fc 100644
+index 8420c79..1af962a 100644
 --- a/src/slot.rs
 +++ b/src/slot.rs
-@@ -144,8 +144,16 @@ pub(crate) fn apply_tx_dial_shift(eng: &mut Engine, rig: &mut Rig) -> SplitApply
+@@ -388,8 +388,16 @@ pub(crate) fn apply_tx_dial_shift(eng: &mut Engine, rig: &mut Rig) -> SplitApply
              // point here is the MODE — sending a width would reach across and reset the filter
              // the operator set on the TX VFO, which is the shape of the very bug #67 was about.
              // AFTER the split enable above: `X` addresses the TX VFO, so it has to exist first.

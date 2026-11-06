@@ -59,6 +59,73 @@ stay pinned; do NOT import `main`. What the next stable upgrade needs:
   SET_CLOCK_CHECK uses Nexus's public `apply_settings` + `clear_clock_offset(true)`; ATU_STATUS
   reads PTT with Nexus's `Rig::read_ptt`. Both are public API -- check they still exist.
 
+## Ten-patch re-assessment -- 2026-10-30 (v1.20.0 -> v1.21.0 upgrade)
+
+Pin moved to stable **v1.21.0** (`a5777aef`; annotated tag object `9cd7759a`), nothing taken from
+`main` (437 commits past it, not reviewed). Every patch was applied to a clean v1.21.0 first; all
+ten keep the same payload (md5 of their `+`/`-` lines unchanged). Nine applied as they were;
+`tempo-app-engine.patch`'s two same-slot accumulation hunks were re-anchored by hand (1.21 calls
+`note_band_activity(slot)` beside `last_wire_decodes` in `redecode` and `fold_decodes`).
+
+- **Still needed, checked on 1.21:** every "How to check" above still finds upstream without the
+  behaviour: `fold_decodes` still replaces the early pass's rows on `!continues`; no `dont_set_mode`;
+  no `keep_logged_location`; `parse("CQ W1AW")` still `Other`; `Station::after_tx` still clears
+  `pending` only at `Done` (#416: "tracked on the roadmap, but it won't be in the next release",
+  2026-10-26); the rigctld test and fast-sys build fixes.
+- **Jimmy Next's own copies retired in favour of 1.21 (operator's rule, 2026-10-30: when Nexus does
+  it, use Nexus's):**
+  - LoTW's blank-location fill (Jimmy's `LotwBlankFills`, 2026-10-23) -- Nexus's merge fills a blank
+    grid, county, IOTA, zones, prefix and state from LoTW's QSL detail (`reconcile::keep_lotw_detail`)
+    and a blank state, CQ zone, DXCC and country (`apply_match`), never a logged value. A LoTW row
+    now reaches the merge with its location (`NexusReportPairing.Prepare(nexusFillsBlanks)`); QRZ and
+    eQSL rows still lose the merge-fill fields (operator, 2026-10-23: QRZ is a callbook entry).
+  - The explicit `1900-01-01` LoTW since-date -- `tempo_core::lotw::build_report_url` sends it itself
+    when no high-water is given (`FULL_HISTORY_SINCE`, #399, since 1.18).
+  - The pairing guard's ambiguity holds -- `reconcile::pair_report` pairs nearest-first, no contact
+    taken twice (#400, since 1.18). A merge row the guard cannot tie to one contact is now sent
+    (`nexusPairs`), not held. Still held: a contact Jimmy (owner rule) and Nexus (profile call)
+    would see under different calls, and for QRZ (`merge_and_add` APPENDS a row it pairs with
+    nothing) a row Nexus would add beside a logged contact, or a second row for one contact. The
+    own-records report, Club Log's absent-only import and eQSL's far-off-time rewrite are unchanged:
+    Nexus has no equivalent.
+- **Checked, kept:** Jimmy's own-station stamping (`OurLocationNow`: MY_STATE, MY_CNTY, MY_DXCC,
+  MY_COUNTRY, the TQSL location and its fingerprint). 1.21's `stamp_station_now` fills MY_GRIDSQUARE
+  and MY_STATE (marked self-filled, left out of the LoTW batch), OPERATOR, MY_RIG and TX_PWR only
+  where the record arrives without them; Jimmy's contacts arrive with theirs, so nothing is stamped
+  twice or differently, and Nexus has no county, profile or TQSL-location equivalent.
+- **Behaviour Jimmy now gets from upstream:** FT8's full pass from the early pass's residual plus a
+  rescue search of the original audio; a call made in the other station's period keyed once, not
+  twice; a radio's split held through a long over; Replay re-sends Band Activity; a logger's free
+  text as Tx 5; per-contact history and Recently deleted (90 days) under every Jimmy edit and delete.
+
+## Ten-patch re-assessment -- 2026-10-22 (v1.19.0 -> v1.20.0 upgrade)
+
+Pin moved to stable **v1.20.0** (`0eb7c3a1`; annotated tag object `25a461d0`), nothing taken from
+`main` (2 commits past it, manual and contact-address text only). Every patch was applied to a
+clean v1.20.0 before anything here changed; eight apply unchanged (same payload, new offsets).
+
+- **`last_own_tx_text` and `Status.tx_message` retired.** 1.20 fills every WSJT-X Status TX field
+  itself (`Engine::wsjtx_tx_status`, set at each key and each mid-over switch). The engine patch
+  lost the accessor; the service patch is now only the "Mode: None" test.
+- **Same-slot accumulation re-derived.** 1.20 streams each decode to the sequencer as it is found
+  (`apply_streamed_decode`) and keeps one PASS together on screen (`continues`), but still replaced
+  the rows when the next pass of the same period folded. The patch now joins any later fold of the
+  same slot to `last_decodes` (+ the multi-answer flags); `last_wire_decodes` is left as upstream
+  has it, because the radio loop sends it to WSJT-X listeners after every fold and accumulating it
+  would re-send earlier decodes. New test:
+  `jimmy_compat_a_periods_early_rows_stay_when_its_full_pass_folds` (red with upstream's condition).
+- **Still needed, checked on 1.20:** PSK Reporter setter, "Mode: None" (settings, rig mode, Rig
+  split), multi-answer roger (reattach still Hound-only) and provenance, keep logged location, the
+  grid-less CQ parse (`parse("CQ W1AW")` still `Other`) and its inbox companion, the closing RR73
+  (#416 confirmed upstream, not yet fixed), the rigctld test and fast-sys build fixes.
+- **EngineHost compile fix:** `propagation::live::qrz::{fetch, post_form}` take the program version
+  for QRZ's `Nexus/<version>` User-Agent; EngineHost passes `EQSL_PROGRAM_VERSION`, now `1.20.0`.
+- **Behaviour Jimmy now gets from upstream:** WSJT-X decode moments (14.40 s / 6.048 s) and
+  streamed decodes, the mid-over switch, RR73/RRR answered with 73, the newest report in a repeat,
+  no decode of a near-silent period, no keying of text the encoder refuses, no answer to `<...>`,
+  WSJT-X forms of RR73/73 to nonstandard calls, Field Day/contest caller checks, filled WSJT-X UDP
+  Status fields and correct Decode times.
+
 ## Nine-patch re-assessment -- 2026-10-17 (v1.18.0 -> v1.19.0 upgrade)
 
 Pin moved to stable **v1.19.0** (`02231438`; annotated tag object `de14f5cc`), nothing taken from
@@ -442,20 +509,20 @@ backoff only changes *when* that funnel runs, not whether it runs. See
 `jimmy_compat_rfpower_write_protection_survives_reopen_and_new_rigs_while_meters_flow` in
 `service.rs`'s test module for the regression proof.
 
-## Current patches (against Nexus `v1.19.0`, commit `02231438`)
+## Current patches (against Nexus `v1.21.0`, commit `a5777aef`)
 
-Nine patches since 2026-10-13, **one source file each** (the snapshot and solar-wind patches are retired -- see the v1.18.0 re-assessment above) -- (`prepare-nexus.ps1` and the `patches/` directory are
+Ten patches since 2026-10-21 (`tempo-core-qso.patch` added; nine from 2026-10-13), **one source file each** (the snapshot and solar-wind patches are retired -- see the v1.18.0 re-assessment above) -- (`prepare-nexus.ps1` and the `patches/` directory are
 the source of truth; the ten are itemised in the `###` sections below). Jimmy's downstream
 behavior these preserve is the **Jimmy Next 2.0.55 operator experience** -- that is the
 compatibility baseline.
 
-### `patches/tempo-app-engine.patch` -- 7 behaviors (the Fake-It status setter in the table below was retired 2026-10-13), `crates/tempo-app/src/engine.rs`
+### `patches/tempo-app-engine.patch` -- 6 behaviors (the Fake-It status setter retired 2026-10-13, `last_own_tx_text` 2026-10-22), `crates/tempo-app/src/engine.rs`
 
 | Behavior | Why Jimmy needs it | What's missing / wrong upstream |
 |---|---|---|
-| Same-slot decode accumulation | A QSO reply caught only on a slot's EARLY decode pass drives Nexus's own sequencer's next over, but a plain overwrite of `last_wire_decodes`/`last_decodes` on the boundary pass drops it from `AppSnapshot.recent_decodes` -- silently breaking Jimmy's **auto-logging** for a QSO that otherwise completed. The fix accumulates when `last_decode_slot == Some(slot)` (early-pass dupes are already removed by `drop_early_dupes`), and still replaces on a genuinely newer slot. | `process_decodes` ends with an unconditional `self.last_wire_decodes = ...; self.last_decodes = ...`. |
+| Same-slot decode accumulation (re-derived 2026-10-22 for 1.20: `last_decodes` + flags only; `last_wire_decodes` stays upstream's, since the loop sends it to WSJT-X listeners after every fold) | A QSO reply caught only on a slot's EARLY decode pass drives Nexus's own sequencer's next over, but a plain overwrite of `last_wire_decodes`/`last_decodes` on the boundary pass drops it from `AppSnapshot.recent_decodes` -- silently breaking Jimmy's **auto-logging** for a QSO that otherwise completed. The fix accumulates when `last_decode_slot == Some(slot)` (early-pass dupes are already removed by `drop_early_dupes`), and still replaces on a genuinely newer slot. | `process_decodes` ends with an unconditional `self.last_wire_decodes = ...; self.last_decodes = ...`. |
 | `Engine::set_pskreporter(bool)` | Jimmy's Options UI has a live PSK Reporter on/off toggle that must not require a restart. | No live setter; only a start-of-session `Settings.pskreporter` field. |
-| `Engine::last_own_tx_text()` | The **only** consumer is the WSJT-X-protocol `Status.tx_message` field (see the service.rs patch) -- the one signal a UDP logger (GridTracker/JTAlert) needs to track which callsign / exchange step is on the air. Jimmy's own Direct snapshot path derives own-TX from the snapshot's own rows and does **not** use this accessor. | No accessor for the most recent transmitted text. |
+| ~~`Engine::last_own_tx_text()`~~ RETIRED 2026-10-22 | Fed `Status.tx_message`; Nexus 1.20 fills every WSJT-X Status TX field itself (`Engine::wsjtx_tx_status`). | -- |
 | `dont_set_mode` guard in `rig_mode_effective()` | WSJT-X Radio tab "Mode: None" -- when set, the radio loop must never command the rig's mode. `rig_mode_effective()` returns `String::new()` first thing, which every mode-set call site already treats as "nothing to do". | No native "leave the mode alone" gate. |
 | Ordinary-QSO multi-answer roger (`hound_split`, added 2026-09-26) | A station answering several callers at once (MSHV multi-answer "Special MSG", WSJT-X Fox) sends our roger as the sender-less first half of a 0.1 frame, `<us> RR73; <other> <DX> -08`. Outside a Hound QSO Nexus never reattached a sender, so an ordinary QSO with such a station could NEVER complete (live 2026-09-25, K5MGY). The patch reattaches in an ordinary QSO **only** when the frame's own hashed sender (its second half) is our partner -- the frame names its sender, so this is evidence, not assumption; a bystander Fox's frame names another station and #236 stays closed. Matches WSJT-X normal mode's "dual Fox style message, possibly from MSHV" completion. Test: `an_ordinary_qso_completes_on_its_own_partners_multi_answer_roger` beside Nexus's own #236 guard. | Reattach is gated on `hound_qso` alone. |
 | Multi-answer split provenance (`hound_split` + `Engine::last_decodes_multiplexed()`, added 2026-09-26) | During a QSO Nexus splits every 0.1 frame into two ordinary rows, so the fact that they came from ONE multi-answer transmission was lost -- Jimmy needs it (a station answering several callers is not "busy working someone else"). The patch records it AT THE SPLIT, from the original combined text (Nexus's own `fox_multiplex` shape gate), as one flag per `last_decodes` row kept in lockstep at every write site; EngineHost reads it under the snapshot's lock and sets the envelope's `multiAnswer`. Never reconstructed from snr/dt/frequency; the accessor returns empty if ever out of step (under-marks, never mis-marks). Test: extended `an_ordinary_qso_completes_on_its_own_partners_multi_answer_roger` (a look-alike row with identical measurements and split free text stay unmarked). | `hound_split` returns only the rewritten decodes; no provenance survives. |
@@ -564,7 +631,7 @@ check is a real compile error, not a false alarm.
 ### `patches/tempo-audio-service.patch` -- radio-loop wiring, `crates/tempo-audio/src/service.rs`
 
 **Since 2026-10-15 this patch is only: `Status.tx_message` and the "Mode: None" test. Everything below about Jimmy's own Fake-It restore is history -- see the v1.18.0 re-assessment above.**
-**How to check (current):** `grep -n "last_own_tx_text\|jimmy_compat_dont_set_mode" crates/tempo-audio/src/service.rs`.
+**How to check (current):** `grep -n "jimmy_compat_dont_set_mode" crates/tempo-audio/src/service.rs` (since 2026-10-22 the patch is only this test; 1.20 fills `Status.tx_message` itself).
 
 Since 2026-10-04 (v1.16.0) only the Fake-It restore, `Status.tx_message` and the "Mode: None" test remain; the `ptt_data_source` / `disable_rfpower_probe` threading and RFPOWER gates described below were retired with `tempo-audio-rig.patch`.
 
@@ -753,6 +820,32 @@ header) stays a standard frame.
 **Obsoleted when:** `tempo-core-message.patch` is (upstream parses grid-less standard pairs itself
 and resolves the chunk ambiguity, e.g. by carrying i3).
 **How to check:** `grep -n "gridless_pair_chunk" crates/tempo-core/src/inbox.rs`.
+
+### `patches/tempo-core-qso.patch` -- the closing RR73 goes once, `crates/tempo-core/src/qso.rs` (added 2026-10-21)
+
+`Station::after_tx` cleared `pending` only at `Done`. A contact that ends on OUR RR73 (we were
+called, or answered an R-report, outside a CQ run) stays `Confirming` with the RR73 queued and
+uncapped (`tx_capped` excludes `Confirming`), so it went out every slot at a silent partner until
+their 73 or the watchdog; "Disable Tx after sending 73" fires only at `Done`, so it never helped.
+Live 2026-10-21 (bug report, 30 m): three RR73s with nothing heard, stopped by Jimmy's runaway
+backstop. WSJT-X counts RR73 as a 73 message (`message_is_73`) and sends it once. The patch clears
+`pending` after an RR73 goes out in `Confirming`; Nexus's own #59 arms re-queue it when the partner
+repeats their report, and a CQ run still resumes from `Confirming` (`tx_count >= 1`). An RRR is not
+a 73 message and keeps going, as in WSJT-X. Nexus's own #59 test fakes the clear
+(`s.pending = None`), which is why upstream's suite never saw it. Tests:
+`jimmy_compat_the_closing_rr73_goes_once_unless_the_partner_asks_again`,
+`jimmy_compat_a_closing_rrr_is_not_a_73_and_keeps_going`. Reported upstream 2026-10-21.
+
+**Expected upstream test failures under this patch (1.20.0):** tempo-app
+`ft_midover_tests::an_r_report_folded_while_the_report_is_on_the_air_switches_the_over_to_rr73`
+("the next over repeats it") and `ft_midover_tests::after_our_rr73_the_partners_73_rr73_or_rrr_changes_nothing`
+(its premise keys a second RR73). Both pin the repeat this patch removes -- WSJT-X repeats Tx4 only
+with "Disable Tx after sending 73" off, and Nexus's default (Jimmy never changes it) is on. Every
+other assertion about the mid-over switch, logging once and nothing after the partner's 73 holds.
+
+**Obsoleted when:** upstream clears the closing RR73 after it is sent (or caps `Confirming`).
+**How to check:** `grep -n "fn after_tx" -A12 crates/tempo-core/src/qso.rs` -- does anything other
+than `Done` clear `pending`?
 
 ## Checking a patch against a newer Nexus
 

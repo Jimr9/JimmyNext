@@ -20,8 +20,9 @@ namespace WSJTX_Controller
         public static string Match(
             Dictionary<string, WsjtxClient.ActiveAwardTag> activeAwardTags,
             string call, string state, string continent,
-            Func<int> cqZoneLookup, Func<int> dxccLookup)
-            => MatchSet(activeAwardTags, tag => tag.Set, call, state, continent, cqZoneLookup, dxccLookup);
+            Func<int> cqZoneLookup, Func<int> dxccLookup,
+            string wpxPrefix = null, string waeCountry = null)
+            => MatchSet(activeAwardTags, true, call, state, continent, cqZoneLookup, dxccLookup, wpxPrefix, waeCountry);
 
         // Same matching logic as Match, against each active award's UnconfirmedSet (worked but
         // not confirmed) instead of its Set (never worked) -- backs the generalized "{Award}
@@ -32,22 +33,26 @@ namespace WSJTX_Controller
         public static string MatchUnconfirmed(
             Dictionary<string, WsjtxClient.ActiveAwardTag> activeAwardTags,
             string call, string state, string continent,
-            Func<int> cqZoneLookup, Func<int> dxccLookup)
-            => MatchSet(activeAwardTags, tag => tag.UnconfirmedSet, call, state, continent, cqZoneLookup, dxccLookup);
+            Func<int> cqZoneLookup, Func<int> dxccLookup,
+            string wpxPrefix = null, string waeCountry = null)
+            => MatchSet(activeAwardTags, false, call, state, continent, cqZoneLookup, dxccLookup, wpxPrefix, waeCountry);
 
         private static string MatchSet(
             Dictionary<string, WsjtxClient.ActiveAwardTag> activeAwardTags,
-            Func<WsjtxClient.ActiveAwardTag, HashSet<string>> setSelector,
+            bool needed,
             string call, string state, string continent,
-            Func<int> cqZoneLookup, Func<int> dxccLookup)
+            Func<int> cqZoneLookup, Func<int> dxccLookup,
+            string wpxPrefix, string waeCountry)
         {
             if (activeAwardTags == null || activeAwardTags.Count == 0) return null;
             if (string.IsNullOrEmpty(call)) return null;
 
             foreach (var tag in activeAwardTags.Values)
             {
-                var set = setSelector(tag);
-                if (set == null || set.Count == 0) continue;
+                var set = needed ? tag.Set : tag.UnconfirmedSet;
+                // An open-ended award (WPX) needs whatever it has not worked: no checklist to hold.
+                bool openNeed = needed && tag.WorkedSet != null;
+                if (!openNeed && (set == null || set.Count == 0)) continue;
                 bool match;
                 switch (tag.GroupBy)
                 {
@@ -80,6 +85,16 @@ namespace WSJTX_Controller
                         match = dxcc > 0 && set.Contains(dxcc.ToString());
                         break;
                     }
+
+                    // The prefix and WAE country Nexus's own rules give the heard call (2026-11-02).
+                    case RuleGroupBy.Prefix:
+                        match = !string.IsNullOrEmpty(wpxPrefix)
+                            && (openNeed ? !tag.WorkedSet.Contains(wpxPrefix) : set.Contains(wpxPrefix));
+                        break;
+
+                    case RuleGroupBy.WaeCountry:
+                        match = !string.IsNullOrEmpty(waeCountry) && set != null && set.Contains(waeCountry);
+                        break;
 
                     default:
                         match = false;

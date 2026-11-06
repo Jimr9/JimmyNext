@@ -273,27 +273,32 @@ namespace WSJTX_Controller
             if (pending.Count == 0) return;
             DebugOutput($"{Time()} Club Log upload catch-up: {pending.Count} pending QSO(s).");
 
-            var sb = new StringBuilder();
-            foreach (var q in pending)
+            // Each contact's record is Nexus's, written exactly as the live upload sends it
+            // (2026-10-21) -- so a contact reads the same at Club Log whichever way it went. Only
+            // the contacts whose record is in the batch may be marked.
+            string adif = ((NexusLogbookService)db).UploadBatchRecords(pending.Select(q => q.DedupKey), out var included, out string readWhy);
+            if (adif == null || included.Count == 0)
             {
-                sb.Append(AdifRecordBuilder.Build(
-                    q.Callsign, q.Band, q.FreqHz, q.Mode, q.QsoDate, q.TimeOn, q.TimeOff,
-                    q.RstSent, q.RstRcvd, q.Grid, q.Name, q.Comment, q.TxPwr,
-                    q.OperatorCall, q.StationCall, q.MyGrid, q.ExchangeSent, q.ExchangeRcvd));
+                string why = adif == null ? $"the contacts could not be read from the logbook ({readWhy})" : "none of the pending contacts could be found in the logbook";
+                DebugOutput($"{Time()} Club Log upload catch-up: {why}");
+                ctrl.BeginInvoke(new Action(() => ctrl.ShowUploadStatus($"Club Log upload failed: {why}.", true)));
+                return;
             }
+            int notFound = pending.Count - included.Count;
 
             var client = new ClubLogUploadClient();
             bool ok = await client.BatchUploadAsync(
                 ctrl.clubLogUploadEmail, ctrl.clubLogUploadPassword, ctrl.clubLogUploadCallsign,
-                ClubLogAppKey.Resolve(), sb.ToString()).ConfigureAwait(false);
+                ClubLogAppKey.Resolve(), adif).ConfigureAwait(false);
 
             if (ok)
             {
-                db.MarkUploaded(pending.Select(q => q.DedupKey), "CLUBLOG", DateTime.UtcNow);
+                db.MarkUploaded(included, "CLUBLOG", DateTime.UtcNow);
                 // Refresh the Sync Status numbers too -- see the same comment in CatchUpQrz.
                 ctrl.BeginInvoke(new Action(() =>
                 {
-                    ctrl.ShowUploadStatus($"Club Log upload: {pending.Count} QSO(s) uploaded successfully.", false);
+                    ctrl.ShowUploadStatus($"Club Log upload: {included.Count} QSO(s) uploaded successfully." +
+                        (notFound > 0 ? $" {notFound} could not be found in the logbook and stay pending." : ""), false);
                     ctrl.RefreshLogbookWindowIfOpen();
                 }));
             }

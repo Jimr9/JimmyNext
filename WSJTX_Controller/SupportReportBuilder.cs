@@ -365,7 +365,6 @@ namespace WSJTX_Controller
             sb.AppendLine($"Max queued calls (base):   {ctrl.maxQueuedCallsBase}");
             sb.AppendLine($"Max raw rows:              {ctrl.rawMaxRows}");
             sb.AppendLine($"Keep TX list during TX:    {ctrl.keepTransmitListDuringTx}");
-            sb.AppendLine($"Keep list position:        {ctrl.keepListPositionDuringRefresh}");
             sb.AppendLine($"Always on top:             {ctrl.alwaysOnTop}");
             sb.AppendLine();
 

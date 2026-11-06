@@ -1,8 +1,8 @@
 diff --git a/src/station.rs b/src/station.rs
-index c27973b7..6ada76de 100644
+index c32dd59..e756910 100644
 --- a/src/station.rs
 +++ b/src/station.rs
-@@ -2158,6 +2158,14 @@ pub struct StationCore {
+@@ -2227,6 +2227,14 @@ pub struct StationCore {
      #[allow(clippy::type_complexity)]
      pub(crate) state_resolve:
          Option<Box<dyn Fn(&str, Option<&str>) -> Option<String> + Send + Sync>>,
@@ -17,7 +17,7 @@ index c27973b7..6ada76de 100644
      /// Grid → rarity tier (0–3) resolver, injected by the command layer (which
      /// owns the geography table in the propagation crate) — same pattern as
      /// [`Self::set_dxcc_resolver`]. `None` in headless tests (gems stay off).
-@@ -2301,6 +2309,7 @@ impl StationCore {
+@@ -2415,6 +2423,7 @@ impl StationCore {
              dxcc_resolve: None,
              dxcc_country: None,
              state_resolve: None,
@@ -25,7 +25,7 @@ index c27973b7..6ada76de 100644
              grid_rarity_resolve: None,
              lotw_resolve: None,
              hunted_parks_import: HashSet::new(),
-@@ -2840,7 +2849,9 @@ impl StationCore {
+@@ -3069,7 +3078,9 @@ impl StationCore {
              match (before, after) {
                  (None, Some(row)) => {
                      let mut row = QsoRecord::clone(&row);
@@ -36,7 +36,7 @@ index c27973b7..6ada76de 100644
                      if row.id.is_none() {
                          row.id = Some(self.minter.mint());
                      }
-@@ -3937,7 +3948,7 @@ impl StationCore {
+@@ -4342,7 +4353,7 @@ impl StationCore {
      /// station's resolver when the edit carries none (the edit form never does), which the edit
      /// then keeps over the stored one.
      pub(crate) fn edit_op(&self, id: RecordId, mut rec: QsoRecord) -> LogOp {
@@ -45,7 +45,7 @@ index c27973b7..6ada76de 100644
              if let Some(resolve) = &self.dxcc_resolve {
                  rec.country = resolve(&rec.call);
              }
-@@ -3991,7 +4002,11 @@ impl StationCore {
+@@ -4398,7 +4409,11 @@ impl StationCore {
          // Keep country populated on edits, as `update_qso` does: the form does not carry it. It
          // follows the DXCC number the contact keeps — the edit leaves the stored one, and a
          // corrected call drops both — and else the call.

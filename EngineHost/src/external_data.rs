@@ -1010,7 +1010,7 @@ pub fn qrz_logbook_status(args: &QrzLogbookStatusArgs) -> Result<serde_json::Val
         return Err("no QRZ Logbook API key".to_string());
     }
     let scrub = |s: &str| s.replace(key, "(key)");
-    let body = propagation::live::qrz::post_form(tempo_core::qrz::QRZ_LOGBOOK_URL, tempo_core::qrz::build_status_body(key))
+    let body = propagation::live::qrz::post_form(tempo_core::qrz::QRZ_LOGBOOK_URL, EQSL_PROGRAM_VERSION, tempo_core::qrz::build_status_body(key))
         .map_err(|e| scrub(&e))?;
     let st = tempo_core::qrz::parse_status_response(&body);
     if st.ok {
@@ -1021,9 +1021,10 @@ pub fn qrz_logbook_status(args: &QrzLogbookStatusArgs) -> Result<serde_json::Val
 }
 
 /// The version an eQSL upload names (Nexus 1.19: every upload's header carries `PROGRAMID` Nexus and
-/// this `PROGRAMVERSION`, as eQSL asks of client programs). The Nexus release EngineHost is built
-/// from -- keep it with `nexus-compat/pin.txt`.
-pub const EQSL_PROGRAM_VERSION: &str = "1.19.0";
+/// this `PROGRAMVERSION`, as eQSL asks of client programs), and since Nexus 1.20 the version in the
+/// `Nexus/<version>` User-Agent QRZ is sent. The Nexus release EngineHost is built from -- keep it
+/// with `nexus-compat/pin.txt`.
+pub const EQSL_PROGRAM_VERSION: &str = "1.20.0";
 
 pub fn eqsl_upload(args: &EqslUploadArgs) -> Result<&'static str, String> {
     // qth_nickname: `None` -- Jimmy Next has no UI for eQSL's multi-profile "QTH Nickname"
@@ -1085,9 +1086,8 @@ pub fn eqsl_download(args: &EqslDownloadArgs) -> Result<String, String> {
 pub struct LotwDownloadArgs {
     pub username: String,
     pub password: String,
-    /// Confirmations matched since this LoTW high-water (`qso_qslsince`). Jimmy always sends a
-    /// date ("1900-01-01" for everything): with none, LoTW uses a "system supplied default" --
-    /// the account's last download -- and sends only what came after it.
+    /// Confirmations matched since this LoTW high-water (`qso_qslsince`). None (a full download)
+    /// is everything: Nexus's `build_report_url` then asks from 1900-01-01 itself (#399).
     #[serde(default)]
     pub since: Option<String>,
     /// The own-records report (`qso_qsl=no`) from this QSO date (`YYYY-MM-DD`), instead of
@@ -1191,7 +1191,7 @@ pub struct QrzDownloadArgs {
 }
 
 pub fn qrz_download(args: &QrzDownloadArgs) -> Result<String, String> {
-    let resp = qrz::post_form(tempo_core::qrz::QRZ_LOGBOOK_URL, tempo_core::qrz::build_fetch_body(&args.key))?;
+    let resp = qrz::post_form(tempo_core::qrz::QRZ_LOGBOOK_URL, EQSL_PROGRAM_VERSION, tempo_core::qrz::build_fetch_body(&args.key))?;
     let fetched = tempo_core::qrz::parse_fetch(&resp);
     if !fetched.ok {
         // An empty logbook answers FAIL with COUNT=0 and no reason -- not an error.

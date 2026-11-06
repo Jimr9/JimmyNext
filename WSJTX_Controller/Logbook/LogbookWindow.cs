@@ -18,7 +18,7 @@ namespace WSJTX_Controller
     // ContestingWindow.cs), opened by Options -> Station & Operator's "Open Contesting" button
     // and the configurable Contesting hotkey (Controller.OpenContestingWindow) -- this window has
     // no involvement in it at all.
-    public class LogbookWindow : Form
+    public partial class LogbookWindow : Form
     {
         // ── Dependencies ──────────────────────────────────────────────────────────
         // Credentials are read live (via these delegates), not snapshotted once at
@@ -660,7 +660,9 @@ namespace WSJTX_Controller
                 if (e.NewValue == CheckState.Checked && !RuleEngine.SupportsLiveTag(def))
                 {
                     e.NewValue = CheckState.Unchecked;
-                    SetStatusSpoken(_awardsClb, $"{def.Name} can't be tracked live -- it has no fixed checklist to tag stations from.");
+                    // The real reason (2026-11-02): a heard station is matched by a few things only.
+                    string by = def.GroupBy == RuleGroupBy.State ? "only US states are matched" : $"heard stations aren't matched by {GroupByHeader(def.GroupBy)}";
+                    SetStatusSpoken(_awardsClb, $"{def.Name} can't be tracked live: {by}.");
                     return;
                 }
                 _onActiveAwardRuleIdsChanged?.Invoke(def.Id, e.NewValue == CheckState.Checked);
@@ -1020,6 +1022,9 @@ namespace WSJTX_Controller
             _editExportBtn.Click += ExportSelectedBtn_Click;
             footer.Controls.Add(_editExportBtn);
 
+            // Nexus's own log tools (2026-10-31): duplicates, check, history, deleted, undo.
+            AddCleanupButton(footer, font, 518, 14);
+
             _editLv = MakeListView(font);
             _editLv.Dock        = DockStyle.Fill;
             _editLv.MultiSelect = true;
@@ -1286,9 +1291,15 @@ namespace WSJTX_Controller
             if (notSent.Count > 0) actions.Add("mark not sent to " + BulkEditDlg.DescribeNotSent(notSent));
             string what = string.Join(" and ", actions);
             what = char.ToUpperInvariant(what[0]) + what.Substring(1);
-            string after = notSent.Count > 0
-                ? $"The logbook is backed up first. Your next upload to {BulkEditDlg.DescribeNotSent(notSent)} sends these contacts again; contacts it already has are ignored."
-                : "The logbook is backed up first. Changes are not sent again to QRZ, Club Log or LoTW.";
+            // Power, rig, grid and a POTA/SOTA park: Nexus's own bulk edit (2026-10-31), one change
+            // with one Undo. The rest stays Jimmy Next's own edit, with its backup.
+            var jimmyChanges = new Dictionary<string, string>(changes);
+            var nexusChanges = BulkEditDlg.TakeNexusChanges(jimmyChanges);
+            bool needsBackup = jimmyChanges.Count > 0 || notSent.Count > 0;
+            string after = (needsBackup ? "The logbook is backed up first. " : "Undo a change, under Clean Up, takes it back. ") +
+                (notSent.Count > 0
+                    ? $"Your next upload to {BulkEditDlg.DescribeNotSent(notSent)} sends these contacts again; contacts it already has are ignored."
+                    : "Changes are not sent again to QRZ, Club Log or LoTW.");
             // The list shows only the newest EditListShown contacts found. With ALL of them
             // selected, the one question also asks whether every contact found is meant -- the
             // only way to reach a whole logbook. It replaces the usual confirmation, never adds one.
@@ -1321,11 +1332,16 @@ namespace WSJTX_Controller
                 return;
             }
 
-            string backup = Path.Combine(Path.GetDirectoryName(LookupManager.DataRoot), "Backups",
-                $"logbook-before-bulk-edit-{DateTime.Now:yyyyMMdd-HHmmss}.adi");
-            try { nexus.BackupTo(backup); }
-            catch (Exception ex) { SetStatus("Bulk edit stopped before changing anything: " + ex.Message); return; }
-            BackupRetention.Prune(Path.GetDirectoryName(backup), "logbook-before-bulk-edit-*.adi");
+            string backup = null;
+            if (needsBackup)
+            {
+                backup = Path.Combine(Path.GetDirectoryName(LookupManager.DataRoot), "Backups",
+                    $"logbook-before-bulk-edit-{DateTime.Now:yyyyMMdd-HHmmss}.adi");
+                try { nexus.BackupTo(backup); }
+                catch (Exception ex) { SetStatus("Bulk edit stopped before changing anything: " + ex.Message); return; }
+                BackupRetention.Prune(Path.GetDirectoryName(backup), "logbook-before-bulk-edit-*.adi");
+            }
+            string backupNote = backup == null ? "" : $" Backup: {Path.GetFileName(backup)} in the Backups folder.";
 
             // In the background (one read of the log, one rebuild at the end -- NexusLogbookService
             // .BulkEdit), so the window keeps answering; the edit buttons wait until it is done.
@@ -1338,9 +1354,11 @@ namespace WSJTX_Controller
                 try
                 {
                     var parts = new List<string>();
-                    if (changes.Count > 0)
+                    if (nexusChanges.Count > 0)
+                        parts.Add(NexusBulkEdit(ids, nexusChanges, BulkEditDlg.Describe(changes.Keys.Where(k => !jimmyChanges.ContainsKey(k)))));
+                    if (jimmyChanges.Count > 0)
                     {
-                        var (changed, same, failed, firstError) = nexus.BulkEdit(ids, q => BulkEditDlg.Apply(q, changes));
+                        var (changed, same, failed, firstError) = nexus.BulkEdit(ids, q => BulkEditDlg.Apply(q, jimmyChanges));
                         parts.Add($"Changed {changed} contact{(changed == 1 ? "" : "s")}" +
                                   (same > 0 ? $", {same} already had that value" : "") +
                                   (failed > 0 ? $", {failed} failed ({firstError})" : ""));
@@ -1351,9 +1369,9 @@ namespace WSJTX_Controller
                         parts.Add($"Marked {marked} contact{(marked == 1 ? "" : "s")} not sent to {BulkEditDlg.DescribeNotSent(notSent)}" +
                                   (failed > 0 ? $", {failed} failed ({firstError})" : ""));
                     }
-                    result = string.Join(". ", parts) + $". Backup: {Path.GetFileName(backup)} in the Backups folder.";
+                    result = string.Join(" ", parts.Select(p => p.TrimEnd('.') + ".")) + backupNote;
                 }
-                catch (Exception ex) { result = "Bulk edit stopped: " + ex.Message + $" Backup: {Path.GetFileName(backup)} in the Backups folder."; }
+                catch (Exception ex) { result = "Bulk edit stopped: " + ex.Message + backupNote; }
                 try
                 {
                     BeginInvoke((Action)(() =>
@@ -1703,7 +1721,8 @@ namespace WSJTX_Controller
             if (_syncReviewBtn == null) return;
             int n = 0;
             // (Not in a test run: the name must not depend on what this computer's own log holds.)
-            if (!TestModeGuard.IsTestMode) try { n = NexusDownloadedChanges.Load().PendingCount; } catch { }
+            // QRZ's are no longer asked about (2026-10-23); older ones leave the file at the next download or review.
+            if (!TestModeGuard.IsTestMode) try { n = NexusDownloadedChanges.Load().Items.Count(p => !p.Declined && p.Service != "QRZ"); } catch { }
             string name = n == 0 ? "Review downloaded changes" : $"Review downloaded changes, {n} waiting";
             string text = n == 0 ? "Review Downloaded Changes..." : $"Review Downloaded Changes ({n})...";
             if (_syncReviewBtn.Text != text) _syncReviewBtn.Text = text;
@@ -2117,6 +2136,7 @@ namespace WSJTX_Controller
                 case RuleGroupBy.Callsign:  return "Callsign";
                 case RuleGroupBy.SigInfo:   return "Reference";
                 case RuleGroupBy.DarcDok:   return "DOK";
+                case RuleGroupBy.WaeCountry: return "WAE Country";
                 default:                    return "Item";
             }
         }
@@ -2177,13 +2197,13 @@ namespace WSJTX_Controller
 
             using (var dlg = new OpenFileDialog
             {
-                Title       = "Import ADIF File",
-                Filter      = "ADIF files (*.adi;*.adif)|*.adi;*.adif|All files (*.*)|*.*",
+                Title       = "Import Log File",
+                Filter      = "Log files (*.adi;*.adif;*.adx;*.log;*.cbr)|*.adi;*.adif;*.adx;*.log;*.cbr|ADIF files (*.adi;*.adif)|*.adi;*.adif|ADX files (*.adx)|*.adx|Cabrillo files (*.log;*.cbr)|*.log;*.cbr|All files (*.*)|*.*",
                 Multiselect = false,
             })
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                await RunImport(dlg.FileName);
+                await RunPreviewedImport(dlg.FileName);
             }
         }
 

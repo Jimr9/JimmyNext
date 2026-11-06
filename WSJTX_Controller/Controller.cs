@@ -140,7 +140,6 @@ namespace WSJTX_Controller
         // ShowStatus's own text that's genuinely receive-side chatter, not TX-critical info
         // (sending/logged/expired/timed-out text is never touched by this).
         public bool suppressReceiveNotificationsDuringTx = false;
-        public bool keepListPositionDuringRefresh = false;
         public bool moveFocusToStatusOnCallSelect = false;
         public bool checkForUpdatesOnStartup = false;
 
@@ -1005,7 +1004,6 @@ namespace WSJTX_Controller
                     statusBatchDelayMs = statusBatchMs;
                 keepTransmitListDuringTx = iniFile.Read("keepTransmitListDuringTx") == "True";
                 suppressReceiveNotificationsDuringTx = iniFile.Read("suppressReceiveNotificationsDuringTx") == "True";
-                keepListPositionDuringRefresh = iniFile.Read("keepListPositionDuringRefresh") == "True";
                 moveFocusToStatusOnCallSelect = iniFile.Read("moveFocusToStatusOnCallSelect") == "True";
                 checkForUpdatesOnStartup = iniFile.Read("checkForUpdatesOnStartup") == "True";
                 // Default checked when the key is absent (== "False" test) so an upgrade keeps
@@ -1397,6 +1395,7 @@ namespace WSJTX_Controller
                 callsignLookupProvider,
                 hamQthEnabled, hamQthUsername, hamQthPassword, hamQthCacheDays);
             wsjtxClient.lookupManager     = lookupManager;
+            CallbookUpdateDlg.Lookups     = lookupManager;   // the Logbook's Update from Callbook looks up with it
             wsjtxClient.lotwBoostEnabled  = lotwBoostEnabled;
             // Background shutdown / quiescence, 2026-08-23 (independent audit finding):
             // SafeBeginInvoke (see its own comment) instead of a raw BeginInvoke -- an in-flight
@@ -1874,7 +1873,6 @@ namespace WSJTX_Controller
                 iniFile.Write("statusBatchDelayMs", statusBatchDelayMs.ToString());
                 iniFile.Write("keepTransmitListDuringTx", keepTransmitListDuringTx.ToString());
                 iniFile.Write("suppressReceiveNotificationsDuringTx", suppressReceiveNotificationsDuringTx.ToString());
-                iniFile.Write("keepListPositionDuringRefresh", keepListPositionDuringRefresh.ToString());
                 iniFile.Write("moveFocusToStatusOnCallSelect", moveFocusToStatusOnCallSelect.ToString());
                 iniFile.Write("checkForUpdatesOnStartup", checkForUpdatesOnStartup.ToString());
                 iniFile.Write("spaceCallsignsAndGrids", spaceCallsignsAndGrids.ToString());
@@ -3293,7 +3291,6 @@ namespace WSJTX_Controller
             iniFile.Write("rawNewestFirst", rawNewestFirst.ToString());
             iniFile.Write("rawMaxRows", rawMaxRows.ToString());
             iniFile.Write("keepTransmitListDuringTx", keepTransmitListDuringTx.ToString());
-            iniFile.Write("keepListPositionDuringRefresh", keepListPositionDuringRefresh.ToString());
         }
 
         private void SaveWantedCallsAndSpotWatchOptionsSettings()
@@ -4307,7 +4304,7 @@ namespace WSJTX_Controller
         internal List<(string Tag, string Value)> OurLocationNow()
         {
             var f = new List<(string, string)>();
-            string state = (Station?.QthState ?? "").Trim().ToUpperInvariant();
+            string state = StationSettings.NormalizeQthState(Station?.QthState);
             string county = (Station?.County ?? "").Trim();
             if (state.Length > 0) f.Add(("MY_STATE", state));
             if (state.Length > 0 && county.Length > 0) f.Add(("MY_CNTY", $"{state},{county}"));
@@ -4376,7 +4373,16 @@ namespace WSJTX_Controller
                     if (n > 0) nexus.SetMeta("dxcc_backfill_last_fixed", $"{DateTime.UtcNow:o} ({n} rows)");
                     int s = nexus.BackfillMissingStates(call => lookupManager?.Build(call)?.State);
                     if (s > 0) nexus.SetMeta("state_backfill_last_fixed", $"{DateTime.UtcNow:o} ({s} rows)");
-                    if (n > 0 || s > 0)
+                    // Our own state as LoTW takes it, on contacts logged before it was (2026-10-31).
+                    var own = nexus.RepairOwnStates();
+                    if (own.Fixed > 0)
+                    {
+                        nexus.SetMeta("own_state_repair_last_fixed", $"{DateTime.UtcNow:o} ({own.Fixed} rows: {string.Join(", ", own.Was)})");
+                        string said = $"Your own state was corrected to its two-letter code on {NotificationTemplateEngine.Pluralize(own.Fixed, "contact")} " +
+                            $"(was {string.Join(" or ", own.Was)}), so LoTW can take them.";
+                        SafeBeginInvoke(() => wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Logbook", said)));
+                    }
+                    if (n > 0 || s > 0 || own.Fixed > 0)
                         SafeBeginInvoke(() => { RefreshStillNeedCache(); RefreshLogbookWindowIfOpen(); });
                 }
                 catch { /* best-effort repair -- must never affect operation */ }
@@ -4478,6 +4484,11 @@ namespace WSJTX_Controller
                         UnconfirmedSet = result.WorkedUnconfirmed != null
                             ? new HashSet<string>(result.WorkedUnconfirmed, StringComparer.OrdinalIgnoreCase)
                             : new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                        // WPX has no checklist (any prefix counts): a prefix not yet worked is
+                        // needed (2026-11-02). DXCC's new entity is its own category already.
+                        WorkedSet      = result.StillNeeded == null && def.GroupBy == RuleGroupBy.Prefix
+                            ? new HashSet<string>(result.WorkedItems ?? new List<string>(), StringComparer.OrdinalIgnoreCase)
+                            : null,
                     };
                     tags[ruleId] = tag;
                     if (allBands) _allBandAwardTags[ruleId] = tag;
@@ -5294,7 +5305,9 @@ namespace WSJTX_Controller
             }
             if (!changed) return;
 
-            int newIdx = keepListPositionDuringRefresh ? FindPreservedSelectionIndex(_rawDecodeKeys, prevIdx, keys) : -1;
+            // The station you are on stays selected as the list refreshes, as in the main call list
+            // (NU7I, 2026-10-21: the selection was dropped, and Enter then called the top station).
+            int newIdx = FindPreservedSelectionIndex(_rawDecodeKeys, prevIdx, keys);
             _rawDecodeKeys = keys;
 
             advRawListBox.BeginUpdate();
@@ -5304,7 +5317,7 @@ namespace WSJTX_Controller
                 advRawListBox.Items.AddRange(items.ToArray());
             }
             finally { advRawListBox.EndUpdate(); }
-            if (keepListPositionDuringRefresh && focused && newIdx >= 0 && advRawListBox.Items.Count > 0)
+            if (focused && newIdx >= 0 && advRawListBox.Items.Count > 0)
                 advRawListBox.SelectedIndex = newIdx;
         }
 
@@ -5326,7 +5339,8 @@ namespace WSJTX_Controller
             bool focused = lb.Focused;
             int prevIdx = focused ? lb.SelectedIndex : -1;
             List<string> oldKeys = isTx1Side ? _tx1Keys : _tx2Keys;
-            int newIdx = keepListPositionDuringRefresh ? FindPreservedSelectionIndex(oldKeys, prevIdx, keys) : -1;
+            // The station you are on stays selected as the list refreshes (see RenderRawDecodes).
+            int newIdx = FindPreservedSelectionIndex(oldKeys, prevIdx, keys);
             if (isTx1Side) _tx1Keys = keys; else _tx2Keys = keys;
 
             bool changed = lb.Items.Count != items.Count;
@@ -5348,7 +5362,8 @@ namespace WSJTX_Controller
                 finally { lb.EndUpdate(); }
             }
 
-            if (keepListPositionDuringRefresh && focused && newIdx >= 0 && lb.Items.Count > 0)
+            // Only when it moves: selecting the same row again makes the screen reader say it again.
+            if (focused && newIdx >= 0 && lb.Items.Count > 0 && lb.SelectedIndex != newIdx)
                 lb.SelectedIndex = newIdx;
         }
 
@@ -7947,7 +7962,7 @@ namespace WSJTX_Controller
             {
                 e.SuppressKeyPress = true;
                 int idx = advTx1ListBox.SelectedIndex;
-                if (idx < 0) idx = 0;
+                if (idx < 0) return;   // nothing selected: never the top station instead (NU7I, 2026-10-21)
                 wsjtxClient.NextCallFromTx1(idx);
                 MoveFocusToStatusIfEnabled();
             }
@@ -7991,7 +8006,7 @@ namespace WSJTX_Controller
             {
                 e.SuppressKeyPress = true;
                 int idx = advTx2ListBox.SelectedIndex;
-                if (idx < 0) idx = 0;
+                if (idx < 0) return;   // nothing selected: never the top station instead (NU7I, 2026-10-21)
                 wsjtxClient.NextCallFromTx2(idx);
                 MoveFocusToStatusIfEnabled();
             }
