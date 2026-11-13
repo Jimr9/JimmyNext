@@ -7322,7 +7322,7 @@ static class JimmyTests
         // below can check the real JSON payload's hz/band/mode fields, not just that a wire
         // round-trip happened and came back OK.
         var lastCommand = new string[1];
-        var engineListener = new StubEngineHost(line => { lastCommand[0] = line; return "OK"; });
+        var engineListener = new StubEngineHost(line => { if (line.StartsWith("SET_FREQUENCY ")) lastCommand[0] = line; return "OK"; });
         if (engineListener == null)
         {
             Skip("DirectPathPendingBandIdxClearedOnConfirmationTests", "engine control port already in use on this machine");
@@ -31091,7 +31091,7 @@ static class JimmyTests
         {
             using (var db = new LogbookDb(tmpDb))
             {
-                CheckStr("db_version reaches the current version (12, 2026-10-17)", db.GetMeta("db_version"), "12");
+                CheckStr("db_version reaches the current version (13, 2026-10-31)", db.GetMeta("db_version"), "13");
 
                 InsertQso(db, "K5KPE", "MO", dxcc: 291, zone: 4);
                 var (id, contestId, contestSessionId, modifiedAt) = QueryContestCols(tmpDb, "K5KPE");
@@ -31103,7 +31103,7 @@ static class JimmyTests
             // Re-opening an already-migrated database must not throw and must stay at v10.
             using (var db2 = new LogbookDb(tmpDb))
             {
-                CheckStr("Re-opening an already-v10 database: version unchanged", db2.GetMeta("db_version"), "12");
+                CheckStr("Re-opening an already-v10 database: version unchanged", db2.GetMeta("db_version"), "13");
             }
         }
         finally { try { File.Delete(tmpDb); } catch { } }

@@ -2987,7 +2987,8 @@ mod tests {
 
     // Jimmy's licence class word reaches Nexus's own class, and Nexus's own gate then judges a
     // real Engine (no radio attached): a Technician is locked out of 20 m FT8 on every path --
-    // slot transmit and Tune -- and is let back in on 10 m; a General is allowed on 20 m; "open",
+    // slot transmit and Tune -- and is let back in on 10 m; a General is allowed on 20 m; Novice and
+    // Advanced are their own classes (since Nexus 1.21); "open",
     // nothing, or a word Nexus has no rules for means no lockout.
     #[test]
     fn license_class_reaches_the_engines_own_transmit_gate() {
@@ -2995,7 +2996,9 @@ mod tests {
         assert_eq!(license_class("Technician "), LicenseClass::Technician);
         assert_eq!(license_class("general"), LicenseClass::General);
         assert_eq!(license_class("extra"), LicenseClass::Extra);
-        for none in ["", "open", "advanced", "novice"] {
+        assert_eq!(license_class("Novice"), LicenseClass::Novice);
+        assert_eq!(license_class("advanced"), LicenseClass::Advanced);
+        for none in ["", "open", "amateur"] {
             assert_eq!(license_class(none), LicenseClass::Open, "{none:?} applies no limits");
         }
 
