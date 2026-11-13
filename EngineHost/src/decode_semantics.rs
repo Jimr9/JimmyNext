@@ -155,6 +155,11 @@ pub struct DecodeSemantics {
     pub wpx_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wae_country: Option<&'static str>,
+    /// The IOTA island group the sender is on (2026-11-09), when a recent DX cluster spot of that
+    /// call named one -- Nexus's own reading of the comment (`LiveFeedsCache::iota_by_call`).
+    /// Absent otherwise: an FT8 message never carries it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iota: Option<String>,
 }
 
 impl DecodeSemantics {
@@ -260,6 +265,18 @@ impl DecodeSemantics {
             parts: parts.unwrap_or_default(),
             wpx_prefix,
             wae_country,
+            iota: None,
+        }
+    }
+
+    /// The sender's island group, from `by_call` (`LiveFeedsCache::iota_by_call`).
+    pub fn apply_iota(sems: &mut [DecodeSemantics], by_call: &std::collections::HashMap<String, String>) {
+        if by_call.is_empty() {
+            return;
+        }
+        for sem in sems.iter_mut() {
+            let call = sem.from.as_deref().map(|f| f.trim_matches(|c| c == '<' || c == '>').to_ascii_uppercase());
+            sem.iota = call.and_then(|c| by_call.get(&c).cloned());
         }
     }
 
@@ -314,6 +331,21 @@ mod tests {
 
     fn sem(msg: &str) -> DecodeSemantics {
         DecodeSemantics::from_decode(msg, "W9XYZ", None)
+    }
+
+    // 2026-11-09: the island a cluster spot named rides on the sender's decodes only.
+    #[test]
+    fn a_spotted_island_rides_on_the_senders_decodes_only() {
+        let by_call: std::collections::HashMap<String, String> =
+            [("EA8ABC".to_string(), "AF-004".to_string())].into_iter().collect();
+        let mut sems = vec![sem("CQ EA8ABC IL18"), sem("W9XYZ EA8ABC -10"), sem("CQ K1ABC FN42"), sem("EA8ABC W9XYZ R-05")];
+        DecodeSemantics::apply_iota(&mut sems, &by_call);
+        assert_eq!(sems[0].iota.as_deref(), Some("AF-004"));
+        assert_eq!(sems[1].iota.as_deref(), Some("AF-004"));
+        assert_eq!(sems[2].iota, None, "not spotted");
+        assert_eq!(sems[3].iota, None, "sent by W9XYZ, not the island station");
+        let json = serde_json::to_string(&sems[2]).unwrap();
+        assert!(!json.contains("iota"), "absent, not null: {json}");
     }
 
     #[test]

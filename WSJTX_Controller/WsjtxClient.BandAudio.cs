@@ -911,68 +911,32 @@ namespace WSJTX_Controller
             return Math.Max(MinSteppedTxLevel, Math.Min(1.0, target));
         }
 
-        // Save-side companion to ShouldRestoreTxLevel below: decides whether a just-CONFIRMED
-        // SET_TX_LEVEL should also be written into the per-band remembered map, and under which
-        // band key. Same gate the old inline AudioLevel() code used -- "Remember F11/F12 audio
-        // level per band" on AND a real confirmed band index. Split out as a pure function so it
-        // is unit-testable without a live engine host (JimmyTests, via InternalsVisibleTo).
-        internal static bool ShouldRememberTxLevelForBand(bool rememberEnabled, int? bandIdx, out int bandKey)
+        // "Remember F11/F12 audio level per band" since Nexus 1.23: the engine remembers each
+        // F11/F12 pick for the band and mode and brings it back itself at a band or mode change,
+        // never inside an over (RadioSettings.FtDrive's comment). Jimmy hands it the memory at
+        // every connect and whenever the option changes; with the option off the engine is told
+        // to remember nothing. Pure, so JimmyTests can check it without a live engine host.
+        internal static string FtDriveMemoryCommand(bool rememberEnabled, string ftDrive)
         {
-            bandKey = 0;
-            if (!rememberEnabled || bandIdx == null) return false;
-            bandKey = (int)bandIdx;
-            return true;
+            if (!rememberEnabled) return "SET_FT_DRIVE_MEMORY off";
+            return string.IsNullOrWhiteSpace(ftDrive) ? "SET_FT_DRIVE_MEMORY on" : "SET_FT_DRIVE_MEMORY on " + ftDrive.Trim();
         }
 
-        // Pure decision for the restore half of "Remember F11/F12 audio level per band"
-        // (RadioSettings.TxLevelByBand -- AudioLevel() above is the save half). Split out from
-        // the actual SET_TX_LEVEL send so this is unit-testable without a live engine host --
-        // same reasoning as EngineHost's own reply_wire_response extraction. internal (not
-        // private): JimmyTests reaches it via InternalsVisibleTo (AssemblyInfo.Testing.cs).
-        internal static bool ShouldRestoreTxLevel(bool rememberEnabled, int? bandIdx,
-            IReadOnlyDictionary<int, double> txLevelByBand, out double level)
+        internal void DirectSendFtDriveMemory()
         {
-            level = 0;
-            if (!rememberEnabled || bandIdx == null || txLevelByBand == null) return false;
-            return txLevelByBand.TryGetValue((int)bandIdx, out level);
+            EnqueueDirectCommand(FtDriveMemoryCommand(ctrl.Radio.RememberTxLevelPerBand, ctrl.Radio.FtDrive), null);
         }
 
-        // Called on every genuinely confirmed band change, from BOTH transports: WsjtxClient.
-        // Direct.cs's own poll tick (native engine, Direct control-port mode) and
-        // WsjtxClient.Protocol.cs's classic WSJT-X/UDP StatusMessage band-change handler. Found
-        // live, 2026-08-17: only the Direct.cs call site existed before this -- an operator not
-        // on pure Direct-mode-with-Jimmy-Native got a feature (AudioLevel() above already SAVES
-        // correctly under either transport, since it reaches the engine's own control port
-        // directly) that silently saved but never restored, because the restore call was never
-        // mirrored into the classic UDP path. No saved entry for this band yet leaves the
-        // engine's current level alone, same as when the feature is off entirely.
-        private void RestoreTxLevelForBand()
+        // After a confirmed F11/F12 pick with the option on: what the engine now remembers is
+        // what Jimmy keeps (debounced to the profile, as LastTxLevel is).
+        private void DirectReadFtDriveMemory()
         {
-            if (!ShouldRestoreTxLevel(ctrl.Radio.RememberTxLevelPerBand, bandIdx, ctrl.Radio.TxLevelByBand, out double savedLevel))
-                return;
-            // Codex Audit 02 finding, 2026-08-21: routed through the ordered dispatcher instead of
-            // a synchronous DirectSendCommand -- this runs on every confirmed band change, on the
-            // UI thread (DirectApplyStatus), so a slow/hung engine host used to block band-change
-            // handling for the full bounded connect/read wait.
-            EnqueueDirectCommand("SET_TX_LEVEL " + savedLevel.ToString(System.Globalization.CultureInfo.InvariantCulture), resp =>
+            EnqueueDirectCommand("GET_FT_DRIVE", resp =>
             {
-                // Item 2 (2026-09-10): once the engine confirms the restore, re-assert it into
-                // the live cache. An initial poll SNAPSHOT that predates this restore
-                // (DirectApplyStatus: _engineTxLevel = radio.TxLevel) would otherwise leave
-                // F11/F12 and the Options spinner stepping from the engine's startup default
-                // instead of the level just restored for this band.
-                if (resp != null && resp.Length > 0 && !resp.StartsWith("ERR"))
-                {
-                    _engineTxLevel = savedLevel;
-                    // Fix, 2026-09-14: keep the general LastTxLevel in step with whatever's
-                    // actually active, regardless of which mechanism confirmed it -- so the next
-                    // startup's unconditional restore (before this per-band one re-applies)
-                    // reflects the band this operator most recently used, not a stale value from
-                    // whenever LastTxLevel was last set some other way.
-                    ctrl.Radio.LastTxLevel = savedLevel;
-                }
+                if (!ctrl.Radio.RememberTxLevelPerBand || resp == null || !resp.StartsWith("OK")) return;
+                ctrl.Radio.FtDrive = resp.Substring(2).Trim();
+                ctrl.NoteTxLevelPerBandConfirmed();
             });
-            DebugOutput($"{Time()} restored tx level {savedLevel:0.00} for band index {bandIdx}");
         }
 
         // 2026-08-18 investigation + restoration: this had NO live caller at all since the

@@ -486,6 +486,9 @@ struct Args {
     /// Nexus's internet time check (Settings.clock_check), from Jimmy's Options > General
     /// "Check clock with internet time servers". Absent = Nexus's stock value (on).
     clock_check: Option<bool>,
+    /// Jimmy's Options "Save space weather with each contact" (Settings.log_space_weather).
+    /// Absent = Nexus's stock value for a new install (on). SET_LOG_SPACE_WX changes it live.
+    log_space_wx: Option<bool>,
     /// Frequency-override authority split, 2026-08-24 (independent audit finding): mirrors
     /// Jimmy's own Options>Frequencies per-band/per-mode overrides (FrequencySettings.cs) into
     /// Nexus's own documented working-frequency override mechanism (Engine::band_plan's own doc
@@ -524,6 +527,31 @@ static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// Whether this process runs a radio loop at all (false under --no-radio): SHUTDOWN waits for a
 /// loop to unkey only when there is one.
 static RADIO_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Jimmy's "Remember F11/F12 audio level per band" (SET_FT_DRIVE_MEMORY). Off until Jimmy says:
+/// SET_TX_LEVEL then empties what the engine just remembered, so nothing is ever brought back.
+static FT_DRIVE_MEMORY_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// SET_FT_DRIVE_MEMORY's entries, `<band>[/<mode>]=<level>` joined by `;` (the engine's own keys,
+/// `RadioProfile::ft_drive`), each level 0.0-1.0. A malformed entry is an error, not skipped:
+/// Jimmy only ever sends back what GET_FT_DRIVE gave it.
+fn parse_ft_drive_entries(text: &str) -> Result<std::collections::BTreeMap<String, f32>, String> {
+    let mut entries = std::collections::BTreeMap::new();
+    for entry in text.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+        let (key, level) = entry.split_once('=').ok_or_else(|| format!("no '=' in '{entry}'"))?;
+        let level: f32 = level.trim().parse().map_err(|e| format!("bad level in '{entry}': {e}"))?;
+        if key.trim().is_empty() || !(0.0..=1.0).contains(&level) {
+            return Err(format!("bad entry '{entry}'"));
+        }
+        entries.insert(key.trim().to_string(), level);
+    }
+    Ok(entries)
+}
+
+/// GET_FT_DRIVE's answer: the active radio's FT drive memory in SET_FT_DRIVE_MEMORY's form.
+fn format_ft_drive_entries(entries: &std::collections::BTreeMap<String, f32>) -> String {
+    entries.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(";")
+}
 
 /// SHUTDOWN's own last resort: main() waiting for a shutdown that never finishes (a stuck save)
 /// still ends the process after this, rather than hanging forever.
@@ -578,6 +606,7 @@ fn parse_args() -> Args {
     let mut no_radio = false;
     let mut tune_timeout_secs: Option<u32> = None;
     let mut clock_check: Option<bool> = None;
+    let mut log_space_wx: Option<bool> = None;
     let mut tx_watchdog_min: u32 = 6; // Nexus's own Settings::default() -- see Args::tx_watchdog_min's own comment
     let mut working_frequencies: Vec<tempo_app::settings::WorkingFreq> = Vec::new(); // empty = Nexus's own stock table
 
@@ -676,6 +705,9 @@ fn parse_args() -> Args {
             "--clock-check" => {
                 clock_check = it.next().map(|v| v.eq_ignore_ascii_case("on"));
             }
+            "--log-space-wx" => {
+                log_space_wx = it.next().map(|v| v.eq_ignore_ascii_case("on"));
+            }
             "--tune-timeout-secs" => {
                 tune_timeout_secs = it.next().and_then(|v| v.parse().ok()).filter(|v: &u32| *v >= 1);
             }
@@ -726,6 +758,7 @@ fn parse_args() -> Args {
         tx_watchdog_min,
         tune_timeout_secs,
         clock_check,
+        log_space_wx,
         working_frequencies,
         log_dir,
         no_radio,
@@ -789,7 +822,21 @@ fn parse_args() -> Args {
 ///                                          (tempo-app/src/engine.rs's own doc comment: "takes
 ///                                          effect live"); this just exposes it, matching every
 ///                                          other command above -- no Nexus source touched.
-///   SET_TIER FT8|FT4                    -- calls Engine::set_tier(Tier). Responds
+///                                          Since Nexus 1.23 set_tx_level also remembers the level
+///                                          for the band and mode; with SET_FT_DRIVE_MEMORY off
+///                                          that memory is emptied again straight away.
+///   SET_FT_DRIVE_MEMORY on [<entries>]|off -- Jimmy's "Remember F11/F12 audio level per band".
+///                                          on: loads <entries> (GET_FT_DRIVE's form) as the active
+///                                          radio's FT drive memory; the engine brings back the
+///                                          current band's level at its next quiet tick and each
+///                                          band/mode change after. off: empties it. "OK" or
+///                                          "ERR <message>".
+///   SET_LOG_SPACE_WX on|off              -- save K_INDEX/A_INDEX/SFI with each logged contact
+///                                          (Nexus's Settings.log_space_weather).
+///   GET_FT_DRIVE                         -- "OK <band>[/<mode>]=<level>;..." -- the active radio's
+///                                          FT drive memory, for Jimmy to keep in its profile
+///                                          (EngineHost keeps no settings.json).
+///   SET_TIER FT8|FT4                   -- calls Engine::set_tier(Tier). Responds
 ///                                          "OK <TIER> <PERIOD_SECS>" (e.g. "OK FT4 7.5") or
 ///                                          "ERR <message>". Jimmy's own Alt+M (Toggle Mode)
 ///                                          hotkey -- under classic WSJT-X/UDP mode this always
@@ -1311,6 +1358,8 @@ fn handle_control_connection(
             // Multi-answer halves the engine already split: from the engine's own record of the
             // split (Jimmy compat patch), never reconstructed from matching measurements.
             decode_semantics::DecodeSemantics::apply_split_provenance(&split_provenance, &mut decode_semantics);
+            // The island a recent cluster spot of the sender named (2026-11-09), for IOTA award tags.
+            decode_semantics::DecodeSemantics::apply_iota(&mut decode_semantics, &live_feeds_cache.iota_by_call());
             // Stage 10: the same envelope for the QSO's own "now sending" text, so Jimmy's
             // completion / TX-tracking path reads a typed kind instead of re-parsing
             // qso.txNow with WsjtxMessage. Same Msg::parse -- no Nexus patch. `None` when
@@ -1487,13 +1536,50 @@ fn handle_control_connection(
             // over-driving the radio's audio input in the first place.
             match v.trim().parse::<f32>() {
                 Ok(frac) => {
-                    engine.lock().unwrap_or_else(|e| e.into_inner()).set_tx_level(frac);
+                    let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                    eng.set_tx_level(frac);
+                    if !FT_DRIVE_MEMORY_ON.load(std::sync::atomic::Ordering::SeqCst) {
+                        eng.set_ft_drive_memory(Default::default());
+                    }
+                    drop(eng);
                     let _ = writeln!(stream, "OK");
                 }
                 Err(e) => {
                     let _ = writeln!(stream, "ERR bad SET_TX_LEVEL value: {e}");
                 }
             }
+        } else if let Some(v) = line.strip_prefix("SET_FT_DRIVE_MEMORY ") {
+            let v = v.trim();
+            let (on, entries) = match v.split_once(' ') {
+                Some((word, rest)) => (word, rest),
+                None => (v, ""),
+            };
+            let parsed = match on {
+                "on" => parse_ft_drive_entries(entries).map(|e| (true, e)),
+                "off" if entries.trim().is_empty() => Ok((false, Default::default())),
+                _ => Err(format!("expected 'on [<entries>]' or 'off', got '{v}'")),
+            };
+            match parsed {
+                Ok((on, entries)) => {
+                    let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                    FT_DRIVE_MEMORY_ON.store(on, std::sync::atomic::Ordering::SeqCst);
+                    eng.set_ft_drive_memory(entries);
+                    drop(eng);
+                    let _ = writeln!(stream, "OK");
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad SET_FT_DRIVE_MEMORY: {e}");
+                }
+            }
+        } else if line == "GET_FT_DRIVE" {
+            let eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+            let text = eng
+                .settings()
+                .active_profile()
+                .map(|p| format_ft_drive_entries(&p.ft_drive))
+                .unwrap_or_default();
+            drop(eng);
+            let _ = writeln!(stream, "OK {text}");
         } else if let Some(v) = line.strip_prefix("SET_TIER ") {
             // Jimmy's own Alt+M (Toggle Mode FT8/FT4) hotkey -- root-caused live, 2026-08-09:
             // under classic WSJT-X/UDP mode, mode switching was ALWAYS just "halt Tx, then the
@@ -1642,6 +1728,25 @@ fn handle_control_connection(
                 }
                 None => {
                     let _ = writeln!(stream, "ERR SET_CLOCK_CHECK takes on or off");
+                }
+            }
+        } else if let Some(v) = line.strip_prefix("SET_LOG_SPACE_WX ") {
+            // Options' "Save space weather with each contact" (2026-11-09): Nexus's own
+            // Settings.log_space_weather -- K_INDEX, A_INDEX and SFI on each logged contact, from
+            // the readings the space-weather cache hands the engine (set_log_wx_sink in main).
+            let on = match v.trim() { "on" => Some(true), "off" => Some(false), _ => None };
+            match on {
+                Some(on) => {
+                    let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                    if eng.settings().log_space_weather != on {
+                        let mut s = eng.settings().clone();
+                        s.log_space_weather = on;
+                        eng.apply_settings(s);
+                    }
+                    let _ = writeln!(stream, "OK");
+                }
+                None => {
+                    let _ = writeln!(stream, "ERR SET_LOG_SPACE_WX takes on or off");
                 }
             }
         } else if let Some(json) = line.strip_prefix("SET_WORKING_FREQUENCIES ") {
@@ -1837,12 +1942,38 @@ fn handle_control_connection(
                 let _ = stream.shutdown(std::net::Shutdown::Write);
             });
             return;
+        } else if let Some(v) = line.strip_prefix("PATH_TO ") {
+            // "PATH_TO <grid> <band> <model> [<watts>]" (2026-11-09): Nexus's path model, both
+            // ways round. Seconds of work: its own thread, like LOG_UPLOAD.
+            let w: Vec<String> = v.split_whitespace().map(str::to_string).collect();
+            let cache = external_cache.clone();
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let reply = match (w.first(), w.get(1)) {
+                    (Some(grid), Some(band)) => cache.path_to_json(
+                        grid,
+                        band,
+                        w.get(2).map(String::as_str).unwrap_or("p533"),
+                        w.get(3).and_then(|p| p.parse::<f64>().ok()).filter(|p| *p > 0.0),
+                    ),
+                    _ => serde_json::json!({ "error": "PATH_TO takes a grid and a band" }).to_string(),
+                };
+                let _ = writeln!(stream, "{reply}");
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            });
+            return;
         } else if line == "SPACE_WX" {
             let _ = writeln!(stream, "{}", external_cache.space_wx_json());
         } else if let Some(v) = line.strip_prefix("GETTING_OUT") {
-            // "Who hears me?": cache-only, like BAND_CONDITIONS. Optional window in minutes.
-            let minutes = v.trim().parse::<i64>().unwrap_or(15);
-            let _ = writeln!(stream, "{}", live_feeds_cache.getting_out_json(minutes));
+            // "Who hears me?": cache-only, like BAND_CONDITIONS. Optional window in minutes, then
+            // optionally "since <unix secs>" -- the operator's Start fresh time (2026-11-09).
+            let mut words = v.split_whitespace();
+            let minutes = words.next().and_then(|w| w.parse::<i64>().ok()).unwrap_or(15);
+            let since = match (words.next(), words.next()) {
+                (Some("since"), Some(t)) => t.parse::<i64>().ok(),
+                _ => None,
+            };
+            let _ = writeln!(stream, "{}", live_feeds_cache.getting_out_json(minutes, since));
         } else if line == "BAND_CONDITIONS" {
             // Cache-only read (the rolling PSK Reporter window) + one PropAdvisor pass over up to
             // 13 bands -- cheap enough to run inline on this accept loop, same as SNAPSHOT/
@@ -1883,7 +2014,7 @@ fn handle_control_connection(
                 (Some(_), Err(e)) => { let _ = writeln!(stream, "ERR bad LOG_ROWS args: {e}"); }
                 (Some(_), Ok(a)) => { let _ = writeln!(stream, "{}", logbook_host::rows_json(&engine, &a)); }
             }
-        } else if let Some((name, json)) = ["LOG_EDIT ", "LOG_DELETE ", "LOG_IMPORT ", "LOG_MERGE ", "LOG_STAMP_UPLOAD ", "LOG_SET_EXTRA "]
+        } else if let Some((name, json)) = ["LOG_EDIT ", "LOG_DELETE ", "LOG_IMPORT ", "LOG_MERGE ", "LOG_STAMP_UPLOAD ", "LOG_SET_EXTRA ", "LOG_QSL_CARD "]
             .iter()
             .find_map(|p| line.strip_prefix(p).map(|rest| (p.trim(), rest)))
         {
@@ -1897,6 +2028,7 @@ fn handle_control_connection(
                     "LOG_IMPORT" => serde_json::from_str(json).map(|a| logbook_host::log_import(host, &engine, a)).map_err(|e| e.to_string()),
                     "LOG_MERGE" => serde_json::from_str(json).map(|a| logbook_host::log_merge(host, &engine, a)).map_err(|e| e.to_string()),
                     "LOG_SET_EXTRA" => serde_json::from_str(json).map(|a| logbook_host::log_set_extra(host, &engine, a)).map_err(|e| e.to_string()),
+                    "LOG_QSL_CARD" => serde_json::from_str(json).map(|a| logbook_host::log_qsl_card(host, &engine, a)).map_err(|e| e.to_string()),
                     _ => serde_json::from_str(json).map(|a| logbook_host::log_stamp(host, &engine, a)).map_err(|e| e.to_string()),
                 },
             };
@@ -2495,6 +2627,7 @@ fn main() {
         // Jimmy's ini-only tuneTimeoutSeconds when passed, else Nexus's stock value.
         tune_timeout_secs: args.tune_timeout_secs.unwrap_or_else(|| Settings::default().tune_timeout_secs),
         clock_check: args.clock_check.unwrap_or_else(|| Settings::default().clock_check),
+        log_space_weather: args.log_space_wx.unwrap_or_else(|| Settings::default().log_space_weather),
         // Frequency-override authority split, 2026-08-24 -- see Args::working_frequencies' own
         // comment. Engine::band_plan (read by Engine::set_tier's own internal auto-QSY on every
         // tier switch) applies these the same way Nexus's own Settings panel would, so Nexus
@@ -2637,6 +2770,13 @@ fn main() {
     // (see external_data.rs's own header comment). Independent of the engine/radio loop
     // entirely -- a POTA/SWPC outage can never affect decode/TX.
     let external_cache = external_data::SharedCache::new(&args.mygrid);
+    {
+        // Each poll's measured readings, for the space weather on each logged contact.
+        let wx_engine = engine.clone();
+        external_cache.set_log_wx_sink(Box::new(move |kp, a_daily, sfi, at| {
+            wx_engine.lock().unwrap_or_else(|e| e.into_inner()).note_space_weather(kp, &a_daily, sfi, at);
+        }));
+    }
     external_cache.spawn_refresh_thread();
 
     // Band conditions (always -- mycall/mygrid are already known) + DX spots (only if the
@@ -2771,6 +2911,17 @@ fn wait_for_shutdown(backstop: Option<std::time::Duration>) -> ! {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ft_drive_entries_go_back_to_the_engine_as_they_came_out() {
+        let e = super::parse_ft_drive_entries("20m/FT8=0.5;20m=0.5; 40m=0.25;").unwrap();
+        assert_eq!(e.len(), 3);
+        assert_eq!(e["40m"], 0.25);
+        assert_eq!(super::parse_ft_drive_entries(&super::format_ft_drive_entries(&e)).unwrap(), e);
+        assert!(super::parse_ft_drive_entries("").unwrap().is_empty());
+        assert!(super::parse_ft_drive_entries("20m=1.5").is_err(), "out of range");
+        assert!(super::parse_ft_drive_entries("20m").is_err(), "no level");
+    }
+
     #[test]
     fn kenwood_tuner_writes_only_its_own_command_and_keeps_the_radios_settings() {
         // Start: tuner in and tune, receive-through-tuner kept. There is no stop command.

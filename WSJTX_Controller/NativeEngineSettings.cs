@@ -68,6 +68,11 @@ namespace WSJTX_Controller
         // without changing Nexus. A saved "clockCheck" setting still wins.
         public bool ClockCheck { get; set; } = false;
 
+        // 2026-11-09: Nexus's Settings.log_space_weather -- the solar flux, K index and (when NOAA
+        // has issued it) the day's A index saved with each new contact (ADIF SFI/K_INDEX/A_INDEX).
+        // Options > Logbook. Default on (operator decision 2026-11-09).
+        public bool LogSpaceWeather { get; set; } = true;
+
         // UDP-to-Direct parity/cleanup pass, 2026-08-12: the "talk over classic WSJT-X UDP
         // instead of Direct" choice (UseDirectEngine) is retired as a production option -- UDP
         // mode never had a working way to tell jimmy-engine-host.exe to actually enable
@@ -110,6 +115,7 @@ namespace WSJTX_Controller
             if (int.TryParse(ini.Read("tuneTimeoutSeconds"), out int tune) && tune >= 1)
                 TuneTimeoutSeconds = System.Math.Min(tune, MaxTuneTimeoutSeconds);
             if (ini.KeyExists("clockCheck")) ClockCheck = ini.Read("clockCheck") != "False";
+            if (ini.KeyExists("logSpaceWeather")) LogSpaceWeather = ini.Read("logSpaceWeather") != "False";
         }
 
         public void SaveToIni(IniFile ini)
@@ -126,6 +132,7 @@ namespace WSJTX_Controller
             ini.Write("engineAudioOutputAppLevel", EngineAudioOutputAppLevel.ToString());
             ini.Write("tuneTimeoutSeconds", TuneTimeoutSeconds.ToString());
             ini.Write("clockCheck", ClockCheck ? "True" : "False");
+            ini.Write("logSpaceWeather", LogSpaceWeather ? "True" : "False");
         }
     }
 }

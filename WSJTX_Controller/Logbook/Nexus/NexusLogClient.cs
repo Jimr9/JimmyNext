@@ -269,6 +269,10 @@ namespace WSJTX_Controller
         public NexusWriteReply SetExtra(string id, List<string[]> set) =>
             Write("LOG_SET_EXTRA " + JsonSerializer.Serialize(new { id, set }, Json));
 
+        // A paper QSL card (2026-11-09): action "queue" | "unqueue" | "sent" (via "bureau" | "direct").
+        public NexusWriteReply QslCard(string id, string editKey, string action, string via = null) =>
+            Write("LOG_QSL_CARD " + JsonSerializer.Serialize(new { id, editKey, action, via }, Json));
+
         public NexusWriteReply StampUpload(string id, string service, string outcome, long whenUnix, string detail = null) =>
             Write("LOG_STAMP_UPLOAD " + JsonSerializer.Serialize(new { id, service, outcome, whenUnix, detail }, Json));
 

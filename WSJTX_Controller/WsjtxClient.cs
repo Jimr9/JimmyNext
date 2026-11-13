@@ -259,7 +259,8 @@ namespace WSJTX_Controller
         // the speech queue treats them as a key's answer (2026-10-01).
         private string _bandChangeOrigin;
         private string _slotAnalysisOrigin;
-        private List<int> bands = new List<int>() { 160, 80, 60, 40, 30, 20, 17, 15, 12, 10, 6 };
+        internal static readonly IReadOnlyList<int> BandMeters = new[] { 160, 80, 60, 40, 30, 20, 17, 15, 12, 10, 6 };
+        private List<int> bands = new List<int>(BandMeters);
         // Read-only view for Options > Frequencies (OptionsDlg.cs) -- index-aligned with
         // freqsDict's own per-mode lists and FrequencySettings' override arrays.
         internal IReadOnlyList<int> BandsMeters => bands;
@@ -926,6 +927,33 @@ namespace WSJTX_Controller
         // Returns the ADIF-style band string for the current dial frequency (e.g. "20m"),
         // or null when the frequency is unknown or off-band.
         public string CurrentBandStr => FreqToBandStr(dialFrequency / 1e6);
+
+        // The grid a station last sent us (a CQ or a reply this session), else the callbook's
+        // (2026-11-09: Path to Selected Station). Null when neither is known.
+        internal string GridHeardFrom(string call)
+        {
+            if (string.IsNullOrEmpty(call)) return null;
+            if (allCallDict.TryGetValue(call, out var heard) && heard != null)
+            {
+                for (int i = heard.Count - 1; i >= 0; i--)
+                {
+                    var m = heard[i];
+                    string g = m?.Semantic?.Grid ?? (m == null ? null : WsjtxMessage.Grid(m.Message));
+                    if (!string.IsNullOrEmpty(g)) return g;
+                }
+            }
+            if (callDict.TryGetValue(call, out var queued) && queued != null)
+            {
+                string g = queued.Semantic?.Grid ?? WsjtxMessage.Grid(queued.Message);
+                if (!string.IsNullOrEmpty(g)) return g;
+            }
+            if (lookupManager != null && lookupManager.Enabled)
+            {
+                string g = lookupManager.Build(call)?.Grid;
+                if (!string.IsNullOrWhiteSpace(g)) return g.Trim();
+            }
+            return null;
+        }
 
         // WSJT-X's current reported mode (e.g. "FT8", "FT4"), straight from the last
         // StatusMessage -- just a default suggestion for manual QSO entry, not a

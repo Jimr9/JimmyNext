@@ -184,7 +184,7 @@ namespace WSJTX_Controller
                 _wc.activeAwardTags, call, state, d.EffectiveClassification().Continent,
                 cqZoneLookup: () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.CqZone ?? 0; },
                 dxccLookup:   () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.Dxcc   ?? 0; },
-                wpxPrefix: sem.WpxPrefix, waeCountry: sem.WaeCountry);
+                wpxPrefix: sem.WpxPrefix, waeCountry: sem.WaeCountry, iota: sem.Iota);
         }
 
         // Same as MatchedAwardRuleId, against each active award's UnconfirmedSet instead of its
@@ -201,7 +201,7 @@ namespace WSJTX_Controller
                 _wc.activeAwardTags, call, state, d.EffectiveClassification().Continent,
                 cqZoneLookup: () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.CqZone ?? 0; },
                 dxccLookup:   () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.Dxcc   ?? 0; },
-                wpxPrefix: sem.WpxPrefix, waeCountry: sem.WaeCountry);
+                wpxPrefix: sem.WpxPrefix, waeCountry: sem.WaeCountry, iota: sem.Iota);
         }
 
         // Category tag shown in the call-waiting row (e.g. "New DXCC", "WAS Needed"). WAS_NEEDED/

@@ -117,6 +117,8 @@ namespace WSJTX_Controller
                 new Item(HotkeyAction.OpenSmartModeWindow, "Open the Smart Mode stations window: each station's status, last heard, calls and time; cancel one. Escape closes it; Smart Mode keeps running."),
                 new Item(HotkeyAction.StationWatchStatus,  "Report Station Watch status."),
                 new Item(HotkeyAction.LookupStation,       "Look up the selected station (callsign, country, state, LoTW status, and more)."),
+                new Item(HotkeyAction.PathToStation,       "Say the path to the selected station: short or long path, which way to beam, and when the band opens."),
+                new Item(HotkeyAction.WhoHearsMeStartFresh, "Who Hears Me: count only reports of your signal from now on, after an antenna change for example."),
                 new Item(HotkeyAction.OpenLogbook,         "Open the Ham Radio Center logbook."),
                 new Item(HotkeyAction.AddManualQso,        "Add a manually-logged QSO (worked on another mode or rig)."),
                 new Item(HotkeyAction.OpenOtaSpots,        "Open POTA / SOTA spots, DX spots, band conditions, and space weather."),

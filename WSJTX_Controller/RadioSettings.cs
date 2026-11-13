@@ -140,7 +140,7 @@ namespace WSJTX_Controller
 
         // Fix, 2026-09-14: the FT8/FT4 transmit tone level (Engine::tx_level, F11/F12 and the
         // Options > Radio spinner) had NO general "remember my last level" of its own -- only the
-        // opt-in, per-band TxLevelByBand map below, which does nothing at all when
+        // opt-in, per-band memory below (FtDrive), which does nothing at all when
         // RememberTxLevelPerBand is off (its default) or the current band has no saved entry yet.
         // The engine's own fresh-process default is 0.8 (tempo-audio's Settings::default,
         // upstream, not configurable from here), so any operator who never turned on per-band
@@ -154,12 +154,22 @@ namespace WSJTX_Controller
 
         // Requested 2026-08-11: F11/F12 (AudioLevel(), WsjtxClient.BandAudio.cs) always applied
         // one carried-over level across every band. Opt-in (default off, matches current
-        // behavior exactly when unchecked) -- when on, WsjtxClient.Direct.cs's own band-change
-        // detection restores whichever level was last set for the NEW band, and AudioLevel()
-        // records into TxLevelByBand on every F11/F12 press. Keyed by WsjtxClient.bands index
-        // (same indexing as LastBandIdx above), value is the raw 0.0-1.0 engine tx_level.
+        // behavior exactly when unchecked).
+        //
+        // Since Nexus 1.23 (2026-11-06) the engine does the remembering itself (tempo-app
+        // engine/ft_drive.rs): each F11/F12 pick is kept for the band AND mode (20m/FT8 and
+        // 20m/FT4 apart), and on a band or mode change the level last used there comes back,
+        // never inside an over. EngineHost keeps no settings file, so FtDrive is the engine's
+        // memory as Jimmy last read it (GET_FT_DRIVE), in the engine's own words
+        // ("20m/FT8=0.5;20m=0.5" -- the bare band is the fallback for a mode never driven there),
+        // and is handed back at every connect (SET_FT_DRIVE_MEMORY). With the option off the
+        // engine is told to remember nothing; FtDrive is kept for when it is turned on again.
         public bool RememberTxLevelPerBand { get; set; } = false;
-        public System.Collections.Generic.Dictionary<int, double> TxLevelByBand { get; } = new System.Collections.Generic.Dictionary<int, double>();
+        public string FtDrive { get; set; } = "";
+
+        // The pre-1.23 per-band map ("<WsjtxClient band index>=<level>;..."), read once to carry
+        // the levels operators already saved into FtDrive, then deleted.
+        internal const string RetiredTxLevelByBandKey = "radioTxLevelByBand";
 
         // Alt+Q ("Quick Power / SWR Check", WsjtxClient.BandAudio.cs's ReportPowerSwr) normally
         // speaks bare numbers (e.g. "SWR 1.4, ALC 0.30"). Opt-in, default off -- keeps the terse
@@ -220,20 +230,28 @@ namespace WSJTX_Controller
             ExplainMeterReadings = ini.Read("radioExplainMeterReadings") == "True";
             if (Enum.TryParse(ini.Read("radioTxMeterFeedback"), out TxMeterFeedbackMode feedback))
                 TxMeterFeedback = feedback;
-            TxLevelByBand.Clear();
-            string txLevelByBand = ini.Read("radioTxLevelByBand");
-            if (!string.IsNullOrEmpty(txLevelByBand))
+            FtDrive = ini.KeyExists("radioFtDrive")
+                ? ini.Read("radioFtDrive") ?? ""
+                : FtDriveFromRetiredTxLevelByBand(ini.Read(RetiredTxLevelByBandKey));
+        }
+
+        // The pre-1.23 per-band levels as engine FT drive entries: each band index becomes the
+        // bare band ("20m=0.7"), which the engine uses for FT8 and FT4 alike until the operator
+        // sets one of them there. Unreadable entries are dropped, as the old loader did.
+        internal static string FtDriveFromRetiredTxLevelByBand(string retired)
+        {
+            if (string.IsNullOrEmpty(retired)) return "";
+            var entries = new System.Collections.Generic.List<string>();
+            foreach (string entry in retired.Split(';'))
             {
-                foreach (string entry in txLevelByBand.Split(';'))
-                {
-                    string[] parts = entry.Split('=');
-                    if (parts.Length == 2
-                        && int.TryParse(parts[0], out int idx)
-                        && double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double level)
-                        && idx >= 0 && level >= 0.0 && level <= 1.0)
-                        TxLevelByBand[idx] = level;
-                }
+                string[] parts = entry.Split('=');
+                if (parts.Length == 2
+                    && int.TryParse(parts[0], out int idx)
+                    && double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double level)
+                    && idx >= 0 && idx < WsjtxClient.BandMeters.Count && level >= 0.0 && level <= 1.0)
+                    entries.Add($"{WsjtxClient.BandMeters[idx]}m={level.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
             }
+            return string.Join(";", entries);
         }
 
         public void SaveToIni(IniFile ini)
@@ -263,7 +281,7 @@ namespace WSJTX_Controller
             ini.Write("radioRememberTxLevelPerBand", RememberTxLevelPerBand.ToString());
             ini.Write("radioExplainMeterReadings", ExplainMeterReadings.ToString());
             ini.Write("radioTxMeterFeedback", TxMeterFeedback.ToString());
-            SaveTxLevelByBandToIni(ini);
+            SaveFtDriveToIni(ini);
         }
 
         // Just the unconditional last-confirmed TX level, as its own INI key -- same split-out
@@ -277,16 +295,15 @@ namespace WSJTX_Controller
                 ini.Write("radioLastTxLevel", LastTxLevel.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
 
-        // Just the per-band F11/F12 level map, as its own INI key. Split out (2026-09-10) so the
+        // Just the engine's FT drive memory, as its own INI key. Split out (2026-09-10) so the
         // debounced durable-persistence path (Controller.PersistTxLevelPerBandNow) can commit a
-        // freshly confirmed level to disk on its own, without rewriting every other radio setting
-        // on each F11/F12 press. Same serialization the full SaveToIni uses, so the two stay in
-        // lock-step. The map only ever holds engine-CONFIRMED values (WsjtxClient.Direct.cs's
-        // DirectSetEngineTxLevel), so there is nothing unconfirmed to leak here.
-        internal void SaveTxLevelByBandToIni(IniFile ini)
+        // freshly read memory to disk on its own, without rewriting every other radio setting on
+        // each F11/F12 press. It only ever holds what the engine reported (GET_FT_DRIVE). The
+        // pre-1.23 key goes once its levels are carried into FtDrive (Load).
+        internal void SaveFtDriveToIni(IniFile ini)
         {
-            ini.Write("radioTxLevelByBand", string.Join(";", System.Linq.Enumerable.Select(TxLevelByBand,
-                kv => $"{kv.Key}={kv.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}")));
+            ini.Write("radioFtDrive", FtDrive ?? "");
+            if (ini.KeyExists(RetiredTxLevelByBandKey)) ini.DeleteKey(RetiredTxLevelByBandKey);
         }
     }
 

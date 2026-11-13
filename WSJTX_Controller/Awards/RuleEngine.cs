@@ -85,7 +85,7 @@ namespace WSJTX_Controller
         // lookup). Used by Controller.RefreshStillNeedCache() to decide whether the currently
         // selected Still Need Rule Definition can drive live decode tagging, and by the Still
         // Need tab to show the user whether their selection is doing so. GroupBy kinds not
-        // listed here (County, Grid, Iota, SigInfo, DarcDok, None, ...) have no such
+        // listed here (County, Grid, SigInfo, DarcDok, None, ...) have no such
         // field available cheaply at decode time -- those rules still work fine in the Still
         // Need tab's static checklist, just not for live tagging.
         public static readonly HashSet<RuleGroupBy> LiveTagSupportedGroupBys = new HashSet<RuleGroupBy>
@@ -95,6 +95,9 @@ namespace WSJTX_Controller
             // 2026-11-02: the heard station's WPX prefix and WAE country, by Nexus's own rules,
             // ride on each decode's envelope (SemanticDecode.WpxPrefix / WaeCountry).
             RuleGroupBy.Prefix, RuleGroupBy.WaeCountry,
+            // 2026-11-09: the island group a recent DX cluster spot of the station named rides on
+            // its decode (Nexus's own reading of the spot comment).
+            RuleGroupBy.Iota,
         };
 
         // Whether a decode can be live-tagged against this definition's still-needed items at

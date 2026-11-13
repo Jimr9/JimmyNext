@@ -35,6 +35,65 @@ namespace WSJTX_Controller
             footer.Controls.Add(_editCleanupBtn);
         }
 
+        // QSL (2026-11-09): the selected contacts to LoTW now, and Nexus's paper-card queue.
+        internal Action<List<int>> UploadToLotw;
+        private Button _editQslBtn;
+
+        private void AddQslButton(Panel footer, Font font, int x, int tabIndex)
+        {
+            _editQslBtn = new Button
+            {
+                Text = "QSL...", AccessibleName = "QSL for selected contacts", Font = font,
+                Location = new Point(x, 4), Size = new Size(70, 23), TabIndex = tabIndex,
+            };
+            var menu = new ContextMenuStrip();
+            var upload = new ToolStripMenuItem("Upload Selected to &LoTW", null, (s, e) => UploadSelectedToLotw());
+            var queue = new ToolStripMenuItem("&Queue Paper Card", null, (s, e) => PaperCard("queue", null));
+            var unqueue = new ToolStripMenuItem("&Remove from Card Queue", null, (s, e) => PaperCard("unqueue", null));
+            var bureau = new ToolStripMenuItem("Mark Card Sent by &Bureau", null, (s, e) => PaperCard("sent", "bureau"));
+            var direct = new ToolStripMenuItem("Mark Card Sent &Direct", null, (s, e) => PaperCard("sent", "direct"));
+            var list = new ToolStripMenuItem("Show &Cards to Send", null, (s, e) => ShowCardsToSend());
+            menu.Items.AddRange(new ToolStripItem[] { upload, new ToolStripSeparator(), queue, unqueue, bureau, direct, new ToolStripSeparator(), list });
+            menu.Opening += (s, e) =>
+            {
+                bool any = _editLv.SelectedItems.Count > 0;
+                foreach (var item in new[] { upload, queue, unqueue, bureau, direct }) item.Enabled = any;
+            };
+            _editQslBtn.Click += (s, e) => menu.Show(_editQslBtn, new Point(0, _editQslBtn.Height));
+            footer.Controls.Add(_editQslBtn);
+        }
+
+        private void UploadSelectedToLotw()
+        {
+            var ids = SelectedEditIds();
+            if (ids.Count == 0) return;
+            if (UploadToLotw == null) { SetStatusSpoken(_editQslBtn, "LoTW upload is not available here."); return; }
+            UploadToLotw(ids);
+        }
+
+        private void PaperCard(string action, string via)
+        {
+            var ids = SelectedEditIds();
+            if (ids.Count == 0) return;
+            if (!(_db is NexusLogbookService nexus)) { SetStatusSpoken(_editQslBtn, "Paper cards need the logbook, which is not open."); return; }
+            int n = nexus.SetPaperCard(ids, action, via);
+            string what = action == "queue" ? "queued for a paper card" : action == "unqueue" ? "taken out of the card queue" : "marked card sent";
+            SetStatusSpoken(_editQslBtn, n == ids.Count
+                ? $"{(n == 1 ? "1 contact" : n + " contacts")} {what}."
+                : $"{n} of {ids.Count} contacts {what}; the rest changed elsewhere, search again.");
+            DoEditSearch();
+        }
+
+        // The cards-to-send list: the search's own "Paper card: to send" upload status.
+        private void ShowCardsToSend()
+        {
+            int idx = Array.FindIndex(LogbookDb.UploadFilters, f => f.State == "cardqueued");
+            if (idx < 0) return;
+            _editUploadCb.SelectedIndex = idx + 1;   // 0 = Any
+            DoEditSearch();
+            _editLv.Focus();
+        }
+
         private void ShowCleanup(Form dlg)
         {
             if (!NexusLogbook.Active) { SetStatusSpoken(_editCleanupBtn, "Clean Up needs the logbook, which is not open."); dlg.Dispose(); return; }

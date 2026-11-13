@@ -1024,6 +1024,7 @@ namespace WSJTX_Controller
 
             // Nexus's own log tools (2026-10-31): duplicates, check, history, deleted, undo.
             AddCleanupButton(footer, font, 518, 14);
+            AddQslButton(footer, font, 614, 15);
 
             _editLv = MakeListView(font);
             _editLv.Dock        = DockStyle.Fill;

@@ -1,8 +1,8 @@
 diff --git a/src/service.rs b/src/service.rs
-index dc40594..0447e38 100644
+index d6c5e4d1e..18280705e 100644
 --- a/src/service.rs
 +++ b/src/service.rs
-@@ -36501,6 +36501,57 @@ mod tests {
+@@ -40264,6 +40264,57 @@ mod tests {
          );
      }
  

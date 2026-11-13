@@ -1749,6 +1749,18 @@ namespace WSJTX_Controller
                 _startupTxLevelRestored = true;
                 if (ctrl.Radio.LastTxLevel >= 0.0)
                     DirectSetEngineTxLevel(ctrl.Radio.LastTxLevel);
+                // Then the per-band memory (Nexus 1.23), queued after the level so it replaces
+                // whatever that set remembered: the engine brings back this band's own level at
+                // its next quiet moment, as at a band change.
+                DirectSendFtDriveMemory();
+            }
+            else if (_startupTxLevelRestored && ctrl.Radio.RememberTxLevelPerBand && !_txLevelChangeInFlight
+                     && Math.Abs(radio.TxLevel - ctrl.Radio.LastTxLevel) > 1e-6)
+            {
+                // The engine brought back a band's level by itself: keep LastTxLevel on what is
+                // really in use, as a confirmed F11/F12 does (DirectSetEngineTxLevel).
+                ctrl.Radio.LastTxLevel = radio.TxLevel;
+                ctrl.NoteTxLevelPerBandConfirmed();
             }
 
             // 2026-09-23: apply the hidden per-application Engine Host output level once its
@@ -1759,18 +1771,11 @@ namespace WSJTX_Controller
             // Hound: track the engine's ACTUAL state every poll (restart / leaving FT8).
             ApplyEngineSpecialOp(snap.SpecialOp);
 
-            // Options > Radio "Remember F11/F12 audio level per band" -- only on a genuine
-            // confirmed band change (newBand, set just above), not every poll tick. See
-            // RestoreTxLevelForBand's own comment (WsjtxClient.BandAudio.cs) -- shared with the
-            // classic WSJT-X/UDP path.
-            // Item 2 (2026-09-10): commit any pending debounced per-band level write for the
-            // band we are LEAVING before the destination band's saved value is restored, so a
-            // just-made adjustment is durable across the band change.
+            // Item 2 (2026-09-10): commit any pending debounced level write for the band we are
+            // LEAVING, so a just-made adjustment is durable across the band change. The engine
+            // itself brings back the new band's level (Nexus 1.23; see RadioSettings.FtDrive).
             if (newBand)
-            {
                 ctrl.FlushPendingTxLevelPersist();
-                RestoreTxLevelForBand();
-            }
 
             // One-time-per-connection startup fallback, requested live 2026-08-10: if the very
             // first band resolution attempt this session still comes back unknown (no CAT data
@@ -3620,9 +3625,9 @@ namespace WSJTX_Controller
         // driven at once; _txLevelChangeInFlight serializes them to one outstanding engine command.
         //
         // onDone(true, applied) fires only AFTER the engine returns OK, with `applied` = the
-        // clamped value now in effect; the cached level (_engineTxLevel) and -- when "Remember
-        // F11/F12 audio level per band" is on -- the per-band remembered value are updated at that
-        // same moment and never before. onDone(false, 0) means the change did NOT take: the engine
+        // clamped value now in effect; the cached level (_engineTxLevel) is updated at that same
+        // moment and never before -- and, when "Remember F11/F12 audio level per band" is on, the
+        // engine's per-band memory is read back then (DirectReadFtDriveMemory). onDone(false, 0) means the change did NOT take: the engine
         // was unreachable / returned ERR / timed out, or another level change was already in flight
         // -- callers must not display, cache, or remember a value in that case.
         public void DirectSetEngineTxLevel(double level01, Action<bool, double> onDone = null)
@@ -3644,8 +3649,10 @@ namespace WSJTX_Controller
                     // (the engine's own fresh-process default is 80%, and per-band memory alone
                     // does nothing when it's off or the current band has no saved entry yet).
                     ctrl.Radio.LastTxLevel = next;
-                    if (ShouldRememberTxLevelForBand(ctrl.Radio.RememberTxLevelPerBand, bandIdx, out int bandKey))
-                        ctrl.Radio.TxLevelByBand[bandKey] = next;
+                    // The engine remembered this pick for the band and mode (Nexus 1.23): keep
+                    // what it now holds.
+                    if (ctrl.Radio.RememberTxLevelPerBand)
+                        DirectReadFtDriveMemory();
                     // Item 2 (2026-09-10): also commit this confirmed level to the active profile
                     // on disk, debounced (~750 ms) so a burst of F11/F12 presses is one write -- it
                     // no longer waits for the next clean shutdown, so a forced close or an upgrade
@@ -4493,6 +4500,9 @@ namespace WSJTX_Controller
         // Nexus's own rules (EngineHost logbook_host::call_award_keys). Null when none.
         public string WpxPrefix { get; set; }
         public string WaeCountry { get; set; }
+        // 2026-11-09: the IOTA island group a recent DX cluster spot of the sender named (Nexus's
+        // own reading of the comment). Null when none did.
+        public string Iota { get; set; }
     }
 
     // Mirrors the QSO-relevant slice of tempo-app::dto::QsoStatus (Rust) -- only the fields

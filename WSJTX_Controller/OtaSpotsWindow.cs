@@ -77,6 +77,8 @@ namespace WSJTX_Controller
         // ── Who Hears Me tab (2026-10-04) ────────────────────────────────────────
         private TextBox _heardSummaryBox;
         private ComboBox _heardWindowCb;
+        private ComboBox _heardSortCb;
+        private bool _heardWindowSetting;
         private ListBox _heardList;
         private TextBox _heardStatusLabel;
         private bool _heardInFlight;
@@ -110,6 +112,17 @@ namespace WSJTX_Controller
             public Func<string> PrepareWouldInterrupt;
             public Func<WsjtxClient.SpotPlan, bool> PrepareMovesRadio;   // false: on the band already, nothing to ask
             public Func<WsjtxClient.SpotPlan, string> PrepareSpot;
+            // Who Hears Me (2026-11-09): the Start fresh time (Unix seconds; null = the plain
+            // window), kept by the main window so its hotkey works with this window closed; and
+            // the sort, saved per profile.
+            public Func<long?> HeardSince;
+            public Action<long?> SetHeardSince;
+            public Func<string> HeardSort;
+            public Action<string> SaveHeardSort;
+            // Which activator programs the spots list shows (2026-11-09): "POTA,SOTA,WWFF" by
+            // default, saved per profile.
+            public Func<string> OtaPrograms;
+            public Action<string> SaveOtaPrograms;
         }
         private readonly Host _host2;
 
@@ -162,7 +175,7 @@ namespace WSJTX_Controller
             // Pure layout host for the one page shown (see LogbookWindow's _categoryDetailHost).
             _host = new Panel { Dock = DockStyle.Fill, AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
-            string[] names = { "POTA / SOTA", "Contests", "Band Conditions", "DX Spots", "Space Weather", "Who Hears Me", "DXpeditions" };
+            string[] names = { "POTA / SOTA / WWFF", "Contests", "Band Conditions", "DX Spots", "Space Weather", "Who Hears Me", "DXpeditions" };
             _pages = new[] { BuildPotaSotaTab(), BuildContestsTab(), BuildBandConditionsTab(), BuildDxSpotsTab(), BuildSpaceWeatherTab(), BuildWhoHearsMeTab(), BuildDxpeditionsTab() };
             for (int i = 0; i < _pages.Length; i++)
             {
@@ -384,20 +397,47 @@ namespace WSJTX_Controller
 
         // ── POTA/SOTA tab ────────────────────────────────────────────────────────
 
+        // The activator programs, and which of them the list shows (2026-11-09: WWFF joins).
+        internal static readonly string[] OtaProgramNames = { "POTA", "SOTA", "WWFF" };
+        private readonly Dictionary<string, CheckBox> _otaProgramCbs = new Dictionary<string, CheckBox>();
+
+        internal static HashSet<string> ParseOtaPrograms(string saved)
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (saved == null) { foreach (var p in OtaProgramNames) set.Add(p); return set; }
+            foreach (var p in saved.Split(','))
+                if (Array.IndexOf(OtaProgramNames, p.Trim().ToUpperInvariant()) >= 0) set.Add(p.Trim().ToUpperInvariant());
+            return set;
+        }
+
         private Panel BuildPotaSotaTab()
         {
-            var page = MakeTabPage("POTA / SOTA");
+            var page = MakeTabPage("POTA / SOTA / WWFF");
             _potaList = MakeListBox("Spots list");
+
+            var shown = ParseOtaPrograms(_host2.OtaPrograms?.Invoke());
+            var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 30, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            foreach (var program in OtaProgramNames)
+            {
+                var cb = new CheckBox { Text = program, AccessibleName = "Show " + program, AutoSize = true, Checked = shown.Contains(program), Margin = new Padding(3, 6, 9, 3) };
+                cb.CheckedChanged += (s, e) =>
+                {
+                    _host2.SaveOtaPrograms?.Invoke(string.Join(",", OtaProgramNames.Where(p => _otaProgramCbs[p].Checked)));
+                    RefreshPotaSota();
+                };
+                _otaProgramCbs[program] = cb;
+                top.Controls.Add(cb);
+            }
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
             _potaStatusLabel = MakeStatusBox();
-            var refreshBtn = MakeRefreshButton((s, e) => RefreshPotaSota(), "Refresh POTA and SOTA spots now");
+            var refreshBtn = MakeRefreshButton((s, e) => RefreshPotaSota(), "Refresh activator spots now");
             refreshBtn.Dock = DockStyle.Right;
             // Optional (2026-10-04): the park the selected activator's NEXT logged contact is
             // credited to (SIG_INFO). Nothing is chosen for you, and logging never waits for it.
             var chooseBtn = new Button { Text = "Choose Park", AccessibleName = "Choose this park for the station", Size = new Size(100, 24), Dock = DockStyle.Right };
             chooseBtn.Click += (s, e) => ChooseSelectedPark();
-            var orderBtn = MakeRowOrderButton("pota", SpotRows.Pota, "POTA and SOTA Row Order", () => _potaFields, f => _potaFields = f, RefreshPotaSota);
+            var orderBtn = MakeRowOrderButton("pota", SpotRows.Pota, "POTA, SOTA and WWFF Row Order", () => _potaFields, f => _potaFields = f, RefreshPotaSota);
             var prepareBtn = MakePrepareButton(() =>
             {
                 var spot = ShownRecord(_potaList, _potaList.SelectedIndex) as OtaSpot;
@@ -410,8 +450,11 @@ namespace WSJTX_Controller
             bottom.Controls.Add(refreshBtn);
 
             page.Controls.Add(_potaList);
+            page.Controls.Add(top);
             page.Controls.Add(bottom);
-            _pageOrder[page] = new Control[] { _potaList, orderBtn, prepareBtn, chooseBtn, refreshBtn, _potaStatusLabel };
+            var order = new List<Control>(OtaProgramNames.Select(p => (Control)_otaProgramCbs[p]));
+            order.AddRange(new Control[] { _potaList, orderBtn, prepareBtn, chooseBtn, refreshBtn, _potaStatusLabel });
+            _pageOrder[page] = order.ToArray();
             return page;
         }
 
@@ -602,6 +645,7 @@ namespace WSJTX_Controller
             _potaInFlight = true;
             string band = _currentBand?.Invoke();
             var tags = _activeAwardTags?.Invoke();
+            var programs = new HashSet<string>(OtaProgramNames.Where(p => !_otaProgramCbs.TryGetValue(p, out var cb) || cb.Checked), StringComparer.OrdinalIgnoreCase);
             System.Threading.Tasks.Task.Run(() =>
             {
                 var result = _client.GetOtaSpots(out string error);
@@ -616,6 +660,7 @@ namespace WSJTX_Controller
                     {
                         foreach (var spot in result.Spots)
                         {
+                            if (!programs.Contains(spot.Program ?? "")) continue;
                             // Judged on the SPOT's band and the activation's own place (SpotRows),
                             // never the radio's band or the activator's home state.
                             potaRows.Add(SpotRows.PotaRow(spot, NotesFor(spot), _potaFields, FormatAge(spot.SpotTimeUnix)));
@@ -972,7 +1017,30 @@ namespace WSJTX_Controller
             };
             _heardWindowCb.Items.AddRange(new object[] { "Last 15 minutes", "Last 30 minutes" });
             _heardWindowCb.SelectedIndex = 0;
-            _heardWindowCb.SelectedIndexChanged += (s, e) => RefreshWhoHearsMe();
+            // Picking a time window leaves Start fresh; the "Since" item is Start fresh itself.
+            _heardWindowCb.SelectedIndexChanged += (s, e) =>
+            {
+                if (_heardWindowSetting) return;
+                if (_heardWindowCb.SelectedIndex < 2 && _host2.HeardSince?.Invoke() != null) _host2.SetHeardSince?.Invoke(null);
+                else RefreshWhoHearsMe();
+            };
+            // Nexus's own four orders for this list (features/getoutSort), saved per profile.
+            _heardSortCb = new ComboBox
+            {
+                Dock = DockStyle.Right,
+                Width = 130,
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                AccessibleName = "Sort by",
+                TabIndex = 2,
+            };
+            _heardSortCb.Items.AddRange(HeardSortLabels);
+            int sortIdx = Array.IndexOf(HeardSortKeys, _host2.HeardSort?.Invoke() ?? "");
+            _heardSortCb.SelectedIndex = sortIdx < 0 ? 0 : sortIdx;
+            _heardSortCb.SelectedIndexChanged += (s, e) =>
+            {
+                _host2.SaveHeardSort?.Invoke(HeardSortKeys[Math.Max(0, _heardSortCb.SelectedIndex)]);
+                RefreshWhoHearsMe();
+            };
             _heardSummaryBox = new TextBox
             {
                 Dock = DockStyle.Fill,
@@ -987,23 +1055,29 @@ namespace WSJTX_Controller
             };
             top.Controls.Add(_heardSummaryBox);
             top.Controls.Add(_heardWindowCb);
+            top.Controls.Add(_heardSortCb);
 
             _heardList = MakeListBox("Stations list");
-            _heardList.TabIndex = 2;
+            _heardList.TabIndex = 3;
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
             _heardStatusLabel = MakeStatusBox();
             var refreshBtn = MakeRefreshButton((s, e) => RefreshWhoHearsMe(), "Refresh who hears me now");
             refreshBtn.Dock = DockStyle.Right;
             var orderBtn = MakeRowOrderButton("heard", SpotRows.Heard, "Who Hears Me Row Order", () => _heardFields, f => _heardFields = f, RefreshWhoHearsMe);
+            // Start fresh (Nexus 1.22): count only reports from now on -- after an antenna change.
+            var freshBtn = new Button { Text = "Start fresh", AccessibleName = "Start fresh", AutoSize = true, Dock = DockStyle.Right };
+            freshBtn.Click += (s, e) => _host2.SetHeardSince?.Invoke(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
             bottom.Controls.Add(_heardStatusLabel);
             bottom.Controls.Add(orderBtn);
+            bottom.Controls.Add(freshBtn);
             bottom.Controls.Add(refreshBtn);
 
             page.Controls.Add(_heardList);
             page.Controls.Add(top);
             page.Controls.Add(bottom);
-            _pageOrder[page] = new Control[] { _heardSummaryBox, _heardWindowCb, _heardList, orderBtn, refreshBtn, _heardStatusLabel };
+            _pageOrder[page] = new Control[] { _heardSummaryBox, _heardWindowCb, _heardSortCb, _heardList, freshBtn, orderBtn, refreshBtn, _heardStatusLabel };
+            ShowHeardSince();
             return page;
         }
 
@@ -1012,9 +1086,70 @@ namespace WSJTX_Controller
         // never shown as 0. internal: JimmyTests exercises it.
         internal static string FormatHeardMeRow(HeardMe h) => SpotRows.HeardRow(h, null, FormatAgeSecs(h.AgeSecs));
 
+        // Who Hears Me's sort: Nexus's own keys and orders (ui/src/features/getoutSort.ts).
+        internal static readonly string[] HeardSortKeys = { "distance", "call", "newest", "snr" };
+        private static readonly object[] HeardSortLabels = { "Distance", "Callsign", "Newest", "Strongest signal" };
+
+        // Nexus's own rules: ties go most distant first, then by call, so a refresh never shuffles
+        // equal rows; a report with no SNR sorts after every one with one.
+        internal static List<HeardMe> SortHeard(IEnumerable<HeardMe> reports, string key)
+        {
+            int ByCall(HeardMe a, HeardMe b) => string.CompareOrdinal(a.Call ?? "", b.Call ?? "");
+            int ByDistance(HeardMe a, HeardMe b) => b.Km != a.Km ? b.Km.CompareTo(a.Km) : ByCall(a, b);
+            Comparison<HeardMe> cmp;
+            switch (key)
+            {
+                case "call": cmp = (a, b) => ByCall(a, b) != 0 ? ByCall(a, b) : b.Km.CompareTo(a.Km); break;
+                case "newest": cmp = (a, b) => a.AgeSecs != b.AgeSecs ? a.AgeSecs.CompareTo(b.AgeSecs) : ByDistance(a, b); break;
+                case "snr":
+                    cmp = (a, b) =>
+                    {
+                        if (a.Snr == null || b.Snr == null)
+                            return a.Snr != null ? -1 : b.Snr != null ? 1 : ByDistance(a, b);
+                        return a.Snr != b.Snr ? b.Snr.Value.CompareTo(a.Snr.Value) : ByDistance(a, b);
+                    };
+                    break;
+                default: cmp = ByDistance; break;
+            }
+            var list = reports.ToList();
+            // List.Sort is not stable; every order above ends by call, so equal rows never swap.
+            list.Sort(cmp);
+            return list;
+        }
+
+        // The Start fresh time as said: "14:32 UTC" (or the operator's chosen zone).
+        internal static string SinceText(long sinceUnix) => SpaceWeatherAlerts.TimeText(sinceUnix);
+
+        // The main window's Start fresh time changed (this tab's button, or the hotkey).
+        internal void HeardSinceChanged()
+        {
+            ShowHeardSince();
+            RefreshWhoHearsMe();
+        }
+
+        // The time window list shows Start fresh as its third item, "Since 14:32 UTC".
+        private void ShowHeardSince()
+        {
+            if (_heardWindowCb == null) return;
+            long? since = _host2.HeardSince?.Invoke();
+            _heardWindowSetting = true;
+            try
+            {
+                while (_heardWindowCb.Items.Count > 2) _heardWindowCb.Items.RemoveAt(2);
+                if (since != null)
+                {
+                    _heardWindowCb.Items.Add("Since " + SinceText(since.Value));
+                    _heardWindowCb.SelectedIndex = 2;
+                }
+                else if (_heardWindowCb.SelectedIndex < 0)
+                    _heardWindowCb.SelectedIndex = 0;
+            }
+            finally { _heardWindowSetting = false; }
+        }
+
         internal static string FormatHeardMeSummary(GettingOutResult r)
         {
-            string window = $"in the last {r.WindowMinutes} minutes";
+            string window = r.SinceUnix != null ? "since " + SinceText(r.SinceUnix.Value) : $"in the last {r.WindowMinutes} minutes";
             if (r.Count == 0) return $"No reports of your signal {window}.";
             string who = r.Count == 1 ? "1 station heard you" : $"{r.Count} stations heard you";
             return r.MaxKm > 0 ? $"{who} {window}, furthest {r.MaxKm:N0} km." : $"{who} {window}.";
@@ -1199,16 +1334,19 @@ namespace WSJTX_Controller
         {
             if (_heardInFlight) return;
             _heardInFlight = true;
-            int minutes = _heardWindowCb.SelectedIndex == 1 ? 30 : 15;
+            long? since = _host2.HeardSince?.Invoke();
+            // Start fresh reads back as far as the kept reports go (an hour at most).
+            int minutes = since != null ? 60 : _heardWindowCb.SelectedIndex == 1 ? 30 : 15;
+            string sortKey = HeardSortKeys[Math.Max(0, _heardSortCb?.SelectedIndex ?? 0)];
             System.Threading.Tasks.Task.Run(() =>
             {
-                var result = _client.GetGettingOut(minutes, out string error);
+                var result = _client.GetGettingOut(minutes, out string error, since);
                 SafeBeginInvoke(() =>
                 {
                     _heardInFlight = false;
                     if (IsDisposed) return;
 
-                    var heard = error == null && result?.Reports != null ? result.Reports.ToList() : new List<HeardMe>();
+                    var heard = error == null && result?.Reports != null ? SortHeard(result.Reports, sortKey) : new List<HeardMe>();
                     SetRowsIfChanged(_heardList, heard.Select(h => SpotRows.HeardRow(h, _heardFields, FormatAgeSecs(h.AgeSecs))).ToList(),
                         heard.Cast<object>().ToList(), SpotId);
 
@@ -1490,7 +1628,7 @@ namespace WSJTX_Controller
                 var wx = result.Value;
                 rows.Add($"Solar flux {wx.Sfi:0}");
                 rows.Add(FormatSunspotRow(wx.Ssn, history));
-                rows.Add($"K index {wx.Kp:0.#}");
+                rows.Add(FormatKpRow(wx.Kp, result.KpMeasured));
                 rows.Add($"A index {wx.AIndex:0}");
                 rows.Add(FormatXrayRow(result));
                 rows.Add(result.MufNow.HasValue
@@ -1510,11 +1648,35 @@ namespace WSJTX_Controller
                     rows.Add("Radiation storm " + why);
                 }
             }
+            // What is happening now (2026-11-09): the same words the announcements use.
+            if (error == null && result?.SpaceNow != null)
+            {
+                long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                if (result.SpaceNow.Flare != null) rows.Add(SpaceWeatherAlerts.FlareSentence(result.SpaceNow.Flare));
+                if (result.SpaceNow.Protons != null) rows.Add(SpaceWeatherAlerts.ProtonsSentence(result.SpaceNow.Protons));
+                if (result.SpaceNow.Watch != null) rows.Add(SpaceWeatherAlerts.WatchSentence(result.SpaceNow.Watch, nowUnix));
+            }
             var (bz, speed, age) = FormatSolarWind(wind, windError);
             rows.Add("Solar wind Bz " + bz);
             rows.Add("Solar wind " + speed);
             rows.Add("Solar wind " + age);
             return rows;
+        }
+
+        // The K index as Nexus 1.23 says it: NOAA's measured three-hour figure with its period
+        // while that period ended within the last three hours, else the one-minute estimate.
+        internal static string FormatKpRow(float estimate, KpMeasured measured)
+        {
+            if (measured == null) return $"K index {estimate:0.#}, estimated";
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var zone = DisplayTime.Zone;
+            string Hour(long unix)
+            {
+                var utc = DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime;
+                return TimeZoneInfo.ConvertTimeFromUtc(utc, zone).ToString("HH:mm", inv);
+            }
+            var toUtc = DateTimeOffset.FromUnixTimeSeconds(measured.ToUnix).UtcDateTime;
+            return $"K index {measured.Kp.ToString("0.#", inv)}, measured {Hour(measured.FromUnix)} to {Hour(measured.ToUnix)} {DisplayTime.Abbreviation(toUtc, zone)}";
         }
 
         // Nexus leaves the current reading's sunspot number empty (its desktop fills it from a

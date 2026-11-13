@@ -1,5 +1,5 @@
 diff --git a/src/inbox.rs b/src/inbox.rs
-index 87c8995..c34f71f 100644
+index 87c8995b4..c34f71ffb 100644
 --- a/src/inbox.rs
 +++ b/src/inbox.rs
 @@ -114,7 +114,17 @@ impl Inbox {

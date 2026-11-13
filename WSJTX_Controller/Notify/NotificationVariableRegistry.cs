@@ -171,6 +171,21 @@ namespace WSJTX_Controller
             {
                 new NotificationVariable("Detail", "Why the connection was considered lost, if known."),
             },
+            [NotificationEventType.SpaceWeatherStormWatch] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Level", "NOAA's highest storm level in the watch, e.g. \"G2\"."),
+                new NotificationVariable("When", "When it is expected, e.g. \"expected tomorrow\" or \"in force until Saturday\"."),
+            },
+            [NotificationEventType.SpaceWeatherFlare] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Class", "The flare's X-ray class, e.g. \"M5\" or \"X1.2\"."),
+                new NotificationVariable("Effect", "What it does on daylight paths, e.g. \"20 meters and lower fading on daylight paths\"."),
+                new NotificationVariable("Until", "When HF is expected to recover, e.g. \"14:50 UTC\"."),
+            },
+            [NotificationEventType.SpaceWeatherProtons] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Level", "NOAA's radiation storm level, e.g. \"S1\"."),
+            },
             [NotificationEventType.AutoTxResume] = new List<NotificationVariable>
             {
                 new NotificationVariable("Callsign", "The station Jimmy has automatically resumed working."),

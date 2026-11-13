@@ -1,23 +1,23 @@
 diff --git a/src/slot.rs b/src/slot.rs
-index 8420c79..1af962a 100644
+index 36bc648f6..6ceac0073 100644
 --- a/src/slot.rs
 +++ b/src/slot.rs
-@@ -388,8 +388,16 @@ pub(crate) fn apply_tx_dial_shift(eng: &mut Engine, rig: &mut Rig) -> SplitApply
-             // point here is the MODE — sending a width would reach across and reset the filter
-             // the operator set on the TX VFO, which is the shape of the very bug #67 was about.
-             // AFTER the split enable above: `X` addresses the TX VFO, so it has to exist first.
+@@ -466,7 +466,17 @@ pub(crate) fn apply_tx_dial_shift(eng: &mut Engine, rig: &mut Rig) -> SplitApply
+             // first once per session; here it is every time split is not held, because a TX VFO
+             // that exists only in split refuses `I` and `X` until `S 1` (Nexus's own Flex client
+             // makes its split slice there), so after a release the next over would never key.
 -            let md = eng.rig_mode_effective();
--            let _ = rig.set_split_mode(&md, -1);
 +            //
 +            // ⚠️ JIMMY COMPAT (see EngineHost/nexus-compat/README.md): "Do not set mode" (WSJT-X
 +            // "Mode: None") gates the TX-VFO mode set TOO. `rig_mode_effective()` already
-+            // returns "" under `dont_set_mode` (and `set_split_mode` no-ops on ""), but the
-+            // gate is explicit here so the Rig-split path can never regress that on its own —
-+            // and only the MODE set is gated; the frequency split above still runs.
-+            if !eng.settings().dont_set_mode {
-+                let md = eng.rig_mode_effective();
-+                let _ = rig.set_split_mode(&md, -1);
-+            }
-             SplitApply {
-                 fake_it_restore: None,
-                 fake_it_tx_dial: None,
++            // returns "" under `dont_set_mode` (and `write_rig_split` sends no mode for ""), but
++            // the gate is explicit here so the Rig-split path can never regress that on its own —
++            // and only the MODE is gated; the frequency split still runs.
++            let md = if eng.settings().dont_set_mode {
++                String::new()
++            } else {
++                eng.rig_mode_effective()
++            };
+             let (sent, vfo_b_written) =
+                 write_rig_split(rig, dial, tx_dial, &md, split_writes_budget_ms(rig));
+             // A refused over is let go of at the loop's next quiet point

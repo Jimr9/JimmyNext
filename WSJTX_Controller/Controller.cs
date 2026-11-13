@@ -389,6 +389,11 @@ namespace WSJTX_Controller
         // the first start and then weekly; until it lands, US state comes from the grid as before.
         public bool             fccUlsEnabled           = true;
         private System.Windows.Forms.Timer _lookupDataTimer;   // the 6-hourly lookup data check
+        // Space-weather announcements (2026-11-09): EngineHost's SPACE_WX is a cache read, asked
+        // every two minutes; SpaceWeatherAlerts says each flare / proton event / watch once.
+        private System.Windows.Forms.Timer _spaceWeatherTimer;
+        private readonly SpaceWeatherAlerts _spaceWeatherAlerts = new SpaceWeatherAlerts();
+        private bool _spaceWeatherInFlight;
 
         private bool formLoaded = false;
         private HelpDlg helpDlg = null;
@@ -1415,6 +1420,10 @@ namespace WSJTX_Controller
             _lookupDataTimer = new System.Windows.Forms.Timer { Interval = 6 * 60 * 60 * 1000 };
             _lookupDataTimer.Tick += (s, e) => lookupManager?.StartBackgroundRefreshIfNeeded();
             _lookupDataTimer.Start();
+
+            _spaceWeatherTimer = new System.Windows.Forms.Timer { Interval = 2 * 60 * 1000 };
+            _spaceWeatherTimer.Tick += (s, e) => CheckSpaceWeather();
+            _spaceWeatherTimer.Start();
 
             // Loads every .ini file from the RuleDefinitions folder (awards engine).
             // A bad or missing folder must never block startup.
@@ -3220,7 +3229,7 @@ namespace WSJTX_Controller
             {
                 if (iniFile == null) return;
                 Radio.SaveLastTxLevelToIni(iniFile);
-                Radio.SaveTxLevelByBandToIni(iniFile);
+                Radio.SaveFtDriveToIni(iniFile);
             }
             catch { }
         }
@@ -3936,6 +3945,19 @@ namespace WSJTX_Controller
                 return wsjtxClient.ReportStationWatchStatus();
             }
 
+            if (keyData == hotkeyConfig[HotkeyAction.PathToStation] && hotkeyConfig[HotkeyAction.PathToStation] != Keys.None)
+            {
+                SayPathToSelectedStation();
+                return true;
+            }
+
+            if (keyData == hotkeyConfig[HotkeyAction.WhoHearsMeStartFresh] && hotkeyConfig[HotkeyAction.WhoHearsMeStartFresh] != Keys.None)
+            {
+                WhoHearsMeStartFresh();
+                ShowMessage(Wording.Get("Msg.HeardStartFresh"), false);
+                return true;
+            }
+
             if (keyData == hotkeyConfig[HotkeyAction.TuneMode])
             {
                 return wsjtxClient.ToggleTuningProcess();
@@ -4507,6 +4529,109 @@ namespace WSJTX_Controller
             return ParseRowOrder(iniFile?.Read(SpotRowOrderKey(list)), set.All) ?? new List<string>(set.Defaults);
         }
         internal void SaveSpotRowOrder(string list, List<string> fields) => iniFile?.Write(SpotRowOrderKey(list), string.Join(",", fields));
+        // Path to Selected Station (2026-11-09): Nexus's path model to the selected station on the
+        // current band, said in one line. The model takes well under a second; it runs off the UI
+        // thread. Nothing is changed -- the radio, the antenna and transmit are left alone.
+        internal void SayPathToSelectedStation()
+        {
+            string call = ResolveFocusedOrSelectedCall();
+            if (string.IsNullOrEmpty(call)) { ShowMessage(Wording.Get("Msg.PathNoStation"), false); return; }
+            string grid = wsjtxClient?.GridHeardFrom(call);
+            if (string.IsNullOrEmpty(grid)) { ShowMessage(Wording.Fill("Msg.PathNoGrid", ("Call", call)), false); return; }
+            string band = wsjtxClient?.CurrentBandStr ?? "20m";
+            bool full = pathModelFull;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                var r = new ExternalDataClient().GetPathTo(grid, band, full, out string error);
+                string said = error != null || r == null ? "Path not available: " + (error ?? "no answer.")
+                    : r.Error != null ? "Path not available: " + r.Error + "."
+                    : PathSentence(call, r);
+                SafeBeginInvoke(() => ShowMessage(said, false));
+            });
+        }
+
+        // The model's call in words: the route it favours this hour (or the short path when it
+        // makes none), that route's heading, and the band's day on that route.
+        internal static string PathSentence(string call, PathToResult r)
+        {
+            bool longWay = r.Verdict == "long";
+            string route;
+            switch (r.Verdict)
+            {
+                case "short":   route = "short path " + (r.Confidence ?? "likely"); break;
+                case "long":    route = "long path " + (r.Confidence ?? "likely"); break;
+                case "either":  route = "either path"; break;
+                case "unknown": route = "both paths closed now"; break;
+                default:        route = "short path"; break;
+            }
+            string work = longWay ? r.LongWorkability : r.Workability;
+            string window = WindowWords(longWay ? r.LongWindow : r.Window);
+            string day = string.IsNullOrEmpty(window) ? $"{work ?? "No"} opening today" : $"{work}, best {window}";
+            if (string.IsNullOrEmpty(work)) day = "No outlook for this band";
+            string heading = ((int)Math.Round(longWay ? r.LongBearingDeg : r.ShortBearingDeg)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string said = Wording.Fill("Msg.Path", ("Call", call), ("Band", SpaceWeatherAlerts.BandWords(r.Band)),
+                ("Route", route), ("Heading", heading), ("Day", day));
+            if (!r.MeasuredSpaceWeather) said += " Space weather not yet read.";
+            return said;
+        }
+
+        // Nexus's window ("1400–1700Z", "~1015Z greyline", "—") as said: "1400 to 1700 UTC".
+        internal static string WindowWords(string window)
+        {
+            window = (window ?? "").Trim();
+            if (window.Length == 0 || window == "—" || window == "-") return "";
+            return window.Replace("–", " to ").Replace("~", "about ").Replace("Z", " UTC").Replace("  ", " ").Trim();
+        }
+
+        // Options > General "Path prediction: full ITU model" (2026-11-09): Nexus's P.533 engine,
+        // which models the long path; off = Nexus's quick model, short path only. Saved per profile.
+        internal bool pathModelFull
+        {
+            get => iniFile == null || !iniFile.KeyExists("pathModelFull") || iniFile.Read("pathModelFull") != "False";
+            set => iniFile?.Write("pathModelFull", value ? "True" : "False");
+        }
+
+        // One SPACE_WX read off the UI thread; what is new is published on it. Nothing while no
+        // engine runs (test mode included) -- the reply would only say there is no engine.
+        private void CheckSpaceWeather()
+        {
+            if (_spaceWeatherInFlight || TestModeGuard.IsTestMode) return;
+            var client = nativeEngineClient;
+            if (client == null || !client.Running) return;
+            _spaceWeatherInFlight = true;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                SpaceWxResult result = null;
+                try { result = new ExternalDataClient().GetSpaceWx(out _); } catch { }
+                SafeBeginInvoke(() =>
+                {
+                    _spaceWeatherInFlight = false;
+                    if (result == null) return;
+                    foreach (var ev in _spaceWeatherAlerts.Check(result.SpaceNow, DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
+                        wsjtxClient?.Notify?.Publish(ev);
+                });
+            });
+        }
+
+        // Who Hears Me's Start fresh (2026-11-09): reports of your signal before this time (Unix
+        // seconds) are left out -- Nexus's own `since`. This session only; null = the plain time
+        // window. Set by the tab's button or its hotkey; the tab follows WhoHearsMeSinceChanged.
+        internal long? whoHearsMeSinceUnix;
+        internal event Action WhoHearsMeSinceChanged;
+        internal void WhoHearsMeStartFresh() => SetWhoHearsMeSince(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        internal void SetWhoHearsMeSince(long? since)
+        {
+            whoHearsMeSinceUnix = since;
+            WhoHearsMeSinceChanged?.Invoke();
+        }
+
+        // Who Hears Me's sort (2026-11-09): Nexus's own four orders, saved per profile.
+        internal string WhoHearsMeSort
+        {
+            get => iniFile?.Read("whoHearsMeSort") ?? "";
+            set => iniFile?.Write("whoHearsMeSort", value ?? "");
+        }
+
         internal static string SpotRowOrderKey(string list) => list == "dx" ? "dxSpotsRowOrder" : list == "heard" ? "whoHearsMeRowOrder" : "potaSpotsRowOrder";
 
         public void RefreshLogbookWindowIfOpen()
@@ -4557,6 +4682,7 @@ namespace WSJTX_Controller
                 // added as a belt-and-suspenders way to ensure this closes with Jimmy, but
                 // Controller_FormClosing already does that explicitly via _logbookWindow?.Close()
                 // below, so Owner was redundant for that and only cost the Alt+Tab behavior).
+                _logbookWindow.UploadToLotw = ids => wsjtxClient?.UploadLotwContacts(ids);
                 _logbookWindow.FormClosed += (s, e) => _logbookWindow = null;
                 _logbookWindow.Show();
             }
@@ -4588,6 +4714,12 @@ namespace WSJTX_Controller
                         IsWanted = call => wsjtxClient != null && !string.IsNullOrEmpty(call) && wsjtxClient.wantedCalls.Contains(call),
                         RowOrder = SpotRowOrder,
                         SaveRowOrder = SaveSpotRowOrder,
+                        HeardSince = () => whoHearsMeSinceUnix,
+                        SetHeardSince = SetWhoHearsMeSince,
+                        HeardSort = () => WhoHearsMeSort,
+                        SaveHeardSort = v => WhoHearsMeSort = v,
+                        OtaPrograms = () => iniFile != null && iniFile.KeyExists("otaPrograms") ? iniFile.Read("otaPrograms") : null,
+                        SaveOtaPrograms = v => iniFile?.Write("otaPrograms", v ?? ""),
                         PlanSpot = (call, spotMode, freqKhz) => wsjtxClient?.PlanSpot(call, spotMode, freqKhz),
                         PrepareWouldInterrupt = () => wsjtxClient?.PrepareWouldInterrupt(),
                         PrepareMovesRadio = plan => wsjtxClient == null || wsjtxClient.PrepareMovesRadio(plan),
@@ -4596,7 +4728,10 @@ namespace WSJTX_Controller
                 // Deliberately no Owner assignment -- see the matching comment on
                 // _logbookWindow's Show() call above; Controller_FormClosing already closes
                 // this explicitly via _otaSpotsWindow?.Close().
-                _otaSpotsWindow.FormClosed += (s, e) => _otaSpotsWindow = null;
+                var spotsWindow = _otaSpotsWindow;
+                Action sinceChanged = () => SafeBeginInvoke(() => { if (!spotsWindow.IsDisposed) spotsWindow.HeardSinceChanged(); });
+                WhoHearsMeSinceChanged += sinceChanged;
+                _otaSpotsWindow.FormClosed += (s, e) => { WhoHearsMeSinceChanged -= sinceChanged; _otaSpotsWindow = null; };
                 _otaSpotsWindow.Show();
             }
             catch (Exception ex)
@@ -5626,7 +5761,8 @@ namespace WSJTX_Controller
                     () => SafeBeginInvoke(() => OnNativeEngineUnexpectedExit(client)),
                     decodeSnapshot, pskReporterSnapshot,
                     dxClusterAddress, sessionToken, repeatLimitSnapshot, workingFrequenciesSnapshot,
-                    NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, logbookOnly, licenseClassSnapshot, wsjtxOutSnapshot);
+                    NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, logbookOnly, licenseClassSnapshot, wsjtxOutSnapshot,
+                    NativeEngine.LogSpaceWeather);
                 if (!ok && nativeEngineClient == client)
                 {
                     // Promoted from a raw ShowMessage (2026-08-19, notification-system-
@@ -5744,6 +5880,8 @@ namespace WSJTX_Controller
                 return false;
             if (!client.SetClockCheckLive(NativeEngine.ClockCheck))
                 return false;
+            if (!client.SetLogSpaceWeatherLive(NativeEngine.LogSpaceWeather))
+                return false;
             ApplyRadioMasterAudioLevels();
             wsjtxClient?.DebugOutput("[NativeEngine] radio/audio settings and time check applied live (no restart)");
             return true;
@@ -5751,6 +5889,17 @@ namespace WSJTX_Controller
 
         // Options > General's internet time check, on the running engine. False: none running,
         // or it did not accept -- the caller restarts the engine as before.
+        // Options > Logbook's "Save space weather with each contact", on the running engine. False:
+        // none running, or it did not accept -- the caller restarts the engine.
+        public bool TryApplyLogSpaceWeatherLive()
+        {
+            if (TestModeGuard.IsTestMode) return false;
+            var client = nativeEngineClient;
+            if (client == null || !client.Running || !client.SetLogSpaceWeatherLive(NativeEngine.LogSpaceWeather)) return false;
+            wsjtxClient?.DebugOutput($"[NativeEngine] space weather with each contact {(NativeEngine.LogSpaceWeather ? "on" : "off")} applied live");
+            return true;
+        }
+
         public bool TryApplyClockCheckLive()
         {
             if (TestModeGuard.IsTestMode) return false;

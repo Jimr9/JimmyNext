@@ -96,10 +96,23 @@ namespace WSJTX_Controller
             return true;
         }
 
+        // The Logbook's "Upload Selected to LoTW" (2026-11-09): the same TQSL upload as Alt+U, for
+        // the selected contacts still owed to LoTW (each signed with its own recorded location).
+        internal void UploadLotwContacts(List<int> rowIds)
+        {
+            string blocked = LogbookBooks.UploadsBlockedMessage;
+            if (blocked != null) { ctrl.ShowUploadStatus(blocked, false); return; }
+            if (!ctrl.lotwUploadEnabled) { ctrl.ShowUploadStatus("LoTW upload is off in Options, Logbooks and Lookups.", false); return; }
+            var keys = NexusLogbook.Read(v => v.DedupKeysForIds(rowIds), new HashSet<string>());
+            if (keys.Count == 0) { ctrl.ShowUploadStatus("Those contacts are not in the logbook view; search again.", false); return; }
+            ctrl.ShowUploadStatus("Uploading to LoTW...", false);
+            RunTqslUpload(keys);
+        }
+
         // Self-sufficiency plan, Phase 3: Jimmy's own TQSL invocation, an alternative to
         // StartUploadLotw's WM8Q sub-command 16 path. Runs in the background like
         // RunUploadCatchUp -- TQSL itself can take several seconds to sign and upload.
-        private void RunTqslUpload()
+        private void RunTqslUpload(ISet<string> onlyKeys = null)
         {
             Task.Run(async () =>
             {
@@ -108,7 +121,7 @@ namespace WSJTX_Controller
                     using (ILogbookService db = LogbookFactory.Open())
                     {
                         var client = new TqslUploadClient();
-                        bool ok = await client.UploadPendingAsync(ctrl.tqslStationLocation, db).ConfigureAwait(false);
+                        bool ok = await client.UploadPendingAsync(ctrl.tqslStationLocation, db, onlyKeys).ConfigureAwait(false);
                         if (!ok)
                         {
                             DebugOutput($"{Time()} TQSL upload failed: {client.LastError}");
@@ -134,7 +147,9 @@ namespace WSJTX_Controller
                             // null -- LastUploadedCount is then the real signed/uploaded count
                             // (or 0 if nothing was pending). Ambiguous codes 8/9/14 take the
                             // branch above with LastError set, so they never present a count.
-                            string msg = FormatLotwUploadCompleteMessage(client.LastUploadedCount);
+                            string msg = onlyKeys != null && client.LastUploadedCount == 0
+                                ? "Nothing sent: the selected contacts were already sent to LoTW."
+                                : FormatLotwUploadCompleteMessage(client.LastUploadedCount);
                             ctrl.BeginInvoke(new Action(() =>
                             {
                                 ctrl.ShowUploadStatus(msg, false);

@@ -665,6 +665,22 @@ namespace WSJTX_Controller
             : r.State == "gone" ? "That contact was removed -- refresh the list."
             : $"The logbook did not take the change ({r.State}{(string.IsNullOrEmpty(r.Why) ? "" : ": " + r.Why)}).";
 
+        // Paper QSL cards on these contacts (2026-11-09), through Nexus's own operations
+        // (EngineHost LOG_QSL_CARD): queue, unqueue, or sent by "bureau" / "direct". How many took.
+        public int SetPaperCard(IEnumerable<int> ids, string action, string via = null)
+        {
+            int n = 0;
+            foreach (int id in ids.Distinct())
+            {
+                var (row, error) = NexusRowFor(id);
+                if (row == null) continue;
+                var reply = Client.QslCard(row.Id, row.EditKey, action, via);
+                if (reply.State == "saved") n++;
+            }
+            NexusLogbook.Refresh();
+            return n;
+        }
+
         public int DeleteQsos(IEnumerable<int> ids)
         {
             int n = 0;

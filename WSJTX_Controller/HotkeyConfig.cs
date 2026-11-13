@@ -83,6 +83,12 @@ namespace WSJTX_Controller
         // Prepare Station moved the radio; the operator has tuned and is ready for the station
         // to go onto Smart Mode (operator, 2026-10-13; WsjtxClient.Spots.cs).
         PreparedStationReady,
+        // Who Hears Me's Start fresh (2026-11-09): count only reports of your signal from now
+        // on -- after an antenna change, say. No default key.
+        WhoHearsMeStartFresh,
+        // Short or long path to the selected station and which way to beam, from Nexus's own
+        // path model (2026-11-09). No default key.
+        PathToStation,
     }
 
     public class HotkeyConfig
@@ -185,6 +191,8 @@ namespace WSJTX_Controller
             [HotkeyAction.StationWatchStatus]     = Keys.None,
             // Beside Alt+Shift+T, the tune key it follows.
             [HotkeyAction.PreparedStationReady]   = Keys.Alt | Keys.Shift | Keys.P,
+            [HotkeyAction.WhoHearsMeStartFresh]   = Keys.None,
+            [HotkeyAction.PathToStation]          = Keys.None,
         };
 
         public static readonly Dictionary<HotkeyAction, string> DisplayNames = new Dictionary<HotkeyAction, string>
@@ -249,6 +257,8 @@ namespace WSJTX_Controller
             [HotkeyAction.OpenSmartModeWindow]   = "Open Smart Mode Stations",
             [HotkeyAction.StationWatchStatus]    = "Report Station Watch Status",
             [HotkeyAction.PreparedStationReady]  = "Prepared Station Ready",
+            [HotkeyAction.WhoHearsMeStartFresh]  = "Who Hears Me Start Fresh",
+            [HotkeyAction.PathToStation]         = "Path to Selected Station",
         };
 
         // Actions that may be left unassigned (Keys.None) without triggering a validation error.
@@ -294,6 +304,9 @@ namespace WSJTX_Controller
             HotkeyAction.OpenSmartModeWindow,
             // Has a default, but may be left unassigned: Prepare Station again does the same.
             HotkeyAction.PreparedStationReady,
+            // No default key (2026-11-09).
+            HotkeyAction.WhoHearsMeStartFresh,
+            HotkeyAction.PathToStation,
         };
 
         private static readonly HashSet<Keys> ReservedKeys = new HashSet<Keys>

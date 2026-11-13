@@ -106,7 +106,8 @@ namespace WSJTX_Controller
         // Signs and uploads every QSO pending for "LOTW". Jimmy picks the contacts and the station
         // location for each (PlanBatches); since 2026-10-21 Nexus writes each batch's file from its
         // own contacts and records TQSL's result on them (EngineHost lotw_batch.rs).
-        public async Task<bool> UploadPendingAsync(string stationLocation, ILogbookService db)
+        // onlyKeys (2026-11-09, Upload Selected to LoTW): just these contacts, of those still owed.
+        public async Task<bool> UploadPendingAsync(string stationLocation, ILogbookService db, ISet<string> onlyKeys = null)
         {
             LastError = null;
             LastUploadedCount = null;
@@ -140,6 +141,7 @@ namespace WSJTX_Controller
             // every genuinely pending QSO is at least offered to TQSL each run, not just
             // whichever 1000 happen to sort oldest.
             var pending = db.GetPendingUploads("LOTW", limit: 10000);
+            if (onlyKeys != null) pending = pending.Where(q => onlyKeys.Contains(q.DedupKey ?? "")).ToList();
             if (pending.Count == 0)
             {
                 LastUploadedCount = 0;             // unambiguous: there was nothing to upload

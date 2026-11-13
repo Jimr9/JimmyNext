@@ -276,6 +276,30 @@ namespace WSJTX_Controller
             // off-focus alert) because a blind operator needs to know transmission restarted on
             // its own; spoken immediately, whether or not other routine speech is pending, but
             // NOT Critical -- it is not a safety fault. Only ever fires with a QSO in progress.
+            // Space weather (2026-11-09): once per watch / flare / proton event (SpaceWeatherAlerts),
+            // never over a decode -- after the receive period. On by default (operator decision).
+            [NotificationEventType.SpaceWeatherStormWatch] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "Geomagnetic storm watch, {Level}, {When}.",
+                SpeakWhen = SpeakWhen.AfterRx,
+            },
+            [NotificationEventType.SpaceWeatherFlare] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "{Class} solar flare, {Effect}, until about {Until}.",
+                SpeakWhen = SpeakWhen.AfterRx,
+            },
+            [NotificationEventType.SpaceWeatherProtons] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "Solar proton event, {Level}, polar paths absorbed.",
+                SpeakWhen = SpeakWhen.AfterRx,
+            },
+
             [NotificationEventType.AutoTxResume] = new NotificationPolicy
             {
                 Enabled = true,
@@ -528,6 +552,9 @@ namespace WSJTX_Controller
             [NotificationEventType.RadioCatRecovered] = "Radio CAT link recovered",
             [NotificationEventType.RadioCatLost] = "Radio CAT link lost",
             [NotificationEventType.AutoTxResume] = "Automatic transmit resume",
+            [NotificationEventType.SpaceWeatherStormWatch] = "Geomagnetic storm watch",
+            [NotificationEventType.SpaceWeatherFlare] = "Solar flare",
+            [NotificationEventType.SpaceWeatherProtons] = "Solar proton event",
             [NotificationEventType.StationWatchStarted] = "Station Watch started",
             [NotificationEventType.StationWatchStopped] = "Station Watch stopped",
             [NotificationEventType.StationWatchActivity] = "Station Watch target activity",

@@ -66,8 +66,84 @@ namespace WSJTX_Controller
         public int SScale { get; set; }
     }
 
+    // Nexus's own "now" facts (pathnow::space_now, 2026-11-09): absent when nothing is happening.
+    public class SpaceNow
+    {
+        public NowFlare Flare { get; set; }
+        public NowProtons Protons { get; set; }
+        public NowWatch Watch { get; set; }
+    }
+
+    // A flare at M1+: Out = the highest band out under the sun (10 dB or more), Weak = the highest
+    // weakened (1 dB or more), each "20m" or null; Recovery = when HF recovers.
+    public class NowFlare
+    {
+        public int R { get; set; }
+        public float XrayLong { get; set; }
+        public long XrayAt { get; set; }
+        public string Out { get; set; }
+        public string Weak { get; set; }
+        public NowRecovery Recovery { get; set; }
+    }
+
+    public class NowRecovery
+    {
+        public long At { get; set; }
+        public string Source { get; set; }   // "noaa" or "ruleOfThumb"
+    }
+
+    public class NowProtons
+    {
+        public int S { get; set; }
+        public float J10 { get; set; }
+        public long At { get; set; }
+    }
+
+    // A NOAA geomagnetic watch in force or ahead: G level, its first G1+ day's start and its
+    // last one's end (Unix seconds UTC), and NOAA's issue time.
+    public class NowWatch
+    {
+        public int G { get; set; }
+        public long From { get; set; }
+        public long To { get; set; }
+        public long Issued { get; set; }
+    }
+
+    // NOAA's measured three-hour Kp while its period ended within the last three hours (Nexus
+    // 1.23's rule); null = the Kp in Value is the one-minute estimate.
+    public class KpMeasured
+    {
+        public float Kp { get; set; }
+        public long FromUnix { get; set; }
+        public long ToUnix { get; set; }
+    }
+
+    // PATH_TO (2026-11-09): Nexus's path model to one station, both ways round. Verdict "short" |
+    // "long" | "either" | "unknown" (both closed), null when the model gave no route call (the quick
+    // model, or near the antipode). Window is Nexus's own, e.g. "1400–1700Z", or "—" for none.
+    public class PathToResult
+    {
+        public string Engine { get; set; }
+        public string Band { get; set; }
+        public double ShortBearingDeg { get; set; }
+        public double LongBearingDeg { get; set; }
+        public double ShortKm { get; set; }
+        public double LongKm { get; set; }
+        public bool LongModelled { get; set; }
+        public string Verdict { get; set; }
+        public string Confidence { get; set; }
+        public string Workability { get; set; }
+        public string Window { get; set; }
+        public string LongWorkability { get; set; }
+        public string LongWindow { get; set; }
+        public bool MeasuredSpaceWeather { get; set; }
+        public string Error { get; set; }
+    }
+
     public class SpaceWxResult
     {
+        public SpaceNow SpaceNow { get; set; }
+        public KpMeasured KpMeasured { get; set; }
         public SpaceWx Value { get; set; }
         public long? AgeSecs { get; set; }
         public string LastError { get; set; }
@@ -253,6 +329,7 @@ namespace WSJTX_Controller
         public int MaxKm { get; set; }
         public HeardMe[] Reports { get; set; } = Array.Empty<HeardMe>();
         public int WindowMinutes { get; set; }
+        public long? SinceUnix { get; set; }      // the Start fresh time, when one was asked for
         public int? CoveredMinutes { get; set; }   // set only when the kept reports don't reach back the whole window
         public bool Connected { get; set; }
         public long? LastEventAgeSecs { get; set; }
@@ -444,10 +521,20 @@ namespace WSJTX_Controller
             catch (Exception ex) { error = $"Could not parse {command} response: {ex.Message}"; return null; }
         }
 
-        public GettingOutResult GetGettingOut(int windowMinutes, out string error)
+        // Nexus's path model to the station at `grid` on `band` (a second or less of work).
+        public PathToResult GetPathTo(string grid, string band, bool fullModel, out string error)
         {
             error = null;
-            string json = SendCommand("GETTING_OUT " + windowMinutes, FastTimeoutMs);
+            string json = SendCommand($"PATH_TO {grid} {band} {(fullModel ? "p533" : "heuristic")}", 15_000);
+            if (json == null) { error = "No response from engine host."; return null; }
+            try { return JsonSerializer.Deserialize<PathToResult>(json, JsonOptions); }
+            catch (Exception ex) { error = $"Could not parse PATH_TO response: {ex.Message}"; return null; }
+        }
+
+        public GettingOutResult GetGettingOut(int windowMinutes, out string error, long? sinceUnix = null)
+        {
+            error = null;
+            string json = SendCommand("GETTING_OUT " + windowMinutes + (sinceUnix != null ? " since " + sinceUnix.Value : ""), FastTimeoutMs);
             if (json == null) { error = "No response from engine host."; return null; }
             try
             {

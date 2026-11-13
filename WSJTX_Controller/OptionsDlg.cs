@@ -45,6 +45,8 @@ namespace WSJTX_Controller
         private System.Windows.Forms.NumericUpDown rawMaxRowsNumeric;
         private System.Windows.Forms.NumericUpDown _maxQueuedCallsNumeric;
         private System.Windows.Forms.CheckBox _clockCheckCheckBox;
+        private System.Windows.Forms.CheckBox _logSpaceWeatherCheckBox;
+        private System.Windows.Forms.CheckBox _pathModelFullCheckBox;
         private System.Windows.Forms.NumericUpDown _maxCallQueueAgeNumeric;
         private System.Windows.Forms.CheckBox rawShowCqCheckBox;
         private System.Windows.Forms.CheckBox rawShowDirectedCheckBox;
@@ -531,6 +533,33 @@ namespace WSJTX_Controller
             };
             generalPanel.Controls.Add(_displayInZoneCheckBox);
 
+            // 2026-11-09: Nexus's own Settings.log_space_weather -- the solar flux, K index and
+            // (once NOAA has issued it) the day's A index saved with each new contact.
+            _logSpaceWeatherCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text           = "Save space weather with each contact",
+                AccessibleName = "Save space weather with each contact",
+                AutoSize       = true,
+                Location       = new System.Drawing.Point(10, 243),
+                TabIndex       = 9,
+                Checked        = ctrl.NativeEngine.LogSpaceWeather,
+                Font           = font,
+            };
+            generalPanel.Controls.Add(_logSpaceWeatherCheckBox);
+
+            // 2026-11-09: which of Nexus's path models Path to Selected Station uses.
+            _pathModelFullCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text           = "Path prediction uses the full ITU model, with long path",
+                AccessibleName = "Path prediction uses the full ITU model",
+                AutoSize       = true,
+                Location       = new System.Drawing.Point(10, 268),
+                TabIndex       = 10,
+                Checked        = ctrl.pathModelFull,
+                Font           = font,
+            };
+            generalPanel.Controls.Add(_pathModelFullCheckBox);
+
             // "Announce important notifications when focus is elsewhere" moved to
             // Options > Notifications > Global speech behaviour (2026-09-04) so all automatic-
             // speech behaviour is configured in one place. Same Controller setting / INI key.
@@ -819,6 +848,17 @@ namespace WSJTX_Controller
             {
                 ctrl.NativeEngine.ClockCheck = clockCheck;
                 if (!ctrl.TryApplyClockCheckLive()) ctrl.ApplyEngineMode();
+            }
+
+            // Space weather with each contact: live on a running engine; otherwise the next
+            // launch carries it (--log-space-wx). Never worth an engine restart.
+            if (_pathModelFullCheckBox != null) ctrl.pathModelFull = _pathModelFullCheckBox.Checked;
+
+            bool logSpaceWeather = _logSpaceWeatherCheckBox?.Checked ?? ctrl.NativeEngine.LogSpaceWeather;
+            if (logSpaceWeather != ctrl.NativeEngine.LogSpaceWeather)
+            {
+                ctrl.NativeEngine.LogSpaceWeather = logSpaceWeather;
+                ctrl.TryApplyLogSpaceWeatherLive();
             }
 
             ctrl.alwaysOnTop = udpOnTopCheckBox.Checked;
@@ -2420,13 +2460,13 @@ namespace WSJTX_Controller
 
             _radioRememberTxLevelPerBandCheckBox = new System.Windows.Forms.CheckBox
             {
-                Text = "Remember F11/F12 audio level per band",
+                Text = "Remember F11/F12 audio level per band and mode",
                 Checked = ctrl.Radio.RememberTxLevelPerBand,
                 AutoSize = true,
                 Location = new System.Drawing.Point(10, 145),
                 Font = font,
                 TabIndex = 3,
-                AccessibleName = "Remember F11 F12 audio level per band",
+                AccessibleName = "Remember F11 F12 audio level per band and mode",
             };
             _radioTxLevelGroupBox.Controls.Add(_radioRememberTxLevelPerBandCheckBox);
 
@@ -3972,6 +4012,9 @@ namespace WSJTX_Controller
                 NotificationEventType.SmartStartTargetAvailable,
                 NotificationEventType.SmartStartEngaged,
                 NotificationEventType.SmartStartWaiting,
+                NotificationEventType.SpaceWeatherStormWatch,
+                NotificationEventType.SpaceWeatherFlare,
+                NotificationEventType.SpaceWeatherProtons,
             };
 
             // ── B. Event list ────────────────────────────────────────────────────────────────
@@ -5219,10 +5262,14 @@ namespace WSJTX_Controller
             // (WsjtxClient.BandAudio.cs), never baked into the engine's own launch args, so no
             // restart is ever needed for this one to take effect.
             if (_radioAudioStepUpDown != null) ctrl.Radio.AudioStepDb = (double)_radioAudioStepUpDown.Value;
-            // Same live-read, no-restart-needed shape as AudioStepDb just above --
-            // WsjtxClient.BandAudio.cs's AudioLevel() and WsjtxClient.Direct.cs's band-change
-            // restore both read this directly off ctrl.Radio.
-            if (_radioRememberTxLevelPerBandCheckBox != null) ctrl.Radio.RememberTxLevelPerBand = _radioRememberTxLevelPerBandCheckBox.Checked;
+            // No restart needed: the engine does the remembering (Nexus 1.23), so a change is
+            // handed to it straight away (WsjtxClient.BandAudio.cs's DirectSendFtDriveMemory).
+            if (_radioRememberTxLevelPerBandCheckBox != null
+                && ctrl.Radio.RememberTxLevelPerBand != _radioRememberTxLevelPerBandCheckBox.Checked)
+            {
+                ctrl.Radio.RememberTxLevelPerBand = _radioRememberTxLevelPerBandCheckBox.Checked;
+                wsjtxClient?.DirectSendFtDriveMemory();
+            }
             // Same live-read, no-restart-needed shape -- WsjtxClient.BandAudio.cs's ReportPowerSwr()
             // (Alt+Q) reads this directly off ctrl.Radio on each press.
             if (_radioExplainMeterReadingsCheckBox != null) ctrl.Radio.ExplainMeterReadings = _radioExplainMeterReadingsCheckBox.Checked;
@@ -6142,9 +6189,11 @@ namespace WSJTX_Controller
             HotkeyAction.OpenSmartModeWindow,
             HotkeyAction.StationWatchStatus,
             HotkeyAction.LookupStation,
+            HotkeyAction.PathToStation,
             HotkeyAction.OpenLogbook,
             HotkeyAction.AddManualQso,
             HotkeyAction.OpenOtaSpots,
+            HotkeyAction.WhoHearsMeStartFresh,
             HotkeyAction.ResetWindowSize,
         };
 

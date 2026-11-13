@@ -278,8 +278,11 @@ namespace WSJTX_Controller
             string outputDevice, RadioSettings radio, DecodeSettings decode, bool pskreporter,
             string dxClusterAddress, string sessionToken, int? repeatLimit,
             List<WorkingFreqArg> workingFrequencies, int? tuneTimeoutSeconds, bool? clockCheck, bool radioAndAudio,
-            bool logbookOnly = false, string licenseClass = null, string wsjtxOut = null)
+            bool logbookOnly = false, string licenseClass = null, string wsjtxOut = null, bool? logSpaceWeather = null)
         {
+            // Launch-only settings that a running engine also takes live (like the time check):
+            // left out of the LaunchKey, so a profile switch keeps the engine and sends them live.
+            bool launching = radioAndAudio;
             var args = $"--mycall {mycall} --mygrid {mygrid} --jimmy-addr 127.0.0.1:{jimmyPort} --control-port {ControlPort}";
             if (radioAndAudio && !string.IsNullOrWhiteSpace(sessionToken))
                 args += $" --session-token {sessionToken}";
@@ -309,6 +312,10 @@ namespace WSJTX_Controller
             // Nexus's internet time check (NativeEngineSettings.ClockCheck, Options > General).
             if (clockCheck.HasValue && radioAndAudio)
                 args += clockCheck.Value ? " --clock-check on" : " --clock-check off";
+            // Options > Logbook "Save space weather with each contact" (NativeEngineSettings.
+            // LogSpaceWeather) -- a logbook-only engine logs contacts too, so not tied to radioAndAudio.
+            if (logSpaceWeather.HasValue && launching)
+                args += logSpaceWeather.Value ? " --log-space-wx on" : " --log-space-wx off";
             // Frequency-override authority split, 2026-08-24 -- see
             // WsjtxClient.BuildWorkingFrequencyEntries' own comment. Omitted entirely when
             // empty (no band customized), matching every other startup arg's "absent =
@@ -430,7 +437,8 @@ namespace WSJTX_Controller
                             bool? clockCheck = null,
                             bool logbookOnly = false,
                             string licenseClass = null,
-                            string wsjtxOut = null)
+                            string wsjtxOut = null,
+                            bool? logSpaceWeather = null)
         {
             LastError = null;
             try
@@ -474,7 +482,7 @@ namespace WSJTX_Controller
                 // (2026-08-18) not to remove. Do not treat this as leftover dead code in a future pass
                 // without re-checking that decision first.
                 var args = BuildArgs(mycall, mygrid, audioDevice, jimmyPort, outputDevice, radio, decode, pskreporter,
-                    dxClusterAddress, sessionToken, repeatLimit, workingFrequencies, tuneTimeoutSeconds, clockCheck, radioAndAudio: true, logbookOnly: logbookOnly, licenseClass: licenseClass, wsjtxOut: wsjtxOut);
+                    dxClusterAddress, sessionToken, repeatLimit, workingFrequencies, tuneTimeoutSeconds, clockCheck, radioAndAudio: true, logbookOnly: logbookOnly, licenseClass: licenseClass, wsjtxOut: wsjtxOut, logSpaceWeather: logSpaceWeather);
                 _sessionToken = sessionToken ?? "";
                 LogbookOnly = logbookOnly;
                 // What this engine was started with, less what can change live (radio, audio, the
@@ -826,6 +834,7 @@ namespace WSJTX_Controller
 
         // Nexus's internet time check on the running engine. True only on its "OK".
         public bool SetClockCheckLive(bool on) => SendControlLine("SET_CLOCK_CHECK " + (on ? "on" : "off"));
+        public bool SetLogSpaceWeatherLive(bool on) => SendControlLine("SET_LOG_SPACE_WX " + (on ? "on" : "off"));
 
         // The operator's licence class on the running engine, which stops transmitting first and
         // does not start again by itself. "" = no lockout. True only on its "OK".

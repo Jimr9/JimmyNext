@@ -21,8 +21,8 @@ namespace WSJTX_Controller
             Dictionary<string, WsjtxClient.ActiveAwardTag> activeAwardTags,
             string call, string state, string continent,
             Func<int> cqZoneLookup, Func<int> dxccLookup,
-            string wpxPrefix = null, string waeCountry = null)
-            => MatchSet(activeAwardTags, true, call, state, continent, cqZoneLookup, dxccLookup, wpxPrefix, waeCountry);
+            string wpxPrefix = null, string waeCountry = null, string iota = null)
+            => MatchSet(activeAwardTags, true, call, state, continent, cqZoneLookup, dxccLookup, wpxPrefix, waeCountry, iota);
 
         // Same matching logic as Match, against each active award's UnconfirmedSet (worked but
         // not confirmed) instead of its Set (never worked) -- backs the generalized "{Award}
@@ -34,15 +34,15 @@ namespace WSJTX_Controller
             Dictionary<string, WsjtxClient.ActiveAwardTag> activeAwardTags,
             string call, string state, string continent,
             Func<int> cqZoneLookup, Func<int> dxccLookup,
-            string wpxPrefix = null, string waeCountry = null)
-            => MatchSet(activeAwardTags, false, call, state, continent, cqZoneLookup, dxccLookup, wpxPrefix, waeCountry);
+            string wpxPrefix = null, string waeCountry = null, string iota = null)
+            => MatchSet(activeAwardTags, false, call, state, continent, cqZoneLookup, dxccLookup, wpxPrefix, waeCountry, iota);
 
         private static string MatchSet(
             Dictionary<string, WsjtxClient.ActiveAwardTag> activeAwardTags,
             bool needed,
             string call, string state, string continent,
             Func<int> cqZoneLookup, Func<int> dxccLookup,
-            string wpxPrefix, string waeCountry)
+            string wpxPrefix, string waeCountry, string iota)
         {
             if (activeAwardTags == null || activeAwardTags.Count == 0) return null;
             if (string.IsNullOrEmpty(call)) return null;
@@ -94,6 +94,12 @@ namespace WSJTX_Controller
 
                     case RuleGroupBy.WaeCountry:
                         match = !string.IsNullOrEmpty(waeCountry) && set != null && set.Contains(waeCountry);
+                        break;
+
+                    // The island group a recent DX cluster spot of the call named (2026-11-09,
+                    // Nexus's own reading of the comment) -- none named, no match.
+                    case RuleGroupBy.Iota:
+                        match = !string.IsNullOrEmpty(iota) && set != null && set.Contains(iota.ToUpperInvariant());
                         break;
 
                     default:

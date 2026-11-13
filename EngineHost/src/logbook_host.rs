@@ -460,6 +460,53 @@ pub fn log_delete(host: &LogHost, engine: &Mutex<Engine>, args: LogDeleteArgs) -
     }
 }
 
+/// LOG_QSL_CARD's argument (2026-11-09): a paper QSL card on one contact. `action`: "queue" puts it
+/// in the cards-to-send list (ADIF `QSL_SENT=Q`), "unqueue" takes it out, "sent" marks the card
+/// sent today (`via`: "bureau" | "direct"), which also takes it out of the list.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogQslCardArgs {
+    pub id: String,
+    pub edit_key: String,
+    pub action: String,
+    #[serde(default)]
+    pub via: Option<String>,
+}
+
+/// LOG_QSL_CARD: Nexus's own operations, as its Logbook makes them -- the queue is a field kept as
+/// written (`LogOp::SetFields` on `QSL_QUEUE_FIELD`, Nexus's `queue_qsl_card_by_id`), the sent
+/// mark is `logwrite::qsl_sent` -- through `logwrite::change_ops`, only while the row is still the
+/// version `edit_key` names.
+pub fn log_qsl_card(host: &LogHost, engine: &Mutex<Engine>, args: LogQslCardArgs) -> WriteReply {
+    use tempo_core::logbook::{LogOp, QslVia, QSL_QUEUE_FIELD};
+    let id = match parse_id(&args.id) {
+        Ok(id) => id,
+        Err(r) => return r,
+    };
+    let op = match (args.action.as_str(), args.via.as_deref()) {
+        ("queue", _) => LogOp::SetFields { id, fields: vec![(QSL_QUEUE_FIELD.to_string(), Some("Q".to_string()))] },
+        ("unqueue", _) => LogOp::SetFields { id, fields: vec![(QSL_QUEUE_FIELD.to_string(), None)] },
+        ("sent", Some("bureau")) => tempo_app::logwrite::qsl_sent(id, Some(QslVia::Bureau)),
+        ("sent", Some("direct")) => tempo_app::logwrite::qsl_sent(id, Some(QslVia::Direct)),
+        (other, via) => {
+            return WriteReply::refused("error", Some(format!("not a card action: {other} {}", via.unwrap_or(""))))
+        }
+    };
+    let gate = host.writes.lock().unwrap_or_else(|e| e.into_inner());
+    if gate.closed {
+        return WriteReply::refused("closed", None);
+    }
+    let (made, durability) = tempo_app::logwrite::until_written(|| {
+        tempo_app::logwrite::change_ops(engine, id, Some(&args.edit_key), std::slice::from_ref(&op), "qsl card")
+    });
+    drop(gate);
+    match made {
+        Ok(Ok(_)) => after_durable(durability, serde_json::json!({ "id": args.id })),
+        Ok(Err(r)) => refusal(r),
+        Err(e) => WriteReply::refused("error", Some(e)),
+    }
+}
+
 /// LOG_IMPORT / LOG_MERGE's argument: a file to read (a control line is capped at 8 KB, so the
 /// ADIF text itself never rides the line). `kind` for LOG_MERGE: "lotw" | "qrz" | "eqsl".
 #[derive(serde::Deserialize)]
@@ -1617,6 +1664,35 @@ mod tests {
         let del = log_delete(&host, &eng, LogDeleteArgs { id, edit_key: key_now });
         assert_eq!(del.state, "saved", "{del:?}");
         assert_eq!(rows(&eng)["total"], 0);
+    }
+
+    // 2026-11-09: a paper card queued, taken out, queued again and marked sent -- Nexus's own
+    // operations; a sent mark takes the contact out of the queue.
+    #[test]
+    fn a_paper_card_is_queued_unqueued_and_marked_sent_through_nexus() {
+        let d = TempDir::new("cards");
+        let (eng, host) = launch(&d.0);
+        assert_eq!(log_qso(&host, &eng, args("c1", qso("W1AW", T0, "20m"))).state, "saved");
+        let stored = |eng: &Mutex<Engine>| lock(eng).log_store_reads().rows(logstore::READ_WAIT).expect("rows").0[0].clone();
+        let card = |action: &str, via: Option<&str>| {
+            let row = first_row(&eng);
+            log_qsl_card(&host, &eng, LogQslCardArgs {
+                id: row["id"].as_str().unwrap().to_string(),
+                edit_key: row["editKey"].as_str().unwrap().to_string(),
+                action: action.into(),
+                via: via.map(str::to_string),
+            })
+        };
+        assert_eq!(card("queue", None).state, "saved");
+        assert!(tempo_core::logbook::qsl_card_queued(&stored(&eng)), "queued");
+        assert_eq!(card("unqueue", None).state, "saved");
+        assert!(!tempo_core::logbook::qsl_card_queued(&stored(&eng)), "taken out");
+        assert_eq!(card("queue", None).state, "saved");
+        assert_eq!(card("sent", Some("bureau")).state, "saved");
+        let after = stored(&eng);
+        assert!(after.qsl_sent.sent, "marked sent");
+        assert!(!tempo_core::logbook::qsl_card_queued(&after), "a sent card is not still to go");
+        assert_eq!(card("sent", Some("pigeon")).state, "error");
     }
 
     #[test]

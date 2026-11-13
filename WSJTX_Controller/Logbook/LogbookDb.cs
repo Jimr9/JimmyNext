@@ -985,6 +985,9 @@ namespace WSJTX_Controller
             ("Club Log: sent", "clublog_uploaded_at", null, "sent"),
             ("HRDLog: not sent", "hrdlog_uploaded_at", null, "notsent"),
             ("HRDLog: sent", "hrdlog_uploaded_at", null, "sent"),
+            // Paper cards still to go out (2026-11-09): Nexus's own queue, ADIF QSL_SENT Q or R
+            // (tempo_core qsl_card_queued), which a sent mark replaces.
+            ("Paper card: to send", null, null, "cardqueued"),
         };
 
         // The SQL condition for UploadFilters[index]; null for a bad index.
@@ -998,6 +1001,7 @@ namespace WSJTX_Controller
                 case "sent":            return $"IFNULL({up},'') <> ''";
                 case "sentunconfirmed": return $"IFNULL({up},'') <> '' AND IFNULL({conf},'') <> 'Y'";
                 case "confirmed":       return $"IFNULL({conf},'') = 'Y'";
+                case "cardqueued":      return "id IN (SELECT qso_id FROM qso_extra_field WHERE UPPER(tag_name) = 'QSL_SENT' AND UPPER(TRIM(tag_value)) IN ('Q','R'))";
                 default:                return null;
             }
         }
@@ -1103,6 +1107,25 @@ namespace WSJTX_Controller
                 }
             }
             return result;
+        }
+
+        // The dedup keys of these rows (2026-11-09: Upload Selected to LoTW).
+        public HashSet<string> DedupKeysForIds(IEnumerable<int> ids)
+        {
+            var keys = new HashSet<string>(StringComparer.Ordinal);
+            lock (_lock)
+            {
+                foreach (int id in ids.Distinct())
+                {
+                    using (var cmd = _conn.CreateCommand())
+                    {
+                        cmd.CommandText = "SELECT dedup_key FROM qso WHERE id=@id;";
+                        cmd.Parameters.AddWithValue("@id", id);
+                        if (cmd.ExecuteScalar() is string k && k.Length > 0) keys.Add(k);
+                    }
+                }
+            }
+            return keys;
         }
 
         // Looks up a row's id by its dedup_key -- used to associate freshly-upserted extras with

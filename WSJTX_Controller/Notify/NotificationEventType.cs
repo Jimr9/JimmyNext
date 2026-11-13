@@ -122,5 +122,12 @@ namespace WSJTX_Controller
         // wording, so a CQ caller hears what concerns the CQ (by default only who is calling) and
         // not the listening summary. A routine clause like ReceiveCycleSummary, never published.
         ReceiveCycleSummaryCq,
+
+        // ── Space weather (2026-11-09) ───────────────────────────────────────────────────────
+        // Nexus's own "now" facts (pathnow::space_now), from EngineHost's SPACE_WX: each said once
+        // when it begins (and again only when it grows) -- SpaceWeatherAlerts decides.
+        SpaceWeatherStormWatch,
+        SpaceWeatherFlare,
+        SpaceWeatherProtons,
     }
 }

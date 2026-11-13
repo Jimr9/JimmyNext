@@ -59,6 +59,37 @@ stay pinned; do NOT import `main`. What the next stable upgrade needs:
   SET_CLOCK_CHECK uses Nexus's public `apply_settings` + `clear_clock_offset(true)`; ATU_STATUS
   reads PTT with Nexus's `Rig::read_ptt`. Both are public API -- check they still exist.
 
+## Nine-patch re-assessment -- 2026-11-06 (v1.21.0 -> v1.23.0 upgrade, 1.22.0 skipped)
+
+`pin.txt` now names v1.23.0 (`e3b9ef1e`, a lightweight tag). Every patch was tried against a clean
+v1.23.0 first and each "How to check" below run there.
+
+- **Retired: `tempo-core-qso.patch`.** Upstream #416 is fixed in 1.23.0: `Station::after_tx` clears
+  a Confirming RR73 once it is sent (the same rule, now upstream's "OUR RR73 GOES ONCE").
+- **`tempo-app-station.patch` re-derived by hand.** 1.22 rewrote `edit_op`/`edit_ops`: an edit keeps
+  a stored country unless it is blank (filled from the number the awards count) or names another
+  entity (`contradicted_country`). The keep-logged-location gate wraps both, same rule as before:
+  with the call unchanged the stored country stays exactly, blanks included; a corrected call is
+  named again. The bulk-append `fill_with` gate is unchanged.
+- **`tempo-audio-slot.patch` re-anchored.** 1.23 moved the TX-VFO mode write into
+  `write_rig_split` (with its own refusal handling); the gate now empties the mode handed to it.
+- **`tempo-app-settings.patch` re-anchored by hand.** Its default-value hunk applied by fuzz to
+  `RadioProfile`'s `Default` instead of `Settings`'; moved back to `Settings`.
+- **`tempo-app-engine.patch` gains `Engine::set_ft_drive_memory`.** 1.23 remembers the FT drive per
+  band and mode on each radio (`engine/ft_drive.rs`) and the radio loop brings it back at every
+  band/mode change. EngineHost keeps no settings.json, so Jimmy keeps that memory in its profile
+  (SET_FT_DRIVE_MEMORY / GET_FT_DRIVE) and, with its "Remember per band" option off, EngineHost
+  empties it after every SET_TX_LEVEL. Obsoleted only if EngineHost ever keeps Nexus's own settings.
+- **Still needed, checked on 1.23:** `parse("CQ W1AW")` is still `Msg::Other` (message + inbox); no
+  `dont_set_mode`, PSK Reporter setter, same-slot accumulation or multi-answer provenance upstream;
+  `build.rs` still canonicalizes; the rigctld test paths unchanged.
+- **Behaviour Jimmy now follows from upstream (WSJT-X parity):** FT8 drops rover (`/R`) and `TU; `
+  decodes unless Contest mode or Hound is on; a station answering our CQ is worked only when it
+  calls our exact call; Split = Rig stays in split between overs and with TX off; a band change ends
+  the FT contact in progress; contacts log the radio's measured power.
+- **Nexus desktop's LoTW download (`is_complete_lotw_body`, `download_lotw_report_impl`)** is
+  unchanged since 1.21, so EngineHost's copy stands.
+
 ## Ten-patch re-assessment -- 2026-10-30 (v1.20.0 -> v1.21.0 upgrade)
 
 Pin moved to stable **v1.21.0** (`a5777aef`; annotated tag object `9cd7759a`), nothing taken from
@@ -509,10 +540,10 @@ backoff only changes *when* that funnel runs, not whether it runs. See
 `jimmy_compat_rfpower_write_protection_survives_reopen_and_new_rigs_while_meters_flow` in
 `service.rs`'s test module for the regression proof.
 
-## Current patches (against Nexus `v1.21.0`, commit `a5777aef`)
+## Current patches (against Nexus `v1.23.0`, commit `e3b9ef1e`)
 
-Ten patches since 2026-10-21 (`tempo-core-qso.patch` added; nine from 2026-10-13), **one source file each** (the snapshot and solar-wind patches are retired -- see the v1.18.0 re-assessment above) -- (`prepare-nexus.ps1` and the `patches/` directory are
-the source of truth; the ten are itemised in the `###` sections below). Jimmy's downstream
+Nine patches since 2026-11-06 (`tempo-core-qso.patch` retired; ten from 2026-10-21), **one source file each** (the snapshot and solar-wind patches are retired -- see the v1.18.0 re-assessment above) -- (`prepare-nexus.ps1` and the `patches/` directory are
+the source of truth; the nine are itemised in the `###` sections below). Jimmy's downstream
 behavior these preserve is the **Jimmy Next 2.0.55 operator experience** -- that is the
 compatibility baseline.
 
@@ -821,7 +852,7 @@ header) stays a standard frame.
 and resolves the chunk ambiguity, e.g. by carrying i3).
 **How to check:** `grep -n "gridless_pair_chunk" crates/tempo-core/src/inbox.rs`.
 
-### `patches/tempo-core-qso.patch` -- the closing RR73 goes once, `crates/tempo-core/src/qso.rs` (added 2026-10-21)
+### RETIRED 2026-11-06 (fixed upstream in 1.23.0, #416; kept here as history): `patches/tempo-core-qso.patch` -- the closing RR73 goes once, `crates/tempo-core/src/qso.rs` (added 2026-10-21)
 
 `Station::after_tx` cleared `pending` only at `Done`. A contact that ends on OUR RR73 (we were
 called, or answered an R-report, outside a CQ run) stays `Confirming` with the RR73 queued and

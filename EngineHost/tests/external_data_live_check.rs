@@ -30,7 +30,7 @@ fn sota_spots_fetch_reaches_the_real_api() {
 #[test]
 #[ignore]
 fn space_wx_fetch_reaches_the_real_api() {
-    let wx = propagation::live::swpc::fetch_space_wx().expect("space weather fetch failed");
+    let wx = propagation::live::swpc::fetch_space_wx().expect("space weather fetch failed").wx;
     println!("SFI={} Kp={} A={} Xray={:.2e}", wx.sfi, wx.kp, wx.a_index, wx.xray_long);
     assert!(wx.sfi > 0.0, "SFI should be a real positive value, got {}", wx.sfi);
 }
@@ -53,7 +53,7 @@ fn dxpedition_plans_reach_the_real_calendars() {
 #[test]
 #[ignore]
 fn xray_now_fetch_reaches_the_real_api() {
-    let flux = propagation::live::swpc::fetch_xray_now().expect("X-ray fetch failed");
+    let flux = propagation::live::swpc::fetch_xray_trace().expect("X-ray fetch failed").now.value;
     println!("X-ray now: {flux:.2e} W/m2");
     assert!(flux > 0.0 && flux < 1e-2, "a real GOES long-band flux, got {flux}");
 }

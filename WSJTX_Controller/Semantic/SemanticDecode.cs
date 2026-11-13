@@ -72,6 +72,9 @@ namespace WSJTX_Controller
         // Null on the WsjtxMessage path: Jimmy keeps no copy of either rule.
         public string WpxPrefix { get; set; }
         public string WaeCountry { get; set; }
+        // 2026-11-09: the island group a recent DX cluster spot of the sender named (see
+        // DirectDecodeSemantics.Iota). Null on the WsjtxMessage path.
+        public string Iota { get; set; }
 
         // 2026-09-26 (parser migration): how far into a standard QSO this message is, from the
         // message KIND -- same scale as the old WsjtxMessage.Progress (CQ 1, reply 2, report 3,
@@ -229,6 +232,7 @@ namespace WSJTX_Controller
                 d.CallForm = string.IsNullOrEmpty(env.CallForm) ? "unknown" : env.CallForm;
                 d.WpxPrefix = string.IsNullOrEmpty(env.WpxPrefix) ? null : env.WpxPrefix;
                 d.WaeCountry = string.IsNullOrEmpty(env.WaeCountry) ? null : env.WaeCountry;
+                d.Iota = string.IsNullOrEmpty(env.Iota) ? null : env.Iota;
 
                 // Prefer the envelope's own canonical kind where it maps 1:1.
                 switch (env.Kind)

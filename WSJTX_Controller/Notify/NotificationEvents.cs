@@ -679,6 +679,24 @@ namespace WSJTX_Controller
     // see NotificationDefaults.cs) is a pure flap-guard backstop against rapid oscillation right
     // at the threshold, not the mechanism that prevents "every period" chatter -- the transition
     // gate in CalcAvgTimeOffset already does that structurally.
+    // Space weather (2026-11-09): SpaceWeatherAlerts is the only publisher, once per watch / flare /
+    // proton event (and again only when it grows). DedupKey is that event's own key.
+    public sealed class SpaceWeatherEvent : INotificationEvent
+    {
+        private readonly Dictionary<string, string> _tokens;
+
+        public SpaceWeatherEvent(NotificationEventType type, string dedupKey, Dictionary<string, string> tokens)
+        {
+            EventType = type;
+            DedupKey = dedupKey;
+            _tokens = tokens ?? new Dictionary<string, string>();
+        }
+
+        public NotificationEventType EventType { get; }
+        public string DedupKey { get; }
+        public IReadOnlyDictionary<string, string> ToTokens() => _tokens;
+    }
+
     public sealed class ClockOutOfSyncEvent : INotificationEvent
     {
         public double OffsetSeconds { get; }

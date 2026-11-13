@@ -21,7 +21,7 @@ fn encode_decode_roundtrip(text: &str) -> Option<String> {
             iwave[noff + i] = (s * 1000.0).clamp(-32768.0, 32767.0) as i16;
         }
     }
-    let decodes = ft8::decode_frame(&iwave, 200, 2900, 3, "", "", 0, 0, true, false);
+    let decodes = ft8::decode_frame(&iwave, 200, 2900, 3, "", "", 0, 0, true, false, false);
     decodes.into_iter().find(|d| d.message == text).map(|d| d.message)
 }
 

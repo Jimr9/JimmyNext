@@ -210,7 +210,10 @@ impl LiveFeedsCache {
     /// first, distance and direction from the grids). The store is capped by COUNT, not age, so
     /// `coveredMinutes` says when it no longer reaches back the whole window (null = it does).
     /// The 15-minute band-advice window is untouched.
-    pub fn getting_out_json(&self, window_minutes: i64) -> String {
+    ///
+    /// `since` (2026-11-09) is the operator's "Start fresh" time, Nexus's own: a report received
+    /// before it is left out of everything (count, furthest, the list). Echoed as `sinceUnix`.
+    pub fn getting_out_json(&self, window_minutes: i64, since: Option<i64>) -> String {
         let now = now_unix();
         let window_minutes = window_minutes.clamp(1, 60);
         let (spots, covered_minutes) = match self.live_spots.read() {
@@ -234,12 +237,13 @@ impl LiveFeedsCache {
             .and_then(|g| *g)
             .map(|t| t.elapsed().as_secs());
         let no_call = self.mycall.is_empty() || self.mycall == "NOCALL";
-        let go = propagation::getting_out(&self.mycall, &self.mygrid, &spots, now);
+        let go = propagation::getting_out(&self.mycall, &self.mygrid, &spots, now, since);
         let payload = GettingOutPayload {
             count: go.count,
             max_km: go.max_km,
             reports: go.reports,
             window_minutes,
+            since_unix: since,
             covered_minutes,
             connected,
             last_event_age_secs,
@@ -324,6 +328,25 @@ impl LiveFeedsCache {
             }
         };
         serde_json::to_string(&payload).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+    }
+
+    /// The IOTA island group each recently spotted call is on, where a DX cluster spot's comment
+    /// names one (2026-11-09): Nexus's own `propagation::iota::in_comment`, as its Needed board
+    /// reads it. The newest spot naming one wins. Keys are the spotted calls in capitals.
+    pub fn iota_by_call(&self) -> std::collections::HashMap<String, String> {
+        let spots = self.cluster_spots.lock().map(|b| b.recent()).unwrap_or_default();
+        let mut best: std::collections::HashMap<String, (u64, String)> = std::collections::HashMap::new();
+        for s in spots.iter().filter(|s| !s.rbn) {
+            let Some(r) = propagation::iota::in_comment(&s.comment) else { continue };
+            let call = s.dx_call.trim().to_ascii_uppercase();
+            match best.get(&call) {
+                Some((at, _)) if *at > s.received_unix => {}
+                _ => {
+                    best.insert(call, (s.received_unix, r));
+                }
+            }
+        }
+        best.into_iter().map(|(c, (_, r))| (c, r)).collect()
     }
 
     pub fn dx_spots_json(&self) -> String {
@@ -490,6 +513,7 @@ struct GettingOutPayload {
     max_km: u32,
     reports: Vec<propagation::HeardMe>,
     window_minutes: i64,
+    since_unix: Option<i64>,
     covered_minutes: Option<i64>,
     connected: bool,
     last_event_age_secs: Option<u64>,

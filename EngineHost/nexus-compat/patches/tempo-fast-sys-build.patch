@@ -1,5 +1,5 @@
 diff --git a/build.rs b/build.rs
-index a0a4c05..396e858 100644
+index a0a4c0527..396e85883 100644
 --- a/build.rs
 +++ b/build.rs
 @@ -27,10 +27,12 @@ mod manifest_gate;

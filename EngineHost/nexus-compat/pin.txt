@@ -6,13 +6,19 @@
 # pin, and its "Checking a patch against a newer Nexus" section for what to do when this pin
 # is updated.
 #
-# This integration pins the newest official STABLE release tag, v1.21.0 (2026-10-26), by its
+# This integration pins the newest official STABLE release tag, v1.23.0 (2026-11-06), by its
 # exact commit. NEXUS_COMMIT is the real lock; NEXUS_TAG is the honest human reference.
 # prepare-nexus.ps1 clones --branch NEXUS_TAG --single-branch and then verifies the resolved
-# HEAD equals NEXUS_COMMIT exactly. v1.21.0 is an ANNOTATED tag (tag object 9cd7759a); the
-# commit below is the peeled commit it points at, which is what HEAD resolves to.
+# HEAD equals NEXUS_COMMIT exactly. v1.23.0 is a LIGHTWEIGHT tag: it names the commit below
+# directly, which is what HEAD resolves to.
 #
-# Upgraded 2026-10-30 from v1.20.0 (0eb7c3a1): ten patches kept, same payload. tempo-app-engine.patch
+# Upgraded 2026-11-06 from v1.21.0 (a5777aef), skipping 1.22.0: nine patches. tempo-core-qso.patch
+# retired (upstream #416 is fixed in 1.23: Station::after_tx clears a Confirming RR73 once sent).
+# tempo-app-station.patch re-derived by hand (1.22 rewrote edit_op/edit_ops: an edit keeps a stored
+# country unless it is blank or names another entity; the keep-logged-location gate wraps both, same
+# rule). tempo-audio-slot.patch re-anchored (1.23 moved the TX-VFO mode set into write_rig_split;
+# the gate now empties the mode handed to it). The other seven apply as they were.
+# Earlier: upgraded 2026-10-30 from v1.20.0 (0eb7c3a1): ten patches kept, same payload. tempo-app-engine.patch
 # re-anchored by hand at its two same-slot accumulation hunks (1.21 calls note_band_activity beside
 # them); the other nine apply as they were. Jimmy Next retired its own copies of what 1.21 now does:
 # LoTW's blank-location fill (Nexus's keep_lotw_detail), the explicit 1900-01-01 LoTW since-date
@@ -41,10 +47,11 @@
 # re-assessment.
 
 NEXUS_REPO=https://github.com/kd9taw/Nexus.git
-NEXUS_TAG=v1.21.0
-NEXUS_COMMIT=a5777aef0797c78decb8d4cdbc1dfefb34bcd44f
+NEXUS_TAG=v1.23.0
+NEXUS_COMMIT=e3b9ef1e68d9d2305db7c67da6ff34d85d2d796c
 
-# DISPOSITION: 2026-10-30 -- pinned AT stable v1.21.0 (operator asked for the upgrade), nothing from main
+# DISPOSITION: 2026-11-06 -- pinned AT stable v1.23.0 (operator asked for the upgrade), nothing from main.
+# Was: 2026-10-30 -- pinned AT stable v1.21.0 (operator asked for the upgrade), nothing from main
 # (main 437 commits past 1.21.0, not reviewed).
 # Was: 2026-10-22 -- pinned AT stable v1.20.0 (operator asked for the upgrade), nothing from main
 # (main 2 commits past 1.20.0 at d5466de6: manual and contact-address text only).

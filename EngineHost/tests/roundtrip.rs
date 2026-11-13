@@ -25,7 +25,7 @@ fn ft8_encode_decode_roundtrip_recovers_exact_text() {
         }
     }
 
-    let decodes = ft8::decode_frame(&iwave, 200, 2900, 3, "", "", 0, 0, true, false);
+    let decodes = ft8::decode_frame(&iwave, 200, 2900, 3, "", "", 0, 0, true, false, false);
     assert!(
         decodes.iter().any(|d| d.message == msg),
         "native decoder did not recover '{msg}' from its own encoded audio; got: {:?}",
@@ -39,6 +39,6 @@ fn ft8_decode_frame_finds_nothing_in_pure_silence() {
     // decodes from an empty buffer (a false-positive here would be a much worse bug than a
     // missed decode -- see libtempo's own false-alarm test executables, verified in Phase 4b).
     let silence = vec![0i16; ft8::NMAX];
-    let decodes = ft8::decode_frame(&silence, 200, 2900, 3, "", "", 0, 0, true, false);
+    let decodes = ft8::decode_frame(&silence, 200, 2900, 3, "", "", 0, 0, true, false, false);
     assert!(decodes.is_empty(), "decoder found {} decode(s) in pure silence", decodes.len());
 }

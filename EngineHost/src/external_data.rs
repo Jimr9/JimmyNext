@@ -39,7 +39,7 @@ const SPACE_WX_REFRESH: Duration = Duration::from_secs(600);
 const SOLAR_HISTORY_REFRESH: Duration = Duration::from_secs(3 * 3600);
 /// GOES X-ray, on its own (operator, 2026-10-08): a flare's radio blackout reaches the operator
 /// within about a minute instead of waiting up to ten for the SFI/Kp refresh above -- Nexus's own
-/// 60-second "fast lane" (propagation::live::swpc::fetch_xray_now), one small request.
+/// 60-second "fast lane" (propagation::live::swpc::fetch_xray_trace), one small request.
 const XRAY_REFRESH: Duration = Duration::from_secs(60);
 /// KC2G's ionosonde network (operator, 2026-10-08): measured MUF/foF2 per station. Most
 /// stations report every 5-15 minutes; reading the whole list every ten is plenty.
@@ -51,6 +51,16 @@ const DXPEDITION_REFRESH: Duration = Duration::from_secs(1800);
 /// DSCOVR solar wind updates by the minute; every five minutes keeps Bz current without
 /// hammering SWPC (2026-10-04).
 const SOLAR_WIND_REFRESH: Duration = Duration::from_secs(300);
+/// GOES integral protons (2026-11-09), for Nexus's own S1+ proton-event rule (pathnow::space_now):
+/// NOAA's own threshold is judged on a sample under 30 minutes old, so every ten is plenty.
+const PROTONS_REFRESH: Duration = Duration::from_secs(600);
+/// NOAA's geomagnetic storm watches (alerts.json, 2026-11-09): issued a day or more ahead.
+const STORM_WATCH_REFRESH: Duration = Duration::from_secs(15 * 60);
+/// NOAA's three-hourly Kp series (2026-11-09), for "measured" vs "estimated" Kp.
+const KP_SERIES_REFRESH: Duration = Duration::from_secs(15 * 60);
+/// Nexus 1.23's rule for the Kp it shows: NOAA's measured three-hour Kp while its period ended
+/// within the last three hours, otherwise the one-minute estimate.
+const KP_MEASURED_FRESH_SECS: i64 = 3 * 3600;
 
 /// The contest calendar as last read: the last good list is kept through a failed refresh, with
 /// when it was read and why the newest try failed, so Jimmy can say the list is old.
@@ -91,6 +101,12 @@ pub struct SharedCache {
     // The fast-lane X-ray flux (W/m², GOES long band), its own age and error -- separate from
     // space_wx's, so the other readings keep their own ages.
     xray: RwLock<Cached<f32>>,
+    // The same fast-lane reading with its own sample time, for Nexus's flare footprint.
+    xray_sample: RwLock<Option<propagation::pathnow::XraySample>>,
+    protons: RwLock<Cached<propagation::live::protons::ProtonFlux>>,
+    // Ok(None) is a real answer: no watch in force.
+    storm_watch: RwLock<Cached<Option<propagation::arrival::Watch>>>,
+    kp_series: RwLock<Cached<propagation::kpforecast::KpForecast>>,
     ionosondes: RwLock<Cached<Vec<Ionosonde>>>,
     dxpeditions: RwLock<Cached<Vec<propagation::dxped::DxpeditionPlan>>>,
     contests: RwLock<CachedContests>,
@@ -98,6 +114,24 @@ pub struct SharedCache {
     // live_feeds.rs) for the representative-MUF calculation below -- None when the grid doesn't
     // parse, in which case mufNow is simply omitted rather than guessed.
     me_latlon: Option<(f64, f64)>,
+    // Where each poll's MEASURED readings go for the space weather on each logged contact
+    // (Nexus's Engine::note_space_weather; Settings::log_space_weather). Set once by main.
+    log_wx_sink: RwLock<Option<LogWxSink>>,
+}
+
+/// The readings one SWPC poll measured, each with its own time, for a logged contact: Kp, every
+/// UT day's daily A, and the solar flux -- (value, unix secs) -- then when the poll was made.
+pub type LogWxSink = Box<dyn Fn(Option<(f32, u64)>, Vec<(f32, u64)>, Option<(f32, u64)>, u64) + Send + Sync>;
+
+/// Nexus desktop's own `space_wx_for_log` (src-tauri, not a library function): only what SWPC
+/// answered, each on its own with its stamp -- never a stand-in a failed product left behind.
+fn space_wx_for_log(r: &swpc::SwpcReading) -> (Option<(f32, u64)>, Vec<(f32, u64)>, Option<(f32, u64)>) {
+    let at = |t: i64| t.max(0) as u64;
+    (
+        r.stamps.kp_at.map(|t| (r.wx.kp, at(t))),
+        r.a_by_day.iter().map(|s| (s.value, at(s.at))).collect(),
+        r.stamps.sfi_at.map(|t| (r.wx.sfi, at(t))),
+    )
 }
 
 #[derive(Default)]
@@ -143,11 +177,21 @@ impl SharedCache {
             solar_history: RwLock::new(Cached::default()),
             solar_wind: RwLock::new(Cached::default()),
             xray: RwLock::new(Cached::default()),
+            xray_sample: RwLock::new(None),
+            protons: RwLock::new(Cached::default()),
+            storm_watch: RwLock::new(Cached::default()),
+            kp_series: RwLock::new(Cached::default()),
             ionosondes: RwLock::new(Cached::default()),
             dxpeditions: RwLock::new(Cached::default()),
             contests: RwLock::new(CachedContests::default()),
             me_latlon: maidenhead_to_latlon(mygrid.trim()),
+            log_wx_sink: RwLock::new(None),
         })
+    }
+
+    /// Where each space-weather poll's measured readings go (see `log_wx_sink`).
+    pub fn set_log_wx_sink(&self, sink: LogWxSink) {
+        *self.log_wx_sink.write().unwrap_or_else(|e| e.into_inner()) = Some(sink);
     }
 
     /// Starts the background refresh loop on a dedicated thread. Never panics the process on a
@@ -185,8 +229,35 @@ impl SharedCache {
         // Its own thread, one request at a time (never overlapping), off every radio path.
         let cache = self.clone();
         std::thread::spawn(move || loop {
-            store(&cache.xray, swpc::fetch_xray_now());
+            // Nexus 1.22: the fast lane returns the whole trace; Jimmy shows only its newest
+            // long-band sample, as fetch_xray_now gave before.
+            let r = swpc::fetch_xray_trace().map(|t| t.now);
+            if let Ok(s) = &r {
+                *cache.xray_sample.write().unwrap_or_else(|e| e.into_inner()) =
+                    Some(propagation::pathnow::XraySample { flux: s.value, at: s.at });
+            }
+            store(&cache.xray, r.map(|s| s.value));
             std::thread::sleep(XRAY_REFRESH);
+        });
+        // What is happening now (2026-11-09): protons, NOAA's storm watch, the three-hour Kp --
+        // each its own request on its own thread, like everything here.
+        let cache = self.clone();
+        std::thread::spawn(move || loop {
+            store(&cache.protons, propagation::live::protons::fetch_protons());
+            std::thread::sleep(PROTONS_REFRESH);
+        });
+        let cache = self.clone();
+        std::thread::spawn(move || loop {
+            store(&cache.storm_watch, propagation::live::arrival::fetch_watch(now_unix()));
+            std::thread::sleep(STORM_WATCH_REFRESH);
+        });
+        let cache = self.clone();
+        std::thread::spawn(move || loop {
+            let r = swpc::fetch_kp_forecast().and_then(|f| {
+                if f.points.is_empty() { Err("the Kp series had no readable periods".to_string()) } else { Ok(f) }
+            });
+            store(&cache.kp_series, r);
+            std::thread::sleep(KP_SERIES_REFRESH);
         });
         let cache = self.clone();
         std::thread::spawn(move || loop {
@@ -262,6 +333,9 @@ impl SharedCache {
         // rather than clearing it, so a transient outage degrades to "a bit stale", not "empty".
         let pota_result = pota::fetch_pota_spots();
         let sota_result = pota::fetch_sota_spots(SOTA_SPOT_COUNT);
+        // WWFF (2026-11-09): Nexus's own Spotline fetch, which keeps Spotline's "no more than once
+        // every 30 seconds" itself; its User-Agent names Nexus and the version we run.
+        let wwff_result = propagation::live::wwff::fetch_wwff_spots(EQSL_PROGRAM_VERSION);
 
         let mut merged = Vec::new();
         let mut errors = Vec::new();
@@ -279,6 +353,13 @@ impl SharedCache {
                 merged.append(&mut v);
             }
             Err(e) => errors.push(format!("SOTA: {e}")),
+        }
+        match wwff_result {
+            Ok(mut v) => {
+                any_succeeded = true;
+                merged.append(&mut v);
+            }
+            Err(e) => errors.push(format!("WWFF: {e}")),
         }
 
         let mut guard = self.spots.write().unwrap_or_else(|e| e.into_inner());
@@ -363,7 +444,23 @@ impl SharedCache {
     }
 
     fn refresh_space_wx(&self) {
-        match swpc::fetch_space_wx() {
+        // Nexus 1.22 answers with whichever products NOAA gave, a stand-in for the rest
+        // (`stamps` says which were measured). Jimmy shows the solar flux and Kp as readings, so
+        // a poll missing either is a failed one, as it was before 1.22: the last good value stays.
+        let fetched = swpc::fetch_space_wx().and_then(|r| {
+            // Each measured reading goes to the logged-contact stamp on its own, even when the
+            // other is missing (Nexus desktop does the same).
+            if let Some(sink) = self.log_wx_sink.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                let (kp, a_daily, sfi) = space_wx_for_log(&r);
+                sink(kp, a_daily, sfi, now_unix().max(0) as u64);
+            }
+            if r.stamps.sfi_at.is_some() && r.stamps.kp_at.is_some() {
+                Ok(r.wx)
+            } else {
+                Err("space weather: NOAA gave no current solar flux or Kp".to_string())
+            }
+        });
+        match fetched {
             Ok(wx) => {
                 let mut guard = self.space_wx.write().unwrap_or_else(|e| e.into_inner());
                 guard.value = Some(wx);
@@ -418,6 +515,75 @@ impl SharedCache {
         serde_json::to_string(&payload).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     }
 
+    /// Nexus's own "now" facts (pathnow::space_now): a flare at M1+ (the highest band out and
+    /// weakened under the sun, and when HF recovers), an S1+ proton event, and a NOAA geomagnetic
+    /// watch in force or ahead. The flare footprint is the GOES estimate (EngineHost does not
+    /// read NOAA's D-RAP grid). None when nothing is happening.
+    fn space_now(&self, now: i64) -> Option<propagation::pathnow::SpaceNow> {
+        use propagation::pathnow::{footprint, space_now, ProtonSample};
+        let xray = *self.xray_sample.read().unwrap_or_else(|e| e.into_inner());
+        let fp = footprint(xray, None, now);
+        let protons = self
+            .protons
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .value
+            .map(|p| ProtonSample { j1: p.j1, j5: p.j5, j10: p.j10, at: p.at });
+        let watch_guard = self.storm_watch.read().unwrap_or_else(|e| e.into_inner());
+        let watch = watch_guard.value.as_ref().and_then(|w| w.as_ref());
+        space_now(fp.as_ref(), protons, watch, now)
+    }
+
+    /// PATH_TO (2026-11-09): Nexus's own path model to a station at `grid` on `band`, both ways
+    /// round, as its Path card makes it (`predict` + `predict_route(Long)`, each with its
+    /// geometry, then `compare_routes` and `path_day`): which route the model favours this hour
+    /// and how strongly, each route's heading and distance, the band's workability over the day
+    /// and its best window. `model` "p533" (Nexus's ITU-R P.533 engine, which models the long
+    /// path) or "heuristic" (Nexus's quick model, short path only). Runs the model: seconds, not
+    /// a cache read -- the caller gives it its own thread.
+    pub fn path_to_json(&self, grid: &str, band: &str, model: &str, power_w: Option<f64>) -> String {
+        use propagation::geo::{bearing_deg, haversine_km};
+        let err = |e: &str| serde_json::json!({ "error": e }).to_string();
+        let Some(me) = self.me_latlon else { return err("My Grid is not set") };
+        let Some(dx) = maidenhead_to_latlon(grid.trim()) else { return err("no grid for the station") };
+        let now = now_unix();
+        let measured = self.current_space_wx();
+        let wx = measured.unwrap_or_default();
+        let forecast = self.kp_series.read().unwrap_or_else(|e| e.into_inner()).value.clone();
+        let kp = measured.map(|w| w.kp);
+        let engine = propagation::make_predictor(model, Some(me), power_w, 0.0);
+        let geom = |route| propagation::path_geometry_route(me, dx, route, now, kp, forecast.as_ref(), None);
+        let mut sp = engine.predict(dx, now, &wx);
+        sp.geometry = Some(geom(propagation::Route::Short));
+        let lp = engine.predict_route(dx, propagation::Route::Long, now, &wx).map(|mut lp| {
+            lp.geometry = Some(geom(propagation::Route::Long));
+            lp
+        });
+        let routes = lp.as_ref().map(|lp| propagation::compare_routes(&sp, lp)).unwrap_or_default();
+        let call = routes.iter().find(|r| r.band.eq_ignore_ascii_case(band));
+        let outlook = sp.bands.iter().find(|b| b.band.eq_ignore_ascii_case(band));
+        let long_outlook = lp.as_ref().and_then(|lp| lp.bands.iter().find(|b| b.band.eq_ignore_ascii_case(band)));
+        let short_deg = bearing_deg(me, dx);
+        let short_km = haversine_km(me, dx);
+        serde_json::json!({
+            "engine": sp.engine,
+            "band": band,
+            "shortBearingDeg": short_deg.round(),
+            "longBearingDeg": ((short_deg + 180.0) % 360.0).round(),
+            "shortKm": short_km.round(),
+            "longKm": (40_030.0 - short_km).max(0.0).round(),
+            "longModelled": lp.is_some(),
+            "verdict": call.map(|c| c.verdict),
+            "confidence": call.and_then(|c| c.confidence),
+            "workability": outlook.map(|b| b.workability.clone()),
+            "window": outlook.map(|b| b.window.clone()),
+            "longWorkability": long_outlook.map(|b| b.workability.clone()),
+            "longWindow": long_outlook.map(|b| b.window.clone()),
+            "measuredSpaceWeather": measured.is_some(),
+        })
+        .to_string()
+    }
+
     /// The current cached space-weather value (if any fetch has ever succeeded), for
     /// live_feeds.rs's band-conditions advisory -- reuses this cache's own refresh loop rather
     /// than fetching a second time. SpaceWx is Copy, so this is a cheap by-value read.
@@ -446,7 +612,8 @@ impl SharedCache {
         let scales_age_secs = scales_guard.last_ok.map(|t| t.elapsed().as_secs());
         let scales = scales_guard.value.as_ref().map(|s| NoaaScalesWire {
             g_scale: s.g,
-            g_scale_tomorrow: s.g_tomorrow,
+            // Nexus 1.22: tomorrow's forecast with its date, or none issued (0, as before).
+            g_scale_tomorrow: s.g_tomorrow.as_ref().map_or(0, |f| f.level),
             s_scale: s.s,
         });
 
@@ -483,7 +650,15 @@ impl SharedCache {
             _ => a.name.unwrap_or("").cmp(b.name.unwrap_or("")),
         });
 
+        let space_now = self.space_now(now);
+        let kp_measured = {
+            let g = self.kp_series.read().unwrap_or_else(|e| e.into_inner());
+            g.value.as_ref().and_then(|f| kp_measured_now(f, now))
+        };
+
         let payload = SpaceWxPayload {
+            space_now,
+            kp_measured,
             value: wire.as_ref(),
             age_secs,
             last_error: guard.last_error.as_deref(),
@@ -762,8 +937,31 @@ impl XrayWire {
     }
 }
 
+/// NOAA's measured three-hour Kp, while its period ended within the last three hours (Nexus
+/// 1.23's own rule) -- otherwise None, and the Kp said is the one-minute estimate.
+#[derive(serde::Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct KpMeasured {
+    kp: f32,
+    from_unix: i64,
+    to_unix: i64,
+}
+
+fn kp_measured_now(f: &propagation::kpforecast::KpForecast, now: i64) -> Option<KpMeasured> {
+    const PERIOD: i64 = 3 * 3600;
+    let p = f.latest_measured()?;
+    let end = p.time_unix + PERIOD;
+    (end <= now + 60 && now - end <= KP_MEASURED_FRESH_SECS).then(|| KpMeasured { kp: p.kp, from_unix: p.time_unix, to_unix: end })
+}
+
 #[derive(serde::Serialize)]
 struct SpaceWxPayload<'a> {
+    // Nexus's "now" facts (2026-11-09): flare, proton event, storm watch. Absent = nothing on.
+    #[serde(rename = "spaceNow", skip_serializing_if = "Option::is_none")]
+    space_now: Option<propagation::pathnow::SpaceNow>,
+    // NOAA's measured three-hour Kp when current (2026-11-09); absent = the Kp is the estimate.
+    #[serde(rename = "kpMeasured", skip_serializing_if = "Option::is_none")]
+    kp_measured: Option<KpMeasured>,
     value: Option<&'a SpaceWxWire>,
     #[serde(rename = "ageSecs")]
     age_secs: Option<u64>,
@@ -862,7 +1060,7 @@ mod space_wx_wire_tests {
                 r: 1,
                 s: 0,
                 g: 1,
-                g_tomorrow: 2,
+                g_tomorrow: Some(propagation::GForecast { level: 2, date: "2026-11-07".to_string() }),
                 as_of: None,
             });
             guard.last_ok = Some(Instant::now());
@@ -954,6 +1152,63 @@ mod space_wx_wire_tests {
         assert!(list.len() > 10 && named > 0 && timed > 0);
     }
 
+    // 2026-11-09: Nexus's own "now" facts and the measured Kp ride along; nothing on = absent.
+    #[test]
+    fn space_now_and_measured_kp_ride_along_only_when_there_is_something_to_say() {
+        let cache = SharedCache::new("EN52");
+        let json = cache.space_wx_json();
+        assert!(!json.contains("spaceNow") && !json.contains("kpMeasured"), "quiet: {json}");
+
+        let now = now_unix();
+        *cache.xray_sample.write().unwrap() = Some(propagation::pathnow::XraySample { flux: 5e-5, at: now - 30 });
+        store(&cache.protons, Ok(propagation::live::protons::ProtonFlux { j1: 500.0, j5: 200.0, j10: 120.0, at: Some(now - 60) }));
+        let period = (now / 10_800) * 10_800 - 10_800;   // the last whole three-hour period
+        store(&cache.kp_series, Ok(propagation::kpforecast::KpForecast {
+            points: vec![propagation::kpforecast::KpPoint {
+                time_unix: period, kp: 5.33, kind: propagation::kpforecast::KpKind::Observed, noaa_scale: Some("G1".into()),
+            }],
+            fetched_at: None,
+        }));
+        let v: serde_json::Value = serde_json::from_str(&cache.space_wx_json()).unwrap();
+        assert_eq!(v["spaceNow"]["flare"]["r"], 2, "M5 is R2: {v}");
+        assert!(v["spaceNow"]["flare"]["recovery"]["at"].as_i64().unwrap() > now, "{v}");
+        assert_eq!(v["spaceNow"]["protons"]["s"], 2, "120 pfu is S2: {v}");
+        assert_eq!(v["kpMeasured"]["fromUnix"], period, "{v}");
+        assert_eq!(v["kpMeasured"]["toUnix"], period + 10_800, "{v}");
+
+        // A measured period that ended over three hours ago is not said as now's.
+        let old = propagation::kpforecast::KpForecast {
+            points: vec![propagation::kpforecast::KpPoint {
+                time_unix: period - 2 * 10_800, kp: 2.0, kind: propagation::kpforecast::KpKind::Observed, noaa_scale: None,
+            }],
+            fetched_at: None,
+        };
+        assert_eq!(kp_measured_now(&old, now), None);
+    }
+
+    // 2026-11-09: Nexus's path model, both ways round, to a station by its grid.
+    #[test]
+    fn path_to_answers_both_routes_with_headings_and_the_bands_day() {
+        let cache = SharedCache::new("EN52");
+        let t = Instant::now();
+        let v: serde_json::Value = serde_json::from_str(&cache.path_to_json("PM95", "20m", "p533", Some(100.0))).unwrap();
+        println!("PATH_TO took {:?}: {v}", t.elapsed());
+        assert!(v["error"].is_null(), "{v}");
+        let short = v["shortBearingDeg"].as_f64().unwrap();
+        let long = v["longBearingDeg"].as_f64().unwrap();
+        assert!((short - 330.0).abs() < 20.0, "EN52 to Japan is about northwest: {v}");
+        assert!(((short + 180.0) % 360.0 - long).abs() < 1.0, "{v}");
+        assert_eq!(v["longModelled"], true, "P.533 models the long path: {v}");
+        assert!(v["window"].is_string() && v["workability"].is_string(), "{v}");
+
+        let quick: serde_json::Value = serde_json::from_str(&cache.path_to_json("PM95", "20m", "heuristic", None)).unwrap();
+        assert_eq!(quick["longModelled"], false, "the quick model has no long path: {quick}");
+        assert!(quick["verdict"].is_null(), "{quick}");
+
+        let none: serde_json::Value = serde_json::from_str(&SharedCache::new("").path_to_json("PM95", "20m", "p533", None)).unwrap();
+        assert_eq!(none["error"], "My Grid is not set");
+    }
+
     // The fast-lane X-ray (2026-10-08): its own camelCase fields, Nexus's own class and R, and
     // a failed refresh keeps the last good reading and its age, with the error beside it.
     #[test]
@@ -1024,7 +1279,7 @@ pub fn qrz_logbook_status(args: &QrzLogbookStatusArgs) -> Result<serde_json::Val
 /// this `PROGRAMVERSION`, as eQSL asks of client programs), and since Nexus 1.20 the version in the
 /// `Nexus/<version>` User-Agent QRZ is sent. The Nexus release EngineHost is built from -- keep it
 /// with `nexus-compat/pin.txt`.
-pub const EQSL_PROGRAM_VERSION: &str = "1.20.0";
+pub const EQSL_PROGRAM_VERSION: &str = "1.23.0";
 
 pub fn eqsl_upload(args: &EqslUploadArgs) -> Result<&'static str, String> {
     // qth_nickname: `None` -- Jimmy Next has no UI for eQSL's multi-profile "QTH Nickname"

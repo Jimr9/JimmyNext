@@ -1,8 +1,8 @@
 diff --git a/src/settings.rs b/src/settings.rs
-index 510a829..0f97243 100644
+index 4fbfa6152..fcbcf851a 100644
 --- a/src/settings.rs
 +++ b/src/settings.rs
-@@ -2042,6 +2042,14 @@ pub struct Settings {
+@@ -2273,6 +2273,14 @@ pub struct Settings {
      /// (flat mirror — see [`RadioProfile::data_modes_plain_ssb`]). Default off.
      #[serde(default)]
      pub data_modes_plain_ssb: bool,
@@ -17,11 +17,11 @@ index 510a829..0f97243 100644
      /// Hold the DATA submode (FM-D on FM, USB-D/LSB-D on HF) for as long as the SSTV receiver
      /// is running, for the active radio (flat mirror — see
      /// [`RadioProfile::sstv_hold_data_submode`]). Default off.
-@@ -5851,6 +5859,7 @@ impl Default for Settings {
-             icom_data_mode: 1,
+@@ -6727,6 +6735,7 @@ impl Default for Settings {
+             native_scope: default_native_scope(),
              tx_audio_source: default_tx_audio_source(),
              data_modes_plain_ssb: false,
 +            dont_set_mode: false,
              sstv_hold_data_submode: false,
-             set_rig_mode: true, // force the DATA submode for digital, so sections set the rig
-             operating_mode: OperatingMode::Digital, // digital obeys; phone/CW force
+             aprs_data_fm: false,
+             pc_mic: false,

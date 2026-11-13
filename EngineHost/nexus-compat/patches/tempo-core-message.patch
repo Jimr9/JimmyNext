@@ -1,8 +1,8 @@
 diff --git a/src/message.rs b/src/message.rs
-index d37b384..3ea3033 100644
+index eb45a9755..d669cf940 100644
 --- a/src/message.rs
 +++ b/src/message.rs
-@@ -403,6 +403,34 @@ pub fn parse_ack(s: &str) -> Option<(String, String, char)> {
+@@ -431,6 +431,34 @@ pub fn parse_ack(s: &str) -> Option<(String, String, char)> {
      None
  }
  
@@ -37,7 +37,7 @@ index d37b384..3ea3033 100644
  pub fn looks_like_call(s: &str) -> bool {
      is_valid_hashed(s) || is_compound(s) || is_callsign(s)
  }
-@@ -575,10 +603,10 @@ impl Msg {
+@@ -603,10 +631,10 @@ impl Msg {
          // it LOOKS like a callsign and is NOT a standard one, therefore it can only have
          // arrived as i3=4, therefore a bare "CQ" in front of it is a CQ.
          //
@@ -52,7 +52,7 @@ index d37b384..3ea3033 100644
          if t.len() == 2 && t[0] == "CQ" && is_nonstandard_call(t[1]) {
              return Msg::Cq {
                  de: t[1].to_string(),
-@@ -606,6 +634,33 @@ impl Msg {
+@@ -634,6 +662,33 @@ impl Msg {
                  grid: String::new(),
              };
          }
@@ -86,7 +86,7 @@ index d37b384..3ea3033 100644
          // ⛔ BOTH CALLSIGN FIELDS, OR IT IS NOT A STANDARD MESSAGE (#303). The arms below
          // validate the PAYLOAD token and used to take whatever the first two words were, so
          // free text ending in a report/grid/signoff was typed as a message addressed to
-@@ -825,12 +880,17 @@ mod fidelity_tests {
+@@ -894,12 +949,17 @@ mod fidelity_tests {
      /// asserting directly rather than trusting the shape of the predicate.
      #[test]
      fn a_gridless_cq_still_refuses_what_it_always_refused() {
@@ -109,7 +109,7 @@ index d37b384..3ea3033 100644
          // A hashed placeholder is not a callsign and never names a station.
          assert!(!matches!(Msg::parse("CQ <...>"), Msg::Cq { .. }));
          // Not a callsign at all.
-@@ -838,6 +898,40 @@ mod fidelity_tests {
+@@ -907,6 +967,40 @@ mod fidelity_tests {
          assert!(!matches!(Msg::parse("CQ ?"), Msg::Cq { .. }));
      }
  
@@ -150,7 +150,7 @@ index d37b384..3ea3033 100644
      /// The predicate on its own, because it is the thing that decides and it is easier to see
      /// wrong here than through a parse.
      #[test]
-@@ -1048,7 +1142,16 @@ mod fidelity_tests {
+@@ -1117,7 +1211,16 @@ mod fidelity_tests {
          // Plain free text / a bare standard pair is NOT misread as an i3=4 call pair.
          assert!(matches!(Msg::parse("NET TONIGHT"), Msg::Other(_)));
          assert!(matches!(Msg::parse("HELLO ALL"), Msg::Other(_)));
@@ -168,7 +168,7 @@ index d37b384..3ea3033 100644
          // Ham free-text SLASH shorthand must NOT read as a compound call pair.
          for s in ["5/9 NJ2X", "W/L 20M", "S/N 10DB", "2X/3 W1AW", "I/O TEST"] {
              assert!(
-@@ -1059,8 +1162,8 @@ mod fidelity_tests {
+@@ -1128,8 +1231,8 @@ mod fidelity_tests {
          // Arbitrary bracketed tokens / both-hashed are not a valid i3=4 call pair.
          assert!(matches!(Msg::parse("<X> <Y>"), Msg::Other(_)));
          assert!(matches!(Msg::parse("<...> <...>"), Msg::Other(_)));

@@ -7159,53 +7159,29 @@ static class JimmyTests
         }
     }
 
-    // ── "Remember F11/F12 audio level per band" restore decision, 2026-08-17 ───────────────
-    // Found live: the restore-on-band-change call only ever existed on WsjtxClient.Direct.cs's
-    // poll path -- the classic WSJT-X/UDP StatusMessage band-change handler
-    // (WsjtxClient.Protocol.cs) had no restore call at all, so an operator not on pure
-    // Direct-mode-with-Jimmy-Native got a feature that silently SAVED (AudioLevel() reaches the
-    // engine's own control port directly, independent of transport) but never restored. Fixed by
-    // sharing one decision function (ShouldRestoreTxLevel) from both call sites. This tests the
-    // pure decision only -- the actual SET_TX_LEVEL send needs a live engine host and isn't
-    // covered here, same as every other DirectSendCommand-driven behavior in this suite.
+    // ── "Remember F11/F12 audio level per band", Nexus 1.23 (2026-11-06) ─────────────────────
+    // The engine remembers each pick per band and mode and brings it back itself; Jimmy keeps
+    // the engine's memory (RadioSettings.FtDrive) and hands it back at every connect. These cover
+    // the pure parts: the command that hands it back, and carrying the pre-1.23 per-band levels
+    // (WsjtxClient band index -> level) into the engine's keys, so no saved level is lost.
     static void TxLevelPerBandRestoreTests()
     {
-        Console.WriteLine("\n── Remember TX level per band: restore decision ──");
+        Console.WriteLine("\n── Remember TX level per band: engine memory ──");
         try
         {
-            var levels = new Dictionary<int, double> { [5] = 0.65, [9] = 0.40 };  // 20m, 10m
+            CheckStr("Option off -> the engine is told to remember nothing",
+                WsjtxClient.FtDriveMemoryCommand(false, "20m=0.5"), "SET_FT_DRIVE_MEMORY off");
+            CheckStr("Option on, nothing saved yet",
+                WsjtxClient.FtDriveMemoryCommand(true, ""), "SET_FT_DRIVE_MEMORY on");
+            CheckStr("Option on -> the saved memory goes back as it came",
+                WsjtxClient.FtDriveMemoryCommand(true, "20m/FT8=0.5;20m=0.5"), "SET_FT_DRIVE_MEMORY on 20m/FT8=0.5;20m=0.5");
 
-            Check("Feature disabled -> never restores, even with a saved entry",
-                WsjtxClient.ShouldRestoreTxLevel(false, 5, levels, out _), false);
-
-            Check("No band known (null) -> never restores",
-                WsjtxClient.ShouldRestoreTxLevel(true, null, levels, out _), false);
-
-            Check("Band with no saved entry -> does not restore",
-                WsjtxClient.ShouldRestoreTxLevel(true, 7, levels, out _), false);
-
-            bool restored20m = WsjtxClient.ShouldRestoreTxLevel(true, 5, levels, out double level20m);
-            Check("Enabled + known band + saved entry -> restores", restored20m, true);
-            Check("...with the exact saved value for that band", Math.Abs(level20m - 0.65) < 0.0001, true);
-
-            bool restored10m = WsjtxClient.ShouldRestoreTxLevel(true, 9, levels, out double level10m);
-            Check("A different band's own saved value is used, not the first band checked",
-                restored10m && Math.Abs(level10m - 0.40) < 0.0001, true);
-
-            Check("Null dictionary -> does not restore, does not throw",
-                WsjtxClient.ShouldRestoreTxLevel(true, 5, null, out _), false);
-
-            // Save-side companion (confirmation-gated remember, 2026-08-30): a just-CONFIRMED
-            // SET_TX_LEVEL is written into the per-band map under the same gate the old inline
-            // AudioLevel() code used -- feature on AND a real band index. DirectSetEngineTxLevel
-            // only calls this on the engine's OK, so nothing is remembered before confirmation.
-            Check("Remember decision: feature off -> not remembered",
-                WsjtxClient.ShouldRememberTxLevelForBand(false, 5, out _), false);
-            Check("Remember decision: no band known -> not remembered",
-                WsjtxClient.ShouldRememberTxLevelForBand(true, null, out _), false);
-            bool remembered = WsjtxClient.ShouldRememberTxLevelForBand(true, 5, out int rememberKey);
-            Check("Remember decision: feature on + known band -> remembered under that band's key",
-                remembered && rememberKey == 5, true);
+            CheckStr("Pre-1.23 levels carry over as bare bands (20m = index 5, 10m = index 9)",
+                RadioSettings.FtDriveFromRetiredTxLevelByBand("5=0.65;9=0.4"), "20m=0.65;10m=0.4");
+            CheckStr("...unreadable or out-of-range entries are dropped, as the old loader did",
+                RadioSettings.FtDriveFromRetiredTxLevelByBand("5=0.65;x=0.3;3=1.5;99=0.2"), "20m=0.65");
+            CheckStr("...and nothing saved carries nothing",
+                RadioSettings.FtDriveFromRetiredTxLevelByBand(null), "");
         }
         catch (Exception ex)
         {
@@ -7215,16 +7191,14 @@ static class JimmyTests
     }
 
     // ── TX-level-per-band: real band tracking through the production Direct pipeline ───────
-    // Companion to TxLevelPerBandRestoreTests above: that one covers the pure decision function
-    // in isolation; this one proves the band-index tracking that decision depends on is correct
+    // Proves the band-index tracking (which flushes a pending level write when the band changes) is correct
     // going through DirectApplyStatus itself (via TestApplyDirectSnapshot -- the exact same
     // pipeline the real ~1s SNAPSHOT poll drives in production, which is Jimmy Next's ONLY
     // production transport: ApplyEngineMode always uses Direct outside of
     // TestModeGuard.IsTestMode, so this -- not the classic WSJT-X/UDP StatusMessage handler in
     // WsjtxClient.Protocol.cs, which only ever runs in replay tests -- is the real path an
     // operator's F11/F12 press and band change actually go through). Feeds a real switch away
-    // from and back to a band, then confirms ShouldRestoreTxLevel would pick the right saved
-    // level at each stop -- exactly "switch bands, come back, get the level I had there."
+    // from and back to a band. (Since Nexus 1.23 the engine itself brings back each band's level.)
     static void DirectPathTxLevelBandTrackingTests()
     {
         Console.WriteLine("\n── TX level per band: real band tracking (Direct pipeline) ──");
@@ -7237,10 +7211,6 @@ static class JimmyTests
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
-            ctrl.Radio.RememberTxLevelPerBand = true;
-            ctrl.Radio.TxLevelByBand[5] = 0.70;   // 20m, saved earlier
-            ctrl.Radio.TxLevelByBand[3] = 0.30;   // 40m, saved earlier
-
             var snap20m = ParseDirectSnapshot(@"{
                 ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
                 ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3000 },
@@ -7249,9 +7219,6 @@ static class JimmyTests
             wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap20m);
             Check("Initial snapshot on 20m -> bandIdx resolves to 20m (index 5)",
                 wc.TestBandIdx == 5, true);
-            bool restore20a = WsjtxClient.ShouldRestoreTxLevel(ctrl.Radio.RememberTxLevelPerBand, wc.TestBandIdx, ctrl.Radio.TxLevelByBand, out double v20a);
-            Check("...and the real tracked band correctly picks 20m's own saved level",
-                restore20a && Math.Abs(v20a - 0.70) < 0.0001, true);
 
             var snap40m = ParseDirectSnapshot(@"{
                 ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
@@ -7261,16 +7228,10 @@ static class JimmyTests
             wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap40m);
             Check("Switching to 40m -> bandIdx follows the real dial frequency (index 3)",
                 wc.TestBandIdx == 3, true);
-            bool restore40 = WsjtxClient.ShouldRestoreTxLevel(ctrl.Radio.RememberTxLevelPerBand, wc.TestBandIdx, ctrl.Radio.TxLevelByBand, out double v40);
-            Check("...and picks 40m's own saved level, not 20m's",
-                restore40 && Math.Abs(v40 - 0.30) < 0.0001, true);
 
             wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap20m);
             Check("Returning to 20m -> bandIdx correctly comes back to index 5, not stuck on 40m",
                 wc.TestBandIdx == 5, true);
-            bool restore20b = WsjtxClient.ShouldRestoreTxLevel(ctrl.Radio.RememberTxLevelPerBand, wc.TestBandIdx, ctrl.Radio.TxLevelByBand, out double v20b);
-            Check("...and restores the ORIGINAL 20m level again -- the exact 'switch away and back' case",
-                restore20b && Math.Abs(v20b - 0.70) < 0.0001, true);
         }
         catch (Exception ex)
         {
@@ -7690,21 +7651,18 @@ static class JimmyTests
         }
     }
 
-    // ── Fix, 2026-09-14: opt-in per-band TX level still wins over the general restore ──
-    // RestoreTxLevelForBand only fires on a genuine CONFIRMED band CHANGE (newBand -- gated on
-    // lastDialFrequency already being non-null and differing from the new one), never on a
-    // connection's very first poll (lastDialFrequency starts null every connection --
-    // ConnectDirectEngine's own reset). So the general LastTxLevel restore (this connection's
-    // first poll) and the per-band restore (a LATER poll, once a real band change is confirmed)
-    // never race within one poll -- they simply happen in that order, and the per-band one must
-    // still be the value actually left in effect once both have run.
+    // ── Per-band TX level since Nexus 1.23: the engine's memory goes back at connect ──
+    // The connection's first idle poll restores the general last level, THEN hands the engine
+    // its per-band memory (queued after, so it replaces whatever that set remembered). The
+    // engine brings back the band's own level by itself; LastTxLevel must follow what the
+    // snapshot then reports, so the next restart starts from the level really in use.
     static void DirectStartupPerBandTxLevelOverridesGeneralRestoreTests()
     {
         Console.WriteLine("\n── DirectInitialConnect: per-band TX level restore still wins over the general restore ──");
         var commands = new List<string>();
         var engineListener = new StubEngineHost(line =>
         {
-            if (line != null && line.StartsWith("SET_TX_LEVEL")) lock (commands) commands.Add(line);
+            if (line != null && (line.StartsWith("SET_TX_LEVEL") || line.StartsWith("SET_FT_DRIVE_MEMORY"))) lock (commands) commands.Add(line);
             return "OK";
         });
         if (engineListener == null)
@@ -7727,42 +7685,38 @@ static class JimmyTests
             // operator's rig moves from 20m (the connection's first snapshot) to 15m.
             ctrl.Radio.LastTxLevel = 0.5;
             ctrl.Radio.RememberTxLevelPerBand = true;
-            ctrl.Radio.TxLevelByBand[7] = 0.8;
+            ctrl.Radio.FtDrive = "15m/FT8=0.8;15m=0.8";
             var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
-            // First snapshot: 20m (index 5) -- the connection's first poll. The general restore
-            // (0.5) fires here; no per-band entry exists for band 5, so nothing else does.
             var snap1 = ParseDirectSnapshot(@"{
                 ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
-                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3000 }
+                ""radio"": { ""dialMhz"": 21.074, ""txLevel"": 0.5, ""transmitting"": false, ""tuning"": false, ""slot"": 3000 }
             }");
             wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap1);
-            PumpUntil(() => { lock (commands) return commands.Count >= 1; }, timeoutMs: 8000);
-
-            // Second snapshot: a genuine confirmed band change to 15m (index 7) -- THIS is what
-            // actually triggers RestoreTxLevelForBand, restoring the per-band 0.8.
-            var snap2 = ParseDirectSnapshot(@"{
-                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
-                ""radio"": { ""dialMhz"": 21.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3001 }
-            }");
-            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap2);
             PumpUntil(() => { lock (commands) return commands.Count >= 2; }, timeoutMs: 8000);
 
             List<string> seen;
             lock (commands) seen = new List<string>(commands);
-            Check("Both the general and the per-band SET_TX_LEVEL were sent",
-                seen.Count == 2, true);
+            Check("Both the general level and the engine memory were sent", seen.Count == 2, true);
             if (seen.Count == 2)
             {
-                CheckStr("...the general restore (0.5) is sent FIRST, on the connection's first poll", seen[0], "SET_TX_LEVEL 0.5");
-                CheckStr("...the per-band restore (0.8) is sent SECOND, on the confirmed band change, so it wins", seen[1], "SET_TX_LEVEL 0.8");
+                CheckStr("...the general restore (0.5) FIRST", seen[0], "SET_TX_LEVEL 0.5");
+                CheckStr("...then the saved per-band memory, so the engine's band level wins", seen[1], "SET_FT_DRIVE_MEMORY on 15m/FT8=0.8;15m=0.8");
             }
-            // The general LastTxLevel bookkeeping itself must end up tracking the value actually
-            // left in effect (0.8), not the stale general value it started from -- otherwise the
-            // NEXT restart's general restore would reapply the wrong number until the operator
-            // changed bands again.
-            PumpUntil(() => Math.Abs(ctrl.Radio.LastTxLevel - 0.8) < 1e-9, timeoutMs: 2000);
-            Check("ctrl.Radio.LastTxLevel converges to the winning per-band value (0.8)",
+
+            // The engine brings back 15m's 0.8 at its next quiet tick; the next snapshot says so.
+            var snap2 = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 21.074, ""txLevel"": 0.8, ""transmitting"": false, ""tuning"": false, ""slot"": 3001 }
+            }");
+            // Polled repeatedly, as the ~1 s SNAPSHOT poll does: a poll that lands while the
+            // startup SET_TX_LEVEL is still in flight leaves LastTxLevel to the next one.
+            PumpUntil(() =>
+            {
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap2);
+                return Math.Abs(ctrl.Radio.LastTxLevel - 0.8) < 1e-9;
+            }, timeoutMs: 3000);
+            Check("ctrl.Radio.LastTxLevel follows the level the engine brought back (0.8)",
                 Math.Abs(ctrl.Radio.LastTxLevel - 0.8) < 1e-9, true);
         }
         catch (Exception ex)
@@ -11241,6 +11195,14 @@ static class JimmyTests
         wpx["TEST_RULE"].WorkedSet = new HashSet<string>(new[] { "K1", "PA0" }, StringComparer.OrdinalIgnoreCase);
         Check("live WPX: a prefix not yet worked -> tagged", AwardMatcher.Match(wpx, "IT9ABC", null, null, () => 0, () => 0, wpxPrefix: "IT9") == "TEST_RULE", true);
         Check("live WPX: a prefix already worked -> not tagged", AwardMatcher.Match(wpx, "PA/N8BJQ", null, null, () => 0, () => 0, wpxPrefix: "PA0") == null, true);
+        // 2026-11-09: an island a cluster spot named rides on the decode, so IOTA tags live.
+        Check("live tracking allowed for IOTA", RuleEngine.SupportsLiveTag(new RuleDefinition { GroupBy = RuleGroupBy.Iota }), true);
+        var iotaTags = new Dictionary<string, WsjtxClient.ActiveAwardTag>
+        {
+            ["IOTA_T"] = new WsjtxClient.ActiveAwardTag { RuleId = "IOTA_T", GroupBy = RuleGroupBy.Iota, Set = new HashSet<string> { "AF-004" } },
+        };
+        Check("IOTA: a needed island matches", AwardMatcher.Match(iotaTags, "EA8ABC", null, "AF", null, null, iota: "af-004") == "IOTA_T", true);
+        Check("IOTA: no island named, no match", AwardMatcher.Match(iotaTags, "EA8ABC", null, "AF", null, null) == null, true);
         Check("live tracking allowed for WPX and WAE", RuleEngine.SupportsLiveTag(new RuleDefinition { GroupBy = RuleGroupBy.Prefix })
               && RuleEngine.SupportsLiveTag(new RuleDefinition { GroupBy = RuleGroupBy.WaeCountry }), true);
     }
@@ -18386,12 +18348,12 @@ static class JimmyTests
                     CheckStr($"{label}: Shift+Tab is the mirror", string.Join(" -> ", backwardSeq),
                         string.Join(" -> ", expected.Take(expected.Length - 1).Prepend("Categories")));
                 }
-                CheckPage("POTA / SOTA", 0, new[] { "Spots list", "Row order", "Prepare this station", "Choose this park for the station", "Refresh POTA and SOTA spots now", "Status", "Close" });
+                CheckPage("POTA / SOTA / WWFF", 0, new[] { "Show POTA", "Show SOTA", "Show WWFF", "Spots list", "Row order", "Prepare this station", "Choose this park for the station", "Refresh activator spots now", "Status", "Close" });
                 CheckPage("Contests", 1, new[] { "Contests list", "Open details", "Refresh calendar", "Check for rules updates", "Calendar status", "Close" });
                 CheckPage("Band Conditions", 2, new[] { "Headline", "Bands list", "Refresh band conditions now", "Status", "Close" });
                 CheckPage("DX Spots", 3, new[] { "Spots list", "Row order", "Prepare this station", "Refresh DX spots now", "Status", "Close" });
                 CheckPage("Space Weather", 4, new[] { "Readings", "Ionosondes, measured MUF", "Daily solar history, newest first", "Refresh space weather now", "Status", "Close" });
-                CheckPage("Who Hears Me", 5, new[] { "Summary", "Time window", "Stations list", "Row order", "Refresh who hears me now", "Status", "Close" });
+                CheckPage("Who Hears Me", 5, new[] { "Summary", "Time window", "Sort by", "Stations list", "Start fresh", "Row order", "Refresh who hears me now", "Status", "Close" });
                 CheckPage("DXpeditions", 6, new[] { "Show", "Needed only", "DXpeditions list", "Open website", "Refresh DXpeditions", "Status", "Close" });
                 w.Close();
             }
@@ -20811,12 +20773,48 @@ static class JimmyTests
         }, null, new SolarWindResult { BzNt = -4.2f, SpeedKms = 420, Density = 5.2f, MeasuredAgeSecs = 300 }, null);
         CheckStr("space weather: every reading one plain line",
             string.Join(" | ", wxRows),
-            "Solar flux 152 | Sunspot number 118 | K index 2.3 | A index 7 | X-ray C class, radio blackout R0, none | " +
+            "Solar flux 152 | Sunspot number 118 | K index 2.3, estimated | A index 7 | X-ray C class, radio blackout R0, none | " +
             "Long-haul MUF 21.4 megahertz | Geomagnetic storm G0, quiet, tomorrow G1, minor | Radiation storm S0, none | " +
             "Solar wind Bz -4.2 nanotesla, southward | Solar wind 420 kilometers per second, 5.2 protons per cubic centimeter | " +
             "Solar wind measured 5 minutes ago");
         Check("space weather: nothing in brackets, no scientific notation",
             wxRows.Any(r => r.Contains("(") || r.Contains("e-") || r.Contains("W/m")), false);
+
+        // 2026-11-09 (Nexus 1.23): the K index says measured or estimated; Who Hears Me sorts by
+        // Nexus's own orders and says its Start fresh time; the "now" lines and their wording.
+        CheckStr("kp: measured, with its period", OtaSpotsWindow.FormatKpRow(5.6f, new KpMeasured { Kp = 5.33f, FromUnix = 1791331200 + 21 * 3600, ToUnix = 1791331200 + 24 * 3600 }),
+            "K index 5.3, measured 21:00 to 00:00 UTC");
+        var heardSet = new[]
+        {
+            new HeardMe { Call = "K1AA", Km = 900, Snr = -5, AgeSecs = 300 },
+            new HeardMe { Call = "DL1AA", Km = 6400, Snr = null, AgeSecs = 30 },
+            new HeardMe { Call = "JA1AA", Km = 10000, Snr = -20, AgeSecs = 600 },
+        };
+        CheckStr("heard sort: distance", string.Join(" ", OtaSpotsWindow.SortHeard(heardSet, "distance").Select(h => h.Call)), "JA1AA DL1AA K1AA");
+        CheckStr("heard sort: callsign", string.Join(" ", OtaSpotsWindow.SortHeard(heardSet, "call").Select(h => h.Call)), "DL1AA JA1AA K1AA");
+        CheckStr("heard sort: newest", string.Join(" ", OtaSpotsWindow.SortHeard(heardSet, "newest").Select(h => h.Call)), "DL1AA K1AA JA1AA");
+        CheckStr("heard sort: strongest, no SNR last", string.Join(" ", OtaSpotsWindow.SortHeard(heardSet, "snr").Select(h => h.Call)), "K1AA JA1AA DL1AA");
+        CheckStr("heard summary since Start fresh", OtaSpotsWindow.FormatHeardMeSummary(new GettingOutResult { Count = 2, MaxKm = 900, WindowMinutes = 60, SinceUnix = 1791331200 + 14 * 3600 + 32 * 60 }),
+            "2 stations heard you since 14:32 UTC, furthest 900 km.");
+        CheckStr("flare sentence", SpaceWeatherAlerts.FlareSentence(new NowFlare { R = 2, XrayLong = 5.2e-5f, Out = "20m", Weak = "15m", Recovery = new NowRecovery { At = 1791331200 + 14 * 3600 + 50 * 60 } }),
+            "M5.2 solar flare, 20 meters and lower out on daylight paths, up to 15 meters weakened, until about 14:50 UTC.");
+        CheckStr("watch sentence", SpaceWeatherAlerts.WatchSentence(new NowWatch { G = 2, From = 1791331200 + 86400, To = 1791331200 + 2 * 86400, Issued = 1 }, 1791331200 + 3600),
+            "Geomagnetic storm watch, G2, expected tomorrow.");
+        var alerts = new SpaceWeatherAlerts();
+        var m1 = new SpaceNow { Flare = new NowFlare { R = 1, XrayLong = 1.1e-5f, XrayAt = 10, Weak = "20m" }, Watch = new NowWatch { G = 1, From = 0, To = 1791331200 + 86400, Issued = 7 } };
+        Check("alerts: a flare and a watch are said when they begin", alerts.Check(m1, 1791331200).Count == 2, true);
+        Check("alerts: the same reading again says nothing", alerts.Check(m1, 1791331200).Count == 0, true);
+        m1.Flare.R = 2;
+        Check("alerts: a stronger flare is said again", alerts.Check(m1, 1791331200).Count == 1, true);
+        alerts.Check(new SpaceNow(), 1791331200);
+        Check("alerts: after it ends, the next flare is said; the watch is not said twice", alerts.Check(m1, 1791331200).Count == 1, true);
+        Check("path words: Nexus's window", Controller.WindowWords("1400–1700Z") == "1400 to 1700 UTC" && Controller.WindowWords("—") == "", true);
+        CheckStr("path sentence: long path", Controller.PathSentence("JA1AA", new PathToResult
+            {
+                Band = "20m", ShortBearingDeg = 323, LongBearingDeg = 143, Verdict = "long", Confidence = "likely",
+                Workability = "Good", Window = "1300–0000Z", LongWorkability = "Excellent", LongWindow = "2100–0000Z", MeasuredSpaceWeather = true,
+            }),
+            "JA1AA, 20 meters: long path likely, beam 143 degrees. Excellent, best 2100 to 0000 UTC.");
 
         // The fast-lane X-ray (2026-10-08): the minute-by-minute reading wins over the 10-minute
         // one; an old one says so; an older EngineHost (no fields) shows the combined one; the
@@ -26570,81 +26568,78 @@ static class JimmyTests
             "JimmyTxLevelDurable_" + Guid.NewGuid().ToString("N") + ".ini");
         try
         {
-            // 1. SaveTxLevelByBandToIni writes exactly the key the full SaveToIni writes, and
+            // 1. SaveFtDriveToIni writes exactly the key the full SaveToIni writes, and
             //    LoadFromIni round-trips it.
             var r1 = new RadioSettings();
             r1.RememberTxLevelPerBand = true;
-            r1.TxLevelByBand[5] = 0.42;
-            r1.TxLevelByBand[9] = 0.6;
+            r1.FtDrive = "20m/FT8=0.42;20m=0.42;10m=0.6";
             var full = new IniFile(tmpIni + ".full");
             r1.SaveToIni(full);
             var partial = new IniFile(tmpIni + ".partial");
-            r1.SaveTxLevelByBandToIni(partial);
-            CheckStr("SaveTxLevelByBandToIni writes the same string as the full SaveToIni",
-                partial.Read("radioTxLevelByBand"), full.Read("radioTxLevelByBand"));
-
+            r1.SaveFtDriveToIni(partial);
+            CheckStr("SaveFtDriveToIni writes the same string as the full SaveToIni",
+                partial.Read("radioFtDrive"), full.Read("radioFtDrive"));
             var r1b = new RadioSettings();
             r1b.LoadFromIni(partial);
-            Check("map round-trips: band 5 == 0.42",
-                r1b.TxLevelByBand.TryGetValue(5, out double b5) && Math.Abs(b5 - 0.42) < 1e-9, true);
-            Check("map round-trips: band 9 == 0.6",
-                r1b.TxLevelByBand.TryGetValue(9, out double b9) && Math.Abs(b9 - 0.6) < 1e-9, true);
+            CheckStr("the engine memory round-trips", r1b.FtDrive, "20m/FT8=0.42;20m=0.42;10m=0.6");
 
             // 2. A partial write leaves other radio settings in the same file untouched.
             var mixed = new IniFile(tmpIni + ".mixed");
             mixed.Write("radioAudioStepDb", "1.5");
             mixed.Write("radioRememberTxLevelPerBand", "True");
             var rMix = new RadioSettings();
-            rMix.TxLevelByBand[3] = 0.25;
-            rMix.SaveTxLevelByBandToIni(mixed);
+            rMix.FtDrive = "40m=0.25";
+            rMix.SaveFtDriveToIni(mixed);
             CheckStr("partial write does not disturb radioAudioStepDb",
                 mixed.Read("radioAudioStepDb"), "1.5");
             CheckStr("partial write does not disturb radioRememberTxLevelPerBand",
                 mixed.Read("radioRememberTxLevelPerBand"), "True");
-            CheckStr("partial write did persist the map key", mixed.Read("radioTxLevelByBand"), "3=0.25");
+            CheckStr("partial write did persist the memory key", mixed.Read("radioFtDrive"), "40m=0.25");
 
-            // 3. Controller.PersistTxLevelPerBandNow writes the current in-memory map to the
+            // 3. A pre-1.23 profile: its per-band levels load as the engine's bare-band entries,
+            //    and the old key goes at the next save.
+            var old = new IniFile(tmpIni + ".old");
+            old.Write("radioTxLevelByBand", "5=0.42;9=0.6");
+            var rOld = new RadioSettings();
+            rOld.LoadFromIni(old);
+            CheckStr("pre-1.23 levels carried into the engine memory", rOld.FtDrive, "20m=0.42;10m=0.6");
+            rOld.SaveFtDriveToIni(old);
+            Check("the pre-1.23 key is removed on save", old.KeyExists("radioTxLevelByBand"), false);
+            CheckStr("...and the carried levels are saved in its place", old.Read("radioFtDrive"), "20m=0.42;10m=0.6");
+
+            // 4. Controller.PersistTxLevelPerBandNow writes the current memory to the
             //    active-profile ini seam; a fresh RadioSettings reads it back.
             var ctrl = new Controller();
             var seamIni = new IniFile(tmpIni);
             ctrl.SetIniFileForTest(seamIni);
             ctrl.Radio.RememberTxLevelPerBand = true;
-            ctrl.Radio.TxLevelByBand[5] = 0.33;
+            ctrl.Radio.FtDrive = "20m=0.33";
             ctrl.PersistTxLevelPerBandNow();
             var reloaded = new RadioSettings();
             reloaded.LoadFromIni(new IniFile(tmpIni));
-            Check("PersistTxLevelPerBandNow committed band 5 == 0.33",
-                reloaded.TxLevelByBand.TryGetValue(5, out double p5) && Math.Abs(p5 - 0.33) < 1e-9, true);
+            CheckStr("PersistTxLevelPerBandNow committed the memory", reloaded.FtDrive, "20m=0.33");
 
-            // 4. Note (arm debounce) then Flush writes the SETTLED value immediately; a run of
-            //    Notes with a changing map settles to only the final value.
-            ctrl.Radio.TxLevelByBand[5] = 0.40; ctrl.NoteTxLevelPerBandConfirmed();
-            ctrl.Radio.TxLevelByBand[5] = 0.45; ctrl.NoteTxLevelPerBandConfirmed();
-            ctrl.Radio.TxLevelByBand[5] = 0.50; ctrl.NoteTxLevelPerBandConfirmed();
+            // 5. Note (arm debounce) then Flush writes the SETTLED value immediately; a run of
+            //    Notes with a changing memory settles to only the final value.
+            ctrl.Radio.FtDrive = "20m=0.4"; ctrl.NoteTxLevelPerBandConfirmed();
+            ctrl.Radio.FtDrive = "20m=0.45"; ctrl.NoteTxLevelPerBandConfirmed();
+            ctrl.Radio.FtDrive = "20m=0.5"; ctrl.NoteTxLevelPerBandConfirmed();
             ctrl.FlushPendingTxLevelPersist();
             var afterFlush = new RadioSettings();
             afterFlush.LoadFromIni(new IniFile(tmpIni));
-            Check("rapid confirmed adjustments then flush persist ONLY the final value (0.50)",
-                afterFlush.TxLevelByBand.TryGetValue(5, out double f5) && Math.Abs(f5 - 0.50) < 1e-9, true);
+            CheckStr("rapid confirmed adjustments then flush persist ONLY the final value",
+                afterFlush.FtDrive, "20m=0.5");
 
-            // 5. Flush with nothing pending is a no-op and does not throw.
+            // 6. Flush with nothing pending is a no-op and does not throw.
             ctrl.FlushPendingTxLevelPersist();
             Check("Flush with nothing pending is a harmless no-op", true, true);
 
-            // 6. Safety: with no active ini (pre-Form_Load), arming the debounce must not throw.
+            // 7. Safety: with no active ini (pre-Form_Load), arming the debounce must not throw.
             var bare = new Controller();
-            bare.Radio.TxLevelByBand[1] = 0.9;
+            bare.Radio.FtDrive = "80m=0.9";
             bare.NoteTxLevelPerBandConfirmed();
             bare.FlushPendingTxLevelPersist();
             Check("NoteTxLevelPerBandConfirmed with no ini yet: no throw, nothing written", true, true);
-
-            // 7. Safety constraint: an unknown current band is never persisted per band.
-            Check("ShouldRememberTxLevelForBand: unknown band (null) -> not remembered",
-                WsjtxClient.ShouldRememberTxLevelForBand(true, null, out _), false);
-            Check("ShouldRememberTxLevelForBand: feature off -> not remembered",
-                WsjtxClient.ShouldRememberTxLevelForBand(false, 5, out _), false);
-            Check("ShouldRememberTxLevelForBand: on + known band -> remembered under that band key",
-                WsjtxClient.ShouldRememberTxLevelForBand(true, 7, out int key7) && key7 == 7, true);
 
             // 8. Fix, 2026-09-14: LastTxLevel (the general, unconditional "remember my last TX
             //    level" fallback) round-trips through SaveLastTxLevelToIni/LoadFromIni the same
@@ -26712,7 +26707,7 @@ static class JimmyTests
         }
         finally
         {
-            foreach (string p in new[] { tmpIni, tmpIni + ".full", tmpIni + ".partial", tmpIni + ".mixed" })
+            foreach (string p in new[] { tmpIni, tmpIni + ".full", tmpIni + ".partial", tmpIni + ".mixed", tmpIni + ".old" })
                 try { System.IO.File.Delete(p); } catch { }
         }
     }
