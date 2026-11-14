@@ -537,9 +537,9 @@ pub fn log_import(host: &LogHost, engine: &Mutex<Engine>, args: LogFileArgs) -> 
     let (made, durability) = tempo_app::logwrite::until_written(|| tempo_app::logwrite::import_adif(engine, &text));
     drop(gate);
     match made {
-        Ok((added, skipped, merged, total)) => after_durable(
+        Ok((added, skipped, merged, total, unmatched)) => after_durable(
             durability,
-            serde_json::json!({ "added": added, "skipped": skipped, "merged": merged, "total": total }),
+            serde_json::json!({ "added": added, "skipped": skipped, "merged": merged, "total": total, "unmatched": unmatched }),
         ),
         Err(e) => WriteReply::refused("error", Some(e)),
     }

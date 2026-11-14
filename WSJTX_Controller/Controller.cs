@@ -988,6 +988,7 @@ namespace WSJTX_Controller
                 rawShowGrid = iniFile.Read("rawShowGrid") != "False";
                 rawShowCountry = iniFile.Read("rawShowCountry") != "False";
                 rawShowDistAz = iniFile.Read("rawShowDistAz") == "True";
+                DistanceUnits.Setting = iniFile.Read("distanceUnits");   // missing = Automatic
                 rawOnlyCallsigns = iniFile.Read("rawOnlyCallsigns") == "True";
                 rawOnlyUnworked = iniFile.Read("rawOnlyUnworked") == "True";
                 rawOnlyRanked = iniFile.Read("rawOnlyRanked") == "True";
@@ -3951,6 +3952,18 @@ namespace WSJTX_Controller
                 return true;
             }
 
+            if (keyData == hotkeyConfig[HotkeyAction.BestTimes] && hotkeyConfig[HotkeyAction.BestTimes] != Keys.None)
+            {
+                SayBestTimesForSelectedStation();
+                return true;
+            }
+
+            if (keyData == hotkeyConfig[HotkeyAction.TransmitOn] && hotkeyConfig[HotkeyAction.TransmitOn] != Keys.None)
+            {
+                wsjtxClient?.TransmitOnAfterCatLoss();
+                return true;
+            }
+
             if (keyData == hotkeyConfig[HotkeyAction.WhoHearsMeStartFresh] && hotkeyConfig[HotkeyAction.WhoHearsMeStartFresh] != Keys.None)
             {
                 WhoHearsMeStartFresh();
@@ -4575,6 +4588,130 @@ namespace WSJTX_Controller
             return said;
         }
 
+        // "Transmit on" button (Nexus 1.24, 2026-11-12): the same as the Transmit On hotkey, for a
+        // mouse user. Shown only while Nexus holds transmit off after a CAT loss, in the Options
+        // button's row (left half; Options keeps the right), just before Options in the Tab order.
+        // Showing it never moves focus.
+        private Button _transmitOnButton;
+        private Rectangle? _optionsButtonBoundsBeforeTransmitOn;
+
+        internal void UpdateTransmitOnButton(bool show)
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired) { SafeBeginInvoke(() => UpdateTransmitOnButton(show)); return; }
+            if (show == (_transmitOnButton?.Visible ?? false)) return;
+            if (_transmitOnButton == null)
+            {
+                _transmitOnButton = new Button
+                {
+                    Text = "Transmit on",
+                    AccessibleName = "Transmit on",
+                    AccessibleDescription = "Turn transmit back on after the radio stopped answering CAT",
+                    Font = optionsButton.Font,
+                    UseVisualStyleBackColor = true,
+                    TabStop = true,
+                    TabIndex = 103,
+                    Visible = false,
+                    Anchor = AnchorStyles.Top | AnchorStyles.Left,
+                };
+                _transmitOnButton.Click += (s, e) => wsjtxClient?.TransmitOnAfterCatLoss();
+                Controls.Add(_transmitOnButton);
+            }
+            if (show)
+            {
+                var b = optionsButton.Bounds;
+                _optionsButtonBoundsBeforeTransmitOn = b;
+                int half = b.Width / 2;
+                _transmitOnButton.Bounds = new Rectangle(b.Left, b.Top, half - 4, b.Height);
+                optionsButton.Bounds = new Rectangle(b.Left + half, b.Top, b.Width - half, b.Height);
+                _transmitOnButton.Visible = true;
+            }
+            else
+            {
+                _transmitOnButton.Visible = false;
+                if (_optionsButtonBoundsBeforeTransmitOn.HasValue)
+                {
+                    var b = _optionsButtonBoundsBeforeTransmitOn.Value;
+                    // Keep any width change made while it showed (the window resized): Options is
+                    // anchored left and right, so its right edge has followed the window.
+                    optionsButton.Bounds = new Rectangle(b.Left, b.Top, optionsButton.Right - b.Left, b.Height);
+                    _optionsButtonBoundsBeforeTransmitOn = null;
+                }
+            }
+        }
+
+        // Best Times to Work Selected Station (Nexus 1.24, 2026-11-12): Nexus's own answer for the
+        // selected station, in the current mode -- now, the next two windows, and storm days this
+        // week. Same station and grid rules as Path to; off the UI thread; changes nothing.
+        internal void SayBestTimesForSelectedStation()
+        {
+            string call = ResolveFocusedOrSelectedCall();
+            if (string.IsNullOrEmpty(call)) { ShowMessage(Wording.Get("Msg.PathNoStation"), false); return; }
+            string grid = wsjtxClient?.GridHeardFrom(call);
+            if (string.IsNullOrEmpty(grid)) { ShowMessage(Wording.Fill("Msg.PathNoGrid", ("Call", call)), false); return; }
+            string mode = wsjtxClient?.CurrentMode == "FT4" ? "FT4" : "FT8";
+            bool full = pathModelFull;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                var r = new ExternalDataClient().GetBestTimes(grid, mode, full, out string error);
+                string said = error != null || r == null ? "Best times not available: " + (error ?? "no answer.")
+                    : r.Error != null ? "Best times not available: " + r.Error + "."
+                    : BestTimesSentence(call, r, DateTime.UtcNow, DisplayTime.Zone);
+                SafeBeginInvoke(() => ShowMessage(said, false));
+            });
+        }
+
+        // Nexus's Best times answer in a few short sentences: now (band, word, until when), the next
+        // two windows that have not started, and the forecast storm days. Never a percentage; times
+        // in the display zone (UTC unless "my selected time zone" is on), named once.
+        internal static string BestTimesSentence(string call, BestTimesResult r, DateTime nowUtc, TimeZoneInfo zone)
+        {
+            if (r.State == "tooClose") return Wording.Fill("Msg.BestTooClose", ("Call", call));
+            var a = r.Answer;
+            if (a == null) return "Best times not available: no answer.";
+            if (a.NoTxBand) return Wording.Fill("Msg.BestNoBand", ("Call", call), ("Mode", a.Mode ?? "FT8"));
+            string zoneName = DisplayTime.Abbreviation(nowUtc, zone);
+            string Hhmm(long unix) => TimeZoneInfo.ConvertTimeFromUtc(DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime, zone)
+                .ToString("HHmm", System.Globalization.CultureInfo.InvariantCulture);
+            string Band(string band, string route) =>
+                SpaceWeatherAlerts.BandWords(band) + (route == "long" ? " long path" : "");
+
+            var parts = new List<string>();
+            var now = a.Now;
+            string until = now == null ? "" : now.AllDay ? ", all day" : now.UntilUnix.HasValue ? $", until {Hhmm(now.UntilUnix.Value)} {zoneName}" : "";
+            if (now != null && now.Kind == "try" && now.Band != null)
+            {
+                string s = Wording.Fill("Msg.BestNow", ("Call", call), ("Band", Band(now.Band, now.Route)), ("Word", now.Word ?? ""), ("Until", until));
+                if (now.RunnerUp?.Band != null) s = s.TrimEnd('.') + $", also {SpaceWeatherAlerts.BandWords(now.RunnerUp.Band)}.";
+                parts.Add(s);
+            }
+            else if (now != null && now.Kind == "longShot" && now.Band != null)
+                parts.Add(Wording.Fill("Msg.BestLongShot", ("Call", call), ("Band", Band(now.Band, now.Route)), ("Until", until)));
+            else
+                parts.Add(Wording.Fill("Msg.BestNotNow", ("Call", call)));
+            if (now?.PassedOver?.Band != null)
+                parts.Add($"{SpaceWeatherAlerts.BandWords(now.PassedOver.Band)} absorbed now.");
+
+            long nowUnix = new DateTimeOffset(DateTime.SpecifyKind(nowUtc, DateTimeKind.Utc)).ToUnixTimeSeconds();
+            var next = (a.Windows ?? new List<BestTimesWindow>()).Where(w => w.FromUnix > nowUnix).Take(2)
+                .Select(w => $"{Band(w.Band, w.Route)} {Hhmm(w.FromUnix)} to {Hhmm(w.ToUnix)}, {w.Word}"
+                             + (w.Greyline ? ", greyline" : "") + (w.LongShot ? ", long shot" : ""))
+                .ToList();
+            if (next.Count > 0) parts.Add(Wording.Fill("Msg.BestNext", ("Windows", string.Join("; ", next) + " " + zoneName)));
+
+            var flags = a.Week?.Flags ?? new List<BestTimesWeekFlag>();
+            if (flags.Count > 0)
+            {
+                string days = string.Join(", ", flags.Select(f =>
+                    TimeZoneInfo.ConvertTimeFromUtc(DateTimeOffset.FromUnixTimeSeconds(f.DayUnix).UtcDateTime, TimeZoneInfo.Utc)
+                        .ToString("dddd", System.Globalization.CultureInfo.InvariantCulture)
+                    + " Kp " + f.Kp.ToString("0", System.Globalization.CultureInfo.InvariantCulture)));
+                parts.Add(Wording.Fill("Msg.BestStorm", ("Days", days)));
+            }
+            if (!r.MeasuredSpaceWeather) parts.Add("Space weather not yet read.");
+            return string.Join(" ", parts);
+        }
+
         // Nexus's window ("1400–1700Z", "~1015Z greyline", "—") as said: "1400 to 1700 UTC".
         internal static string WindowWords(string window)
         {
@@ -4589,6 +4726,18 @@ namespace WSJTX_Controller
         {
             get => iniFile == null || !iniFile.KeyExists("pathModelFull") || iniFile.Read("pathModelFull") != "False";
             set => iniFile?.Write("pathModelFull", value ? "True" : "False");
+        }
+
+        // Options > General "Distance units" (2026-11-12, GitHub #3): auto, miles or km, saved
+        // per profile. See DistanceUnits for the automatic rule.
+        internal string distanceUnits
+        {
+            get => DistanceUnits.Setting;
+            set
+            {
+                DistanceUnits.Setting = value;
+                iniFile?.Write("distanceUnits", DistanceUnits.Setting);
+            }
         }
 
         // One SPACE_WX read off the UI thread; what is new is published on it. Nothing while no

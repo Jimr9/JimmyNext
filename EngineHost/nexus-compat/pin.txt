@@ -6,13 +6,18 @@
 # pin, and its "Checking a patch against a newer Nexus" section for what to do when this pin
 # is updated.
 #
-# This integration pins the newest official STABLE release tag, v1.23.0 (2026-11-06), by its
+# This integration pins the newest official STABLE release tag, v1.24.0 (2026-11-11), by its
 # exact commit. NEXUS_COMMIT is the real lock; NEXUS_TAG is the honest human reference.
 # prepare-nexus.ps1 clones --branch NEXUS_TAG --single-branch and then verifies the resolved
-# HEAD equals NEXUS_COMMIT exactly. v1.23.0 is a LIGHTWEIGHT tag: it names the commit below
+# HEAD equals NEXUS_COMMIT exactly. v1.24.0 is a LIGHTWEIGHT tag: it names the commit below
 # directly, which is what HEAD resolves to.
 #
-# Upgraded 2026-11-06 from v1.21.0 (a5777aef), skipping 1.22.0: nine patches. tempo-core-qso.patch
+# Upgraded 2026-11-12 from v1.23.0 (e3b9ef1e): nine patches, same payload (md5 of every +/- line
+# unchanged). tempo-app-settings.patch re-anchored by hand (1.24 added Settings.link_refusals
+# after data_modes_plain_ssb; the default line again tried to fuzz into RadioProfile's Default)
+# and tempo-app-station.patch's field + default re-anchored (1.24 added StationCore.iota_at_log);
+# edit_op, edit_ops and fill_with are unchanged since 1.23. The other seven apply by offset.
+# Earlier: upgraded 2026-11-06 from v1.21.0 (a5777aef), skipping 1.22.0: nine patches. tempo-core-qso.patch
 # retired (upstream #416 is fixed in 1.23: Station::after_tx clears a Confirming RR73 once sent).
 # tempo-app-station.patch re-derived by hand (1.22 rewrote edit_op/edit_ops: an edit keeps a stored
 # country unless it is blank or names another entity; the keep-logged-location gate wraps both, same
@@ -47,10 +52,11 @@
 # re-assessment.
 
 NEXUS_REPO=https://github.com/kd9taw/Nexus.git
-NEXUS_TAG=v1.23.0
-NEXUS_COMMIT=e3b9ef1e68d9d2305db7c67da6ff34d85d2d796c
+NEXUS_TAG=v1.24.0
+NEXUS_COMMIT=8f510d4bac14c12e70d7191e277727e76de77cf1
 
-# DISPOSITION: 2026-11-06 -- pinned AT stable v1.23.0 (operator asked for the upgrade), nothing from main.
+# DISPOSITION: 2026-11-12 -- pinned AT stable v1.24.0 (operator asked for the upgrade), nothing from main.
+# Was: 2026-11-06 -- pinned AT stable v1.23.0 (operator asked for the upgrade), nothing from main.
 # Was: 2026-10-30 -- pinned AT stable v1.21.0 (operator asked for the upgrade), nothing from main
 # (main 437 commits past 1.21.0, not reviewed).
 # Was: 2026-10-22 -- pinned AT stable v1.20.0 (operator asked for the upgrade), nothing from main

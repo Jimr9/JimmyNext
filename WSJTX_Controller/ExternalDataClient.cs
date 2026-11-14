@@ -140,11 +140,75 @@ namespace WSJTX_Controller
         public string Error { get; set; }
     }
 
+    // BEST_TIMES (Nexus 1.24, propagation::besttimes): can I work the station now and on which
+    // band, the next good windows over the coming day, and the week's Kp days on this path.
+    public class BestTimesResult
+    {
+        public string State { get; set; }          // "answer" | "tooClose"
+        public double Km { get; set; }
+        public double BearingDeg { get; set; }
+        public BestTimesAnswer Answer { get; set; }
+        public bool MeasuredSpaceWeather { get; set; }
+        public string Error { get; set; }
+    }
+
+    public class BestTimesAnswer
+    {
+        public string Engine { get; set; }
+        public string Mode { get; set; }
+        public BestTimesNow Now { get; set; }
+        public List<BestTimesWindow> Windows { get; set; }
+        public BestTimesWeek Week { get; set; }
+        public bool NoTxBand { get; set; }
+    }
+
+    public class BestTimesNow
+    {
+        public string Kind { get; set; }           // "try" | "longShot" | "notNow"
+        public string Band { get; set; }
+        public string Word { get; set; }
+        public string Route { get; set; }
+        public long? UntilUnix { get; set; }
+        public bool AllDay { get; set; }
+        public BestTimesBandWord RunnerUp { get; set; }
+        public BestTimesAbsorbed PassedOver { get; set; }
+    }
+
+    public class BestTimesBandWord { public string Band { get; set; } public string Word { get; set; } }
+    public class BestTimesAbsorbed { public string Band { get; set; } public int Db { get; set; } }
+
+    public class BestTimesWindow
+    {
+        public string Band { get; set; }
+        public long FromUnix { get; set; }
+        public long ToUnix { get; set; }
+        public string Word { get; set; }
+        public string Route { get; set; }
+        public bool Greyline { get; set; }
+        public bool LongShot { get; set; }
+        public double? StormKp { get; set; }
+    }
+
+    public class BestTimesWeek
+    {
+        public long? ForecastUntilUnix { get; set; }
+        public List<BestTimesWeekFlag> Flags { get; set; }
+    }
+
+    public class BestTimesWeekFlag { public long DayUnix { get; set; } public double Kp { get; set; } }
+
     public class SpaceWxResult
     {
         public SpaceNow SpaceNow { get; set; }
         public KpMeasured KpMeasured { get; set; }
         public SpaceWx Value { get; set; }
+        // 2026-11-13: when Value's solar flux was measured (unix), 00:00 UT of the day its daily A
+        // is for, and Nexus's own estimate of the A index now (from the current Kp). AStandIn:
+        // NOAA's daily A did not answer, so Value.AIndex is a stand-in. All absent from older hosts.
+        public long? SfiAt { get; set; }
+        public long? ADay { get; set; }
+        public bool AStandIn { get; set; }
+        public float? ApNow { get; set; }
         public long? AgeSecs { get; set; }
         public string LastError { get; set; }
         // Nexus's own representative MUF (ring-max over 8 long-haul directions from the
@@ -529,6 +593,15 @@ namespace WSJTX_Controller
             if (json == null) { error = "No response from engine host."; return null; }
             try { return JsonSerializer.Deserialize<PathToResult>(json, JsonOptions); }
             catch (Exception ex) { error = $"Could not parse PATH_TO response: {ex.Message}"; return null; }
+        }
+
+        public BestTimesResult GetBestTimes(string grid, string mode, bool fullModel, out string error)
+        {
+            error = null;
+            string json = SendCommand($"BEST_TIMES {grid} {mode} {(fullModel ? "p533" : "heuristic")}", 15_000);
+            if (json == null) { error = "No response from engine host."; return null; }
+            try { return JsonSerializer.Deserialize<BestTimesResult>(json, JsonOptions); }
+            catch (Exception ex) { error = $"Could not parse BEST_TIMES response: {ex.Message}"; return null; }
         }
 
         public GettingOutResult GetGettingOut(int windowMinutes, out string error, long? sinceUnix = null)

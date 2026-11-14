@@ -47,6 +47,8 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox _clockCheckCheckBox;
         private System.Windows.Forms.CheckBox _logSpaceWeatherCheckBox;
         private System.Windows.Forms.CheckBox _pathModelFullCheckBox;
+        private System.Windows.Forms.ComboBox _distanceUnitsCombo;
+        private static readonly string[] DistanceUnitValues = { DistanceUnits.Auto, DistanceUnits.Miles, DistanceUnits.Kilometers };
         private System.Windows.Forms.NumericUpDown _maxCallQueueAgeNumeric;
         private System.Windows.Forms.CheckBox rawShowCqCheckBox;
         private System.Windows.Forms.CheckBox rawShowDirectedCheckBox;
@@ -560,6 +562,32 @@ namespace WSJTX_Controller
             };
             generalPanel.Controls.Add(_pathModelFullCheckBox);
 
+            // 2026-11-12 (GitHub #3): miles or kilometers in every list and announcement that
+            // gives a distance. Automatic follows the Windows region, as Nexus does.
+            generalPanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text     = "Distance units:",
+                AutoSize = true,
+                Location = new System.Drawing.Point(10, 296),
+                Font     = font,
+                TabStop  = false
+            });
+            _distanceUnitsCombo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle  = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                AccessibleName = "Distance units",
+                Location       = new System.Drawing.Point(130, 293),
+                Size           = new System.Drawing.Size(240, 21),
+                TabIndex       = 11,
+                Font           = font,
+            };
+            _distanceUnitsCombo.Items.AddRange(new object[] { "Automatic (from Windows region)", "Miles", "Kilometers" });
+            _distanceUnitsCombo.SelectedIndex = Math.Max(0, Array.IndexOf(DistanceUnitValues, ctrl.distanceUnits));
+            generalPanel.Controls.Add(_distanceUnitsCombo);
+            // The tab is now taller than the dialog at larger text sizes: scroll rather than clip,
+            // as receiveReplyPanel does.
+            generalPanel.AutoScroll = true;
+
             // "Announce important notifications when focus is elsewhere" moved to
             // Options > Notifications > Global speech behaviour (2026-09-04) so all automatic-
             // speech behaviour is configured in one place. Same Controller setting / INI key.
@@ -853,6 +881,8 @@ namespace WSJTX_Controller
             // Space weather with each contact: live on a running engine; otherwise the next
             // launch carries it (--log-space-wx). Never worth an engine restart.
             if (_pathModelFullCheckBox != null) ctrl.pathModelFull = _pathModelFullCheckBox.Checked;
+            if (_distanceUnitsCombo != null && _distanceUnitsCombo.SelectedIndex >= 0)
+                ctrl.distanceUnits = DistanceUnitValues[_distanceUnitsCombo.SelectedIndex];
 
             bool logSpaceWeather = _logSpaceWeatherCheckBox?.Checked ?? ctrl.NativeEngine.LogSpaceWeather;
             if (logSpaceWeather != ctrl.NativeEngine.LogSpaceWeather)
@@ -3989,6 +4019,7 @@ namespace WSJTX_Controller
                 NotificationEventType.ConnectionLost,
                 NotificationEventType.RadioCatLost,
                 NotificationEventType.RadioCatRecovered,
+                NotificationEventType.TransmitOffCat,
                 NotificationEventType.ClockOutOfSync,
                 NotificationEventType.ClockSynced,
                 NotificationEventType.AutoTxResume,
@@ -5760,8 +5791,9 @@ namespace WSJTX_Controller
 
             // General tab
             // Below the last row: at (10, 61) it sat on top of "Move focus to status after
-            // selecting a call". It is still last in the tab order, as before.
-            ReparentTo(ctrl.showUsStateCheckBox, generalPanel, new Point(10, 243));
+            // selecting a call". It is still last in the tab order, as before. Moved to 321
+            // (2026-11-12): 2.0.89's space weather and path model rows had taken 243 and 268.
+            ReparentTo(ctrl.showUsStateCheckBox, generalPanel, new Point(10, 321));
         }
 
         private System.Windows.Forms.Label _txFreqModeLabel;
@@ -6155,6 +6187,7 @@ namespace WSJTX_Controller
             HotkeyAction.CallCqOptions,
             HotkeyAction.ListenMode,
             HotkeyAction.EnableTx,
+            HotkeyAction.TransmitOn,
             HotkeyAction.HaltTx,
             HotkeyAction.NextCall,
             HotkeyAction.ManualCall,
@@ -6190,6 +6223,7 @@ namespace WSJTX_Controller
             HotkeyAction.StationWatchStatus,
             HotkeyAction.LookupStation,
             HotkeyAction.PathToStation,
+            HotkeyAction.BestTimes,
             HotkeyAction.OpenLogbook,
             HotkeyAction.AddManualQso,
             HotkeyAction.OpenOtaSpots,

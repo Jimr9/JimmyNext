@@ -1265,7 +1265,7 @@ namespace WSJTX_Controller
                     $"recovery announcement published on this tick");
                 _catLostAtUtc = null;
                 if (_lastCatOk == false || _catOutageObservedThisSession)
-                    Notify?.Publish(new RadioCatRecoveredEvent());
+                    Notify?.Publish(new RadioCatRecoveredEvent(CatTxOffActive ? " Transmit is off. " + CatTxOffHowToResume() : ""));
             }
             else
             {
@@ -1442,6 +1442,7 @@ namespace WSJTX_Controller
             // "Radio CAT link lost"/recovered -- extracted to its own method 2026-09-02 so the
             // false -> reconnect-reset -> true recovery path is unit-testable directly (see
             // TestApplyCatHealth / ApplyCatHealthNotification).
+            ApplyCatTxOff(snap.CatTxOff);
             ApplyCatHealthNotification(radio.CatOk, radio.CatDetail);
 
             // Fake It split: the radio did not go back to the operating frequency after an over
@@ -3162,6 +3163,15 @@ namespace WSJTX_Controller
                 DebugOutput($"{Time()} [DIRECT] refusing to send '{what}' -- session not yet authenticated");
                 return false;
             }
+            // Nexus 1.24 (2026-11-12): Nexus turned transmit off because the radio stopped answering
+            // CAT. Nothing -- a CQ, a reply, Smart Mode, Alt+E, Tune -- turns it back on until the
+            // operator does (Transmit On), as Nexus's own TX On. Said at most every 10 seconds.
+            if (CatTxOffActive)
+            {
+                DebugOutput($"{Time()} [DIRECT] refusing to send '{what}' -- transmit is off after a CAT loss");
+                AnnounceCatTxOff(force: false);
+                return false;
+            }
             // The engine's own transmit lock (2026-10-12, radio.TxAllowed in the last status):
             // outside the operator's licence class on this frequency, or a radio in split whose
             // transmit frequency is not known. The engine would refuse or stay silent; say why
@@ -3174,6 +3184,71 @@ namespace WSJTX_Controller
                 return false;
             }
             return true;
+        }
+
+        // Nexus 1.24 (2026-11-12): transmit off after a CAT loss (DirectSnapshot.CatTxOff), and
+        // whether the operator has since turned it back on (Transmit On). The acknowledgement ends
+        // when Nexus's own flag does, so the next outage stops transmit again.
+        private bool _catTxOff;
+        private bool _catTxOffAcknowledged;
+        private DateTime _catTxOffSaidUtc = DateTime.MinValue;
+        internal bool CatTxOffActive => _catTxOff && !_catTxOffAcknowledged;
+
+        internal void ApplyCatTxOff(bool catTxOff)
+        {
+            bool began = catTxOff && !_catTxOff;
+            _catTxOff = catTxOff;
+            if (!catTxOff) _catTxOffAcknowledged = false;
+            if (began)
+            {
+                _catTxOffAcknowledged = false;
+                DebugOutput($"{Time()} [CAT] Nexus turned transmit off after a CAT loss; held until Transmit On");
+                Notify?.Publish(new TransmitOffCatEvent(CatTxOffHowToResume()));
+                // Smart Mode must not count on transmitting later from stale readiness.
+                NotifyTargetMonitorsNonActionable();
+            }
+            ctrl.UpdateTransmitOnButton(CatTxOffActive);
+        }
+
+        // "Press Ctrl+Shift+E to transmit again." -- or the button, with no key assigned.
+        internal string CatTxOffHowToResume()
+        {
+            string key = SpokenKey(HotkeyAction.TransmitOn);
+            string full = key == "" ? Wording.Get("Msg.TxOffCatNoKey") : Wording.Fill("Msg.TxOffCatKey", ("Key", key));
+            // The part after the reason: the reason itself is said by the notification.
+            int dot = full.IndexOf(". ", StringComparison.Ordinal);
+            return dot >= 0 ? full.Substring(dot + 2) : full;
+        }
+
+        private void AnnounceCatTxOff(bool force)
+        {
+            if (!force && (DateTime.UtcNow - _catTxOffSaidUtc).TotalSeconds < 10) return;
+            _catTxOffSaidUtc = DateTime.UtcNow;
+            string key = SpokenKey(HotkeyAction.TransmitOn);
+            ctrl.ShowMessage(key == "" ? Wording.Get("Msg.TxOffCatNoKey") : Wording.Fill("Msg.TxOffCatKey", ("Key", key)), false);
+        }
+
+        // Transmit On (hotkey or button): Nexus's own TX On after a CAT loss. Transmit goes back on
+        // and the engine carries on with what it held -- the CQ or the contact in progress -- as
+        // Nexus's TX On does. A contact Jimmy has already given up on is not resumed: transmit is
+        // only made ready, and the operator picks the next station.
+        internal void TransmitOnAfterCatLoss()
+        {
+            if (!_catTxOff || _catTxOffAcknowledged)
+            {
+                ctrl.ShowMessage(Wording.Get("Msg.TransmitOnNothing"), false);
+                return;
+            }
+            _catTxOffAcknowledged = true;
+            ctrl.UpdateTransmitOnButton(false);
+            bool resume = txMode == TxModes.CALL_CQ || (callInProg != null && !txTimeout);
+            DebugOutput($"{Time()} [CAT] Transmit On after a CAT loss: resume:{resume} txMode:{txMode} callInProg:{callInProg} txTimeout:{txTimeout}");
+            if (resume)
+            {
+                EnableTx();
+                Sounds.PlaySoundEvent(ctrl.soundEnabled_TxEnabled, ctrl.soundFile_TxEnabled);
+            }
+            ctrl.ShowMessage(Wording.Get("Msg.TransmitOn"), false);
         }
 
         private bool _directTxLocked;
@@ -4366,6 +4441,7 @@ namespace WSJTX_Controller
         // CAT-health notification coverage (2.0.58): drive the exact edge logic
         // DirectApplyStatus runs, without a full synthetic snapshot.
         internal void TestApplyCatHealth(bool? catOk, string catDetail) => ApplyCatHealthNotification(catOk, catDetail);
+        internal bool TestAuthorizedToArmTx(string what) => DirectAuthorizedToArmTx(what);
         // Mirrors ConnectDirectEngine's own `_lastCatOk = null;` reset line -- and, like it,
         // deliberately leaves _catOutageObservedThisSession alone, which is the whole point of
         // the recovery-across-reconnect regression test.
@@ -4418,6 +4494,11 @@ namespace WSJTX_Controller
         // 2026-09-26: the engine's ACTUAL special-operation state, "none" | "hound" (EngineHost
         // SNAPSHOT injection -- see its set_special_op). Null from an older EngineHost.
         public string SpecialOp { get; set; }
+
+        // Nexus 1.24 (2026-11-12): Nexus turned transmit off because the radio stopped answering
+        // CAT, and holds it off (CAT back or not) until transmit is turned on again. EngineHost
+        // SNAPSHOT injection (main.rs cat_tx_off); false from an older EngineHost.
+        public bool CatTxOff { get; set; }
 
         // 2026-09-26: Nexus's own base call (message::base_call) of qso.dxcall -- "VA3LG/W2" ->
         // "VA3LG". EngineHost SNAPSHOT injection; null with no active QSO / older EngineHost.

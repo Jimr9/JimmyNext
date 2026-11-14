@@ -494,10 +494,12 @@ fn import_preview(engine: &Mutex<Engine>, args: &Args) -> Result<Value, String> 
     let source = import::read_file(&text)?;
     let mut preview = import::preview(&source);
     let adif = source.into_adif();
-    let (new, duplicates, updates) = tempo_app::logwrite::preview_import(engine, adif.as_deref().unwrap_or(&text))?;
+    let (new, duplicates, updates, lotw_unmatched) =
+        tempo_app::logwrite::preview_import(engine, adif.as_deref().unwrap_or(&text))?;
     preview.new = new;
     preview.duplicates = duplicates;
     preview.updates = updates;
+    preview.lotw_unmatched = lotw_unmatched;
     let mut v = serde_json::to_value(&preview).map_err(|e| e.to_string())?;
     v["state"] = json!("ok");
     Ok(v)
@@ -534,9 +536,12 @@ fn import_file(engine: &Mutex<Engine>, args: &Args) -> (Result<Value, String>, D
             tempo_app::logwrite::import_adif_in_run(engine, adif, &run)
         }
     });
-    let made = made.map(|(added, skipped, updated, total)| {
+    // Nexus 1.24: a LoTW report is read as confirmations; `unmatched` counts those matching no
+    // contact (0 for any other file).
+    let made = made.map(|(added, skipped, updated, total, unmatched)| {
         json!({
             "added": added, "skipped": skipped, "updated": updated, "total": total, "run": run,
+            "unmatched": unmatched,
             "report": import::report(&source, (added, skipped, updated), args.new_only),
         })
     });

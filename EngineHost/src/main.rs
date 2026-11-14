@@ -950,6 +950,40 @@ fn set_special_op(eng: &mut Engine, arg: &str) -> Result<&'static str, String> {
     Ok(special_op_wire(eng))
 }
 
+/// The bands the licence lets the operator transmit on in a Best times mode; None for the Open
+/// class (no filter). The Nexus desktop's own `best_times::tx_bands`, which lives in its app crate.
+fn best_times_tx_bands(
+    class: tempo_app::settings::LicenseClass,
+    mode: propagation::besttimes::BestMode,
+) -> Option<Vec<String>> {
+    use propagation::besttimes::BestMode;
+    use tempo_app::settings::{LicenseClass, OperatingMode};
+    if class == LicenseClass::Open {
+        return None;
+    }
+    let section = match mode {
+        BestMode::Ft8 | BestMode::Ft4 => OperatingMode::Digital,
+        BestMode::Cw => OperatingMode::Cw,
+        BestMode::Ssb => OperatingMode::Phone,
+    };
+    Some(
+        tempo_app::bandplan::licensed_bands(class, section)
+            .into_iter()
+            .filter(|b| b.tx)
+            .map(|b| b.band)
+            .collect(),
+    )
+}
+
+/// Nexus 1.24: whether a lost CAT link has turned transmit off. Nexus says so only by ending the
+/// CAT status with one of its two exported sentences (`Engine::cat_detail_with_tx_off`, which adds
+/// them only while transmit is off), so this reads Nexus's own constants rather than a copy of
+/// their words. True until transmit is turned on again or the CAT settings change.
+fn cat_tx_off(cat_detail: &str) -> bool {
+    use tempo_app::engine::{CAT_BACK_TX_OFF, CAT_SILENT_TX_OFF};
+    cat_detail.ends_with(CAT_SILENT_TX_OFF) || cat_detail.ends_with(CAT_BACK_TX_OFF)
+}
+
 /// The engine's ACTUAL special-operation state as Jimmy sees it: `"hound"` (incl. the retired
 /// `superhound` alias, which Nexus runs as Hound) or `"none"`.
 fn special_op_wire(eng: &Engine) -> &'static str {
@@ -1387,6 +1421,9 @@ fn handle_control_connection(
                     // its own request, so an engine restart (Nexus drops Hound at launch) or a
                     // tier switch away from FT8 is visible immediately. See set_special_op.
                     obj.insert("specialOp".to_string(), serde_json::Value::String(special_op.to_string()));
+                    // Nexus 1.24: a lost CAT link turned transmit off, and it stays off (CAT back
+                    // or not) until transmit is turned on again. See cat_tx_off.
+                    obj.insert("catTxOff".to_string(), serde_json::Value::Bool(cat_tx_off(&snap.radio.cat_detail)));
                     // Nexus's OWN base call of the engine's QSO partner (`message::base_call`:
                     // "VA3LG/W2" -> "VA3LG", "KH8/W1AW" -> "W1AW"), so Jimmy can tell that the
                     // station it started the contact with is the engine's partner under a
@@ -1957,6 +1994,31 @@ fn handle_control_connection(
                         w.get(3).and_then(|p| p.parse::<f64>().ok()).filter(|p| *p > 0.0),
                     ),
                     _ => serde_json::json!({ "error": "PATH_TO takes a grid and a band" }).to_string(),
+                };
+                let _ = writeln!(stream, "{reply}");
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            });
+            return;
+        } else if let Some(v) = line.strip_prefix("BEST_TIMES ") {
+            // "BEST_TIMES <grid> <mode> <model> [<watts>]" (2026-11-12, Nexus 1.24): Best times to
+            // work a station. mode FT8 | FT4 | CW | SSB; model as PATH_TO. The licence's transmit
+            // bands come from the engine's own class, as the Nexus desktop reads them. Its own thread.
+            let w: Vec<String> = v.split_whitespace().map(str::to_string).collect();
+            let mode = w.get(1).and_then(|m| propagation::besttimes::BestMode::parse(m)).unwrap_or(propagation::besttimes::BestMode::Ft8);
+            let class = engine.lock().unwrap_or_else(|e| e.into_inner()).settings().license_class;
+            let tx = best_times_tx_bands(class, mode);
+            let cache = external_cache.clone();
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let reply = match w.first() {
+                    Some(grid) => cache.best_times_json(
+                        grid,
+                        mode,
+                        w.get(2).map(String::as_str).unwrap_or("p533"),
+                        w.get(3).and_then(|p| p.parse::<f64>().ok()).filter(|p| *p > 0.0),
+                        tx,
+                    ),
+                    None => serde_json::json!({ "error": "BEST_TIMES takes a grid" }).to_string(),
                 };
                 let _ = writeln!(stream, "{reply}");
                 let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -2990,6 +3052,25 @@ mod tests {
     // slot transmit and Tune -- and is let back in on 10 m; a General is allowed on 20 m; Novice and
     // Advanced are their own classes (since Nexus 1.21); "open",
     // nothing, or a word Nexus has no rules for means no lockout.
+    // Nexus 1.24: a lost CAT link turns transmit off; catTxOff says so, stays true when CAT
+    // answers again, and ends when transmit is turned on.
+    #[test]
+    fn cat_tx_off_follows_nexus_own_sentence() {
+        let mut eng = Engine::new("KB0UZT", "EN34", 0);
+        eng.set_cat_status(Some(true), "14.074 MHz".to_string());
+        assert!(!cat_tx_off(&eng.snapshot().radio.cat_detail), "an ordinary status");
+
+        eng.set_cat_status(Some(false), "no reply".to_string());
+        eng.say_tx_off_for_silent_cat();
+        assert!(cat_tx_off(&eng.snapshot().radio.cat_detail), "CAT lost, transmit off");
+
+        eng.set_cat_status(Some(true), "14.074 MHz".to_string());
+        assert!(cat_tx_off(&eng.snapshot().radio.cat_detail), "CAT back, transmit still off");
+
+        eng.set_tx_enabled(true);
+        assert!(!cat_tx_off(&eng.snapshot().radio.cat_detail), "transmit on again");
+    }
+
     #[test]
     fn license_class_reaches_the_engines_own_transmit_gate() {
         use tempo_app::settings::LicenseClass;

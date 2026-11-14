@@ -247,8 +247,22 @@ namespace WSJTX_Controller
                 RepeatSeconds = 0,
                 ThrottleMilliseconds = 0,
                 // Reworded 2026-09-02 (2.0.58 CAT-notification pass): "restored" reads as the
-                // clean counterpart to "lost" below.
-                Template = "Radio CAT link restored.",
+                // clean counterpart to "lost" below. {TransmitNote} (Nexus 1.24, 2026-11-12):
+                // " Transmit is off. Press ... to transmit again." while Nexus still holds
+                // transmit off for the outage; empty otherwise.
+                Template = "Radio CAT link restored.{TransmitNote}",
+            },
+
+            // Nexus 1.24 (2026-11-12): Nexus turned transmit off once, after the over in progress,
+            // because the radio stopped answering CAT. Important: the operator must know transmit
+            // will not come back on its own.
+            [NotificationEventType.TransmitOffCat] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Important,
+                RepeatSeconds = 0,
+                ThrottleMilliseconds = 0,
+                Template = "Transmit off, the radio stopped answering CAT. {HowToResume}",
             },
 
             // Added 2026-09-02 (2.0.58): the rig's CAT link going down, as its own typed event
@@ -551,6 +565,7 @@ namespace WSJTX_Controller
             [NotificationEventType.ClockSynced] = "Computer clock back in sync",
             [NotificationEventType.RadioCatRecovered] = "Radio CAT link recovered",
             [NotificationEventType.RadioCatLost] = "Radio CAT link lost",
+            [NotificationEventType.TransmitOffCat] = "Transmit off after CAT loss",
             [NotificationEventType.AutoTxResume] = "Automatic transmit resume",
             [NotificationEventType.SpaceWeatherStormWatch] = "Geomagnetic storm watch",
             [NotificationEventType.SpaceWeatherFlare] = "Solar flare",

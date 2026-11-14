@@ -666,7 +666,6 @@ namespace WSJTX_Controller
         string toCallTxStart = null;
         DateTime txBeginTime = DateTime.MaxValue;
         bool shortTx = false;
-        bool metricUnits = false;
         private int decodeNum = 0;
         private const int maxCheckTxRepeat = 2;
         private int decodeCycle = 0;

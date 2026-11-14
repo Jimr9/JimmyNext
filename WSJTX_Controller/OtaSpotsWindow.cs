@@ -1152,7 +1152,7 @@ namespace WSJTX_Controller
             string window = r.SinceUnix != null ? "since " + SinceText(r.SinceUnix.Value) : $"in the last {r.WindowMinutes} minutes";
             if (r.Count == 0) return $"No reports of your signal {window}.";
             string who = r.Count == 1 ? "1 station heard you" : $"{r.Count} stations heard you";
-            return r.MaxKm > 0 ? $"{who} {window}, furthest {r.MaxKm:N0} km." : $"{who} {window}.";
+            return r.MaxKm > 0 ? $"{who} {window}, furthest {DistanceUnits.FromKm(r.MaxKm):N0} {DistanceUnits.ShortName}." :$"{who} {window}.";
         }
 
         // ── DXpeditions (2026-10-08) ─────────────────────────────────────────────
@@ -1626,10 +1626,12 @@ namespace WSJTX_Controller
             else
             {
                 var wx = result.Value;
-                rows.Add($"Solar flux {wx.Sfi:0}");
+                rows.Add(result.SfiAt.HasValue
+                    ? $"Solar flux {wx.Sfi:0}, daily value for {UtcDayWords(result.SfiAt.Value)}"
+                    : $"Solar flux {wx.Sfi:0}");
                 rows.Add(FormatSunspotRow(wx.Ssn, history));
                 rows.Add(FormatKpRow(wx.Kp, result.KpMeasured));
-                rows.Add($"A index {wx.AIndex:0}");
+                rows.Add(FormatAIndexRow(wx.AIndex, result.ADay, result.AStandIn, result.ApNow));
                 rows.Add(FormatXrayRow(result));
                 rows.Add(result.MufNow.HasValue
                     ? $"Long-haul MUF {result.MufNow.Value:0.#} megahertz"
@@ -1679,6 +1681,21 @@ namespace WSJTX_Controller
             return $"K index {measured.Kp.ToString("0.#", inv)}, measured {Hour(measured.FromUnix)} to {Hour(measured.ToUnix)} {DisplayTime.Abbreviation(toUtc, zone)}";
         }
 
+        // "November 13": the UT day of a unix time, the way the sunspot line dates its daily count.
+        internal static string UtcDayWords(long unix) =>
+            DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime.ToString("MMMM d", System.Globalization.CultureInfo.InvariantCulture);
+
+        // The A index (2026-11-13): NOAA's daily A is for the last COMPLETE UT day, so it is dated,
+        // and Nexus's own estimate for right now (from the current Kp) follows it. A stand-in
+        // (NOAA's daily A did not answer) is never shown as a reading.
+        internal static string FormatAIndexRow(float aIndex, long? aDay, bool standIn, float? apNow)
+        {
+            string now = apNow.HasValue ? $"estimated now {apNow.Value:0}" : null;
+            if (standIn) return now != null ? $"A index {now}, daily not available" : "A index not available";
+            string daily = aDay.HasValue ? $"A index {aIndex:0}, daily for {UtcDayWords(aDay.Value)}" : $"A index {aIndex:0}";
+            return now != null ? $"{daily}, {now}" : daily;
+        }
+
         // Nexus leaves the current reading's sunspot number empty (its desktop fills it from a
         // separate predicted-cycle feed EngineHost does not read), so the row said "not available"
         // every time while the daily history below had NOAA's real count (2026-10-08). The newest
@@ -1715,7 +1732,7 @@ namespace WSJTX_Controller
             return list.Select((s, i) => (s, i)).OrderBy(x => Recent(x.s) ? 0 : 1).ThenBy(x => x.i).Select(x =>
             {
                 var s = x.s;
-                string dist = s.DistanceKm.HasValue ? $", {s.DistanceKm.Value.ToString("#,0", inv)} kilometers" : "";
+                string dist = s.DistanceKm.HasValue ? $", {DistanceUnits.FromKm(s.DistanceKm.Value).ToString("#,0", inv)} {DistanceUnits.LongName}" : "";
                 string age = s.MeasuredAgeSecs.HasValue ? "measured " + LongAgeWords(s.MeasuredAgeSecs.Value) : "measurement time not known";
                 string code = string.IsNullOrWhiteSpace(s.Code) ? "" : ", " + s.Code.Trim();
                 return $"{Where(s)}: {Mhz(s.MufMhz, "MUF")}, {Mhz(s.Fof2Mhz, "foF2")}{dist}, {age}{code}";

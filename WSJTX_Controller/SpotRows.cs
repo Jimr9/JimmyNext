@@ -299,7 +299,7 @@ namespace WSJTX_Controller
                     case "grid": return hasGrid ? h.Grid : "";
                     case "band": return h.Band;
                     case "snr": return h.Snr.HasValue ? $"{h.Snr.Value:+0;-0;0} dB" : "SNR not reported";
-                    case "distance": return hasGrid ? $"{h.Km:N0} km" : "distance unknown";
+                    case "distance": return hasGrid ? $"{DistanceUnits.FromKm(h.Km):N0} {DistanceUnits.ShortName}" : "distance unknown";
                     case "direction": return hasGrid ? h.Octant : "";
                     case "age": return age;
                     default: return "";

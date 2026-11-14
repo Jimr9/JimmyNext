@@ -57,6 +57,9 @@ namespace WSJTX_Controller
         // connection (COM port / baud); the raw cat_detail is preserved for diagnostics/logging
         // and is still available as {Detail} for anyone who wants it in a custom template.
         RadioCatLost,
+        // Nexus 1.24 (2026-11-12): Nexus turned transmit off because the radio stopped answering
+        // CAT; it stays off until the operator turns it back on (Transmit On).
+        TransmitOffCat,
 
         // Added 2026-09-04: Jimmy's transmit was resumed automatically (the native engine's
         // own "wait and reply" cooperation resuming a stalled QSO after the other station

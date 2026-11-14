@@ -260,7 +260,11 @@ namespace WSJTX_Controller
             },
             [NotificationEventType.RadioCatRecovered] = new List<NotificationVariable>
             {
-                // Carries no data of its own -- {Time} (added by every type) is all it offers.
+                new NotificationVariable("TransmitNote", "While transmit is still off after the outage: \" Transmit is off. Press ... to transmit again.\" Empty otherwise."),
+            },
+            [NotificationEventType.TransmitOffCat] = new List<NotificationVariable>
+            {
+                new NotificationVariable("HowToResume", "\"Press <your Transmit On key> to transmit again.\", or the Transmit on button when no key is assigned."),
             },
             [NotificationEventType.RadioCatLost] = new List<NotificationVariable>
             {

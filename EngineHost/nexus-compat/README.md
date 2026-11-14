@@ -59,6 +59,33 @@ stay pinned; do NOT import `main`. What the next stable upgrade needs:
   SET_CLOCK_CHECK uses Nexus's public `apply_settings` + `clear_clock_offset(true)`; ATU_STATUS
   reads PTT with Nexus's `Rig::read_ptt`. Both are public API -- check they still exist.
 
+## Nine-patch re-assessment -- 2026-11-12 (v1.23.0 -> v1.24.0 upgrade)
+
+`pin.txt` now names v1.24.0 (`8f510d4b`, a lightweight tag). Every patch was tried against a clean
+v1.24.0 first; all nine keep the same payload (md5 of every `+`/`-` line unchanged).
+
+- **`tempo-app-settings.patch` re-anchored by hand.** 1.24 put `Settings.link_refusals` after
+  `data_modes_plain_ssb`; the default-value hunk again tried to fuzz into `RadioProfile`'s
+  `Default` and was placed in `Settings`' by hand.
+- **`tempo-app-station.patch`: field and default re-anchored.** 1.24 added `StationCore.iota_at_log`
+  next to `state_resolve`. `edit_op`, `edit_ops` and `fill_with` are unchanged since 1.23.
+- **The other seven apply by offset** (rigctld test hunk 3 with fuzz 2; regenerated, so none fuzz now).
+- **Still needed, checked on 1.24:** `parse("CQ W1AW")` is still `Msg::Other` (filed upstream as
+  #512, which covers the message and inbox patches); no `dont_set_mode`, PSK Reporter setter,
+  `last_decodes_multiplexed`, `set_keep_logged_location` or `set_ft_drive_memory` upstream;
+  `build.rs` still canonicalizes; the rigctld test paths unchanged.
+- **EngineHost API:** `logwrite::import_adif*` answer a fifth count and `preview_import` a fourth,
+  `unmatched` / `lotw_unmatched` (a LoTW report is read as confirmations); both are passed to Jimmy.
+  `EQSL_PROGRAM_VERSION` = 1.24.0. The desktop's LoTW download (`is_complete_lotw_body`,
+  `download_lotw_report_impl`) is unchanged, so EngineHost's copy stands.
+- **New EngineHost uses of 1.24 (not patches):** SNAPSHOT `catTxOff` from Nexus's own
+  `CAT_SILENT_TX_OFF` / `CAT_BACK_TX_OFF` (a lost CAT link turned transmit off; Jimmy holds every
+  transmit start until Transmit On); `BEST_TIMES <grid> <mode> <model>` =
+  `propagation::besttimes::best_times` built as the desktop's `get_best_times` builds it (licence
+  bands from the engine's class; 300 km floor copied from the desktop's `TOO_CLOSE_KM`).
+- **Not adopted:** IOTA filled at log time (`StationCore::iota_at_log` is injected by the desktop's
+  command layer; EngineHost does not inject it, so nothing is filled).
+
 ## Nine-patch re-assessment -- 2026-11-06 (v1.21.0 -> v1.23.0 upgrade, 1.22.0 skipped)
 
 `pin.txt` now names v1.23.0 (`e3b9ef1e`, a lightweight tag). Every patch was tried against a clean

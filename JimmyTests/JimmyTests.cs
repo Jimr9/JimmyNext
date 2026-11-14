@@ -2030,6 +2030,7 @@ static class JimmyTests
         DirectTxHoldSafetyNetTests();
         DirectPollFailureNotificationTests();
         DirectCatHealthNotificationTests();
+        DirectCatTxOffTests();
         DirectCatDownIdleStatusCompositionTests();
         DirectActiveQsoStatusNoDuplicateCallTests();
         HaltPurgesQueuedTxArmCommandTests();
@@ -2190,6 +2191,8 @@ static class JimmyTests
         NexusDuplicateStatusTests();
         NexusLogbookLoadingTests();
         WorkedShadowComparerTests();
+        DistanceUnitsTests();
+        BestTimesSentenceTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
@@ -20748,6 +20751,7 @@ static class JimmyTests
     static void NexusNewFeedTextTests()
     {
         Console.WriteLine("\n── Who hears me / solar wind / solar history text ──");
+        DistanceUnits.Setting = DistanceUnits.Kilometers;   // texts below are written in km
         CheckStr("heard: full row", OtaSpotsWindow.FormatHeardMeRow(new HeardMe { Call = "VK3AA", Grid = "QF22", Band = "20m", Snr = -14, Km = 16021, Octant = "W", AgeSecs = 120 }),
             "VK3AA QF22, 20m, -14 dB, 16,021 km W, 2m ago");
         CheckStr("heard: no SNR, no grid", OtaSpotsWindow.FormatHeardMeRow(new HeardMe { Call = "DL1AA", Band = "40m", Km = 0, AgeSecs = 30 }),
@@ -20836,6 +20840,17 @@ static class JimmyTests
         Check("x-ray: the other rows are unchanged by it",
             OtaSpotsWindow.FormatSpaceWeatherRows(fresh, null, null, null)[0] == "Solar flux 152", true);
 
+        // 2026-11-13: the solar flux and the daily A say which UT day they are for, the A is
+        // followed by Nexus's estimate for now, and a stand-in A is never shown as a reading.
+        var dated = new SpaceWxResult { Value = combined, SfiAt = 1794600000, ADay = 1794528000, ApNow = 3f };   // 2026-11-13 20:00 / 00:00 UT
+        var datedRows = OtaSpotsWindow.FormatSpaceWeatherRows(dated, null, null, null);
+        Check("space weather: the solar flux is dated", datedRows[0] == "Solar flux 152, daily value for November 13", true);
+        Check("space weather: the daily A is dated, with the estimate now",
+            datedRows.Contains("A index 0, daily for November 13, estimated now 3"), true);
+        Check("space weather: a stand-in A is not a reading",
+            OtaSpotsWindow.FormatAIndexRow(8f, null, true, 3f) == "A index estimated now 3, daily not available"
+            && OtaSpotsWindow.FormatAIndexRow(8f, null, true, null) == "A index not available", true);
+
         // DXpeditions (2026-10-08): announced dates in UTC with the whole end day, Club Log's
         // on-air word said as such, no announced mode kept, needs from the log or "not known".
         long oct7 = 1791331200, day = 86400;   // 2026-10-07 00:00 UTC
@@ -20920,6 +20935,7 @@ static class JimmyTests
         CheckStr("Smart Mode row: one line, every field", SmartModeWindow.RowText(new WsjtxClient.SmartStationRow {
             Shown = "V 2 6 K", Status = "current, calling", LastHeard = "30 seconds ago, K0MV V26K RR73", Calls = "5 of 20", OnList = "12 of 20 minutes" }),
             "V 2 6 K, current, calling, last heard 30 seconds ago, K0MV V26K RR73, calls 5 of 20, on the list 12 of 20 minutes");
+        DistanceUnits.Setting = DistanceUnits.Auto;
     }
 
     // The "CQ type" row field shows the CQ as received (2026-10-04).
@@ -22796,9 +22812,30 @@ static class JimmyTests
 
     // Handoffs 20, 29, 30 (2026-10-12): where an activation is, which checked awards a spot
     // counts for on its own band, and rows built from fields in the operator's order.
+    // GitHub #3 (2026-11-12): Options > General "Distance units".
+    static void DistanceUnitsTests()
+    {
+        Console.WriteLine("\n── Distance units: Automatic / Miles / Kilometers ──");
+        CheckStr("a missing setting is Automatic", DistanceUnits.Normalize(null), "auto");
+        CheckStr("an unknown word is Automatic", DistanceUnits.Normalize("furlongs"), "auto");
+        Check("Automatic: miles in the US", DistanceUnits.UseMilesFor("auto", "US"), true);
+        Check("Automatic: miles in Liberia and Myanmar", DistanceUnits.UseMilesFor("auto", "LR") && DistanceUnits.UseMilesFor("auto", "MM"), true);
+        Check("Automatic: kilometers in Germany and the UK", DistanceUnits.UseMilesFor("auto", "DE") || DistanceUnits.UseMilesFor("auto", "GB"), false);
+        Check("Automatic with no region: kilometers", DistanceUnits.UseMilesFor("auto", ""), false);
+        Check("Miles wins over the region", DistanceUnits.UseMilesFor("miles", "DE"), true);
+        Check("Kilometers wins over the region", DistanceUnits.UseMilesFor("km", "US"), false);
+        Check("1316 km is 818 mi (the factor the lists always used)", DistanceUnits.FromKm(1316, true) == 818, true);
+        Check("kilometers are left as they are", DistanceUnits.FromKm(1316, false) == 1316, true);
+        DistanceUnits.Setting = DistanceUnits.Miles;
+        CheckStr("Who Hears Me in miles", OtaSpotsWindow.FormatHeardMeSummary(new GettingOutResult { Count = 2, MaxKm = 900, WindowMinutes = 60 }),
+            "2 stations heard you in the last 60 minutes, furthest 559 mi.");
+        DistanceUnits.Setting = DistanceUnits.Auto;
+    }
+
     static void SpotRowsTests()
     {
         Console.WriteLine("\n── Spots: activation place, award labels on the spot's band, row order ──");
+        DistanceUnits.Setting = DistanceUnits.Kilometers;   // rows below are written in km
         WsjtxClient.ActiveAwardTag Tag(string id, string shortName, RuleGroupBy by, string[] needed, string[] unconf = null) => new WsjtxClient.ActiveAwardTag
         {
             RuleId = id, RuleName = id + " award", ShortName = shortName, GroupBy = by, ShowInStatus = false, StatusName = "status only",
@@ -22910,6 +22947,7 @@ static class JimmyTests
         ParkChoices.Choose("K7TWO", "US-9000", "US-ID,US-WY", t0);
         Check("none given: no state, as before", ParkChoices.Peek("K7TWO", t0).State == null, true);
         ParkChoices.ClearAll();
+        DistanceUnits.Setting = DistanceUnits.Auto;
     }
 
     // Handoff 21 (2026-10-12): Prepare this station. The plan for a spot (what would be set, or
@@ -25115,6 +25153,89 @@ static class JimmyTests
     // "restored" notification was heard, because a Direct transport/engine reconnect resets
     // _lastCatOk to null, making the next healthy reading look like a clean startup. The session
     // latch (_catOutageObservedThisSession, NOT reset on reconnect) fixes that.
+    // Nexus 1.24 (2026-11-12): a lost CAT link turns transmit off (EngineHost catTxOff). Jimmy says
+    // so with the Transmit On key, starts nothing until the operator turns transmit back on, and
+    // stops again at the next outage.
+    static void DirectCatTxOffTests()
+    {
+        Console.WriteLine("\n── Nexus 1.24: transmit off after a CAT loss, and Transmit On ──");
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        var delivery = new FakeNotificationDelivery();
+        wc.Notify = NewTestNotificationCenter(new NotificationSettings(), delivery);
+
+        var snap = ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""EN34"", ""catTxOff"": true, ""radio"": { ""dialMhz"": 14.074 } }");
+        Check("the engine's flag is read", snap.CatTxOff, true);
+        Check("an older engine without it means no stop",
+            ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""EN34"", ""radio"": { ""dialMhz"": 14.074 } }").CatTxOff, false);
+
+        Check("transmit may start before any outage", wc.TestAuthorizedToArmTx("CQ"), true);
+        wc.ApplyCatTxOff(true);
+        Check("the stop is announced once", delivery.AnnounceCount == 1, true);
+        Check("...saying transmit is off and naming the Transmit On key (Ctrl+Shift+E by default)",
+            delivery.LastText.StartsWith("Transmit off") && delivery.LastText.Contains("E to transmit again"), true);
+        Check("no transmit start goes out while it stands", wc.TestAuthorizedToArmTx("CQ"), false);
+        wc.ApplyCatTxOff(true);
+        Check("a repeated flag is not announced again", delivery.AnnounceCount == 1, true);
+
+        wc.TestApplyCatHealth(false, "no reply");
+        wc.TestApplyCatHealth(true, null);
+        Check("CAT back: the restored message says transmit is still off",
+            delivery.LastText.StartsWith("Radio CAT link restored. Transmit is off.") && delivery.LastText.Contains("E to transmit again"), true);
+
+        wc.TransmitOnAfterCatLoss();
+        Check("Transmit On lets transmit start again", wc.TestAuthorizedToArmTx("CQ"), true);
+        Check("...while Nexus's own flag has not yet cleared", wc.CatTxOffActive, false);
+        wc.ApplyCatTxOff(false);
+        wc.ApplyCatTxOff(true);
+        Check("the next outage stops transmit again", wc.TestAuthorizedToArmTx("CQ"), false);
+        Check("...and is announced again", delivery.AnnounceCount >= 4, true);
+        ctrl.Dispose();
+    }
+
+    // Nexus 1.24 (2026-11-12): Best times in words -- now, the next two windows, storm days.
+    static void BestTimesSentenceTests()
+    {
+        Console.WriteLine("\n── Best times to work a station, in words ──");
+        var now = new DateTime(2026, 11, 12, 5, 30, 0, DateTimeKind.Utc);
+        long U(int h) => new DateTimeOffset(new DateTime(2026, 11, 12, 0, 0, 0, DateTimeKind.Utc).AddHours(h)).ToUnixTimeSeconds();
+        var r = new BestTimesResult
+        {
+            State = "answer", MeasuredSpaceWeather = true,
+            Answer = new BestTimesAnswer
+            {
+                Mode = "FT8",
+                Now = new BestTimesNow { Kind = "try", Band = "30m", Word = "Fair", Route = "short", UntilUnix = U(7) },
+                Windows = new List<BestTimesWindow>
+                {
+                    new BestTimesWindow { Band = "30m", FromUnix = U(4), ToUnix = U(7), Word = "Fair" },
+                    new BestTimesWindow { Band = "20m", FromUnix = U(10), ToUnix = U(13), Word = "Good", Route = "long" },
+                    new BestTimesWindow { Band = "40m", FromUnix = U(13), ToUnix = U(14), Word = "Fair", Greyline = true },
+                    new BestTimesWindow { Band = "15m", FromUnix = U(20), ToUnix = U(22), Word = "Fair" },
+                },
+                Week = new BestTimesWeek { Flags = new List<BestTimesWeekFlag> { new BestTimesWeekFlag { DayUnix = U(48), Kp = 6 } } },
+            },
+        };
+        CheckStr("now, the next two windows not yet begun, and the storm day",
+            Controller.BestTimesSentence("JA1ABC", r, now, TimeZoneInfo.Utc),
+            "JA1ABC: 30 meters now, Fair, until 0700 UTC. Next: 20 meters long path 1000 to 1300, Good; 40 meters 1300 to 1400, Fair, greyline UTC. Storm forecast Saturday Kp 6.");
+        r.Answer.Now = new BestTimesNow { Kind = "notNow" };
+        r.Answer.Windows.Clear();
+        r.Answer.Week.Flags.Clear();
+        r.MeasuredSpaceWeather = false;
+        CheckStr("nothing open, nothing ahead", Controller.BestTimesSentence("JA1ABC", r, now, TimeZoneInfo.Utc),
+            "JA1ABC: not now. Space weather not yet read.");
+        CheckStr("too close", Controller.BestTimesSentence("W9XYZ", new BestTimesResult { State = "tooClose" }, now, TimeZoneInfo.Utc),
+            "W9XYZ is too close for a prediction.");
+        r.Answer.NoTxBand = true;
+        CheckStr("no licensed band", Controller.BestTimesSentence("JA1ABC", r, now, TimeZoneInfo.Utc),
+            "JA1ABC: your license has no FT8 band to predict.");
+    }
+
     static void DirectCatHealthNotificationTests()
     {
         Console.WriteLine("\n── Direct-path CAT-loss / CAT-recovery notification ──");
@@ -27115,9 +27236,20 @@ static class JimmyTests
         tm.ObserveDecode(D($"W1ABC/H {THEIR_CALL} RR73"), true, MY_CALL);
         Check("Fox/Hound RR73 to a peer -> ready, busy cleared", tm.ReadyToStart && !tm.BusyWithOther, true);
 
-        // Rule 4/5: a report / R-report / RRR to a peer means the target IS actively working
+        // Operator policy (2026-11-13): a target -> peer RRR closes that contact the same as
+        // RR73 -- the peer's 73 follows and the target usually sends nothing more, so waiting
+        // for a 73/RR73 from the target meant waiting for its next CQ.
+        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 3 };
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} R-05"), true, MY_CALL);  // working W1ABC -> busy
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RRR"), true, MY_CALL);   // closes to W1ABC with RRR
+        Check("target -> peer RRR -> immediately ready, busy cleared, no silence wait",
+            tm.ReadyToStart && !tm.BusyWithOther, true);
+        tm.ConsumeReadyToStart();
+
+        // Rule 4/5: a report / R-report to a peer means the target IS actively working
         // someone -- Smart Start yields; it becomes available again only via the configurable
-        // clean-silence count (rule 6) or a CQ/RR73/73.
+        // clean-silence count (rule 6) or a CQ/RR73/RRR/73.
         void SilentOpps(TargetMonitor m, int n, ulong startSlot)
         {
             for (int i = 0; i < n; i++)
@@ -27127,8 +27259,8 @@ static class JimmyTests
         tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
         tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
         tm.ConsumeReadyToStart();
-        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RRR"), true, MY_CALL);   // RRR to a peer -> still busy (rule 5)
-        Check("RRR to a peer -> busy, not ready (rule 5)", tm.BusyWithOther && !tm.ReadyToStart, true);
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} -08"), true, MY_CALL);   // report to a peer -> busy (rule 5)
+        Check("report to a peer -> busy, not ready (rule 5)", tm.BusyWithOther && !tm.ReadyToStart, true);
         SilentOpps(tm, 1 + 2, 2);   // 1 absorbed + 2 of 3
         Check("...one short of the configured silence count is still not ready", !tm.ReadyToStart && tm.SilenceCount == 2, true);
         tm.OnReceivePeriodComplete(8, true, "20m", "FT8", "tok1", false);   // 3 of 3

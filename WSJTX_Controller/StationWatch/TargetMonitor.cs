@@ -777,29 +777,34 @@ namespace WSJTX_Controller
             // BOTH purposes it clears BusyWithOther, and for Smart Start it signals ready right
             // away (rules 2 & 3: call at the next legitimate transmit opportunity, with NO extra
             // silence periods). Every OTHER kind of target -> peer traffic -- report, R-report,
-            // RRR, or any other directed payload -- means the target is actively working someone
+            // or any other directed payload -- means the target is actively working someone
             // else: for Smart Start that sets BusyWithOther and restarts the ONE configurable
             // clean-silence count from zero (rules 4 & 5). The count then becomes available
             // again after SilenceThreshold clean target-parity opportunities (rule 6), or the
             // moment the target sends a CQ / RR73 / 73 / addresses us. Station Watch / Work Now
             // keep their existing "RR73/73 to a peer = finishing" reading (they never auto-key).
-            if (sem.IsRr73 || sem.Is73)
+            //
+            // Operator policy (2026-11-13): a target -> peer RRR is a closing too, the same as
+            // RR73. The peer answers it with 73 and the target usually sends nothing more, so
+            // treating RRR as busy left Smart Start waiting for the target's next CQ (WSJT-X
+            // operators tail-end on an RRR exactly as on an RR73).
+            if (sem.IsRr73 || sem.Is73 || sem.IsRrr)
             {
                 BusyWithOther = false;
                 _rr73AwaitingOneMoreOpportunity = false;
-                if (sem.IsRr73) Raise(TargetObservationKind.TargetRr73, TargetCall, peer, payload, d.Message);
-                else            Raise(TargetObservationKind.Target73, TargetCall, peer, payload, d.Message);
+                if (sem.IsRr73)      Raise(TargetObservationKind.TargetRr73, TargetCall, peer, payload, d.Message);
+                else if (sem.IsRrr)  Raise(TargetObservationKind.TargetRrr, TargetCall, peer, payload, d.Message);
+                else                 Raise(TargetObservationKind.Target73, TargetCall, peer, payload, d.Message);
                 if (Purpose == TargetPurpose.SmartStart) SignalReady();
                 return;
             }
 
-            // report / R-report / RRR / any other directed payload to a peer -> working someone.
+            // report / R-report / any other directed payload to a peer -> working someone.
             BusyWithOther = true;
             _rr73AwaitingOneMoreOpportunity = false;
             SilenceCount = 0;
             _lastCountedSlot = null;
 
-            if (sem.IsRrr)       { Raise(TargetObservationKind.TargetRrr, TargetCall, peer, payload, d.Message); return; }
             if (sem.IsRReport)   { Raise(TargetObservationKind.TargetRReport, TargetCall, peer, payload, d.Message); return; }
             if (sem.IsReport)    { Raise(TargetObservationKind.TargetReport, TargetCall, peer, payload, d.Message); return; }
             if (addressingUs)    { Raise(TargetObservationKind.TargetAddressingUs, TargetCall, peer, payload, d.Message); return; }

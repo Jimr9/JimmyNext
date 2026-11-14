@@ -746,9 +746,29 @@ namespace WSJTX_Controller
     // ConnectionLost/ClockSynced's own null-DedupKey convention.
     public sealed class RadioCatRecoveredEvent : INotificationEvent
     {
+        // Nexus 1.24: " Transmit is off. Press ... to transmit again." while transmit stays off
+        // after the outage; "" otherwise.
+        public string TransmitNote { get; }
+        public RadioCatRecoveredEvent(string transmitNote = "") { TransmitNote = transmitNote ?? ""; }
         public NotificationEventType EventType => NotificationEventType.RadioCatRecovered;
         public string DedupKey => null;
-        public IReadOnlyDictionary<string, string> ToTokens() => EmptyTokens.Instance;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["TransmitNote"] = TransmitNote,
+        };
+    }
+
+    // Nexus 1.24 (2026-11-12): Nexus turned transmit off because the radio stopped answering CAT.
+    public sealed class TransmitOffCatEvent : INotificationEvent
+    {
+        public string HowToResume { get; }
+        public TransmitOffCatEvent(string howToResume) { HowToResume = howToResume ?? ""; }
+        public NotificationEventType EventType => NotificationEventType.TransmitOffCat;
+        public string DedupKey => null;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["HowToResume"] = HowToResume,
+        };
     }
 
     // The rig's CAT link going down. Its own type (not ErrorWarningEvent) so the default

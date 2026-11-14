@@ -1,5 +1,5 @@
 diff --git a/src/message.rs b/src/message.rs
-index eb45a9755..d669cf940 100644
+index eb45a97..d669cf9 100644
 --- a/src/message.rs
 +++ b/src/message.rs
 @@ -431,6 +431,34 @@ pub fn parse_ack(s: &str) -> Option<(String, String, char)> {

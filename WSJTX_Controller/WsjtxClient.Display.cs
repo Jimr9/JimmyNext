@@ -17,11 +17,14 @@ namespace WSJTX_Controller
         // Returns ", <hint>" (the status line's separator) or "".
         private string KeyHint(HotkeyAction action, string entry)
         {
+            // Nexus 1.24: while transmit is held off after a CAT loss, Enable Transmit cannot turn
+            // it on; the hint names Transmit On instead.
+            if (action == HotkeyAction.EnableTx && CatTxOffActive) { action = HotkeyAction.TransmitOn; entry = "Status.TransmitOnHint"; }
             string key = SpokenKey(action);
             return key == "" ? "" : ", " + Wording.Fill(entry, ("Key", key));
         }
 
-        private string SpokenKey(HotkeyAction action)
+        internal string SpokenKey(HotkeyAction action)
         {
             var hk = ctrl.hotkeyConfig;   // not loaded yet: the built-in defaults
             Keys keys = hk != null ? hk[action] : (HotkeyConfig.Defaults.TryGetValue(action, out Keys d) ? d : Keys.None);
@@ -372,8 +375,8 @@ namespace WSJTX_Controller
                 if (state != null) country = $", {state}";
             }
 
-            int dist = metricUnits || classification.Distance < 0 ? classification.Distance : (int)((0.6213 * classification.Distance) + 0.5);
-            string unitsStr = metricUnits ? "km" : "mi";
+            int dist = classification.Distance < 0 ? classification.Distance : DistanceUnits.FromKm(classification.Distance);
+            string unitsStr = DistanceUnits.ShortName;
             string distAz = (classification.Distance >= 0 && classification.Azimuth >= 0) ? $", {dist}{unitsStr}, {classification.Azimuth}°" : "";
 
             string oe = debug ? $", {d.SinceMidnight.Minutes.ToString().PadLeft(2, '0')}:{d.SinceMidnight.Seconds.ToString().PadLeft(2, '0')}" : "";
@@ -538,8 +541,8 @@ namespace WSJTX_Controller
                 string distAz = "";
                 if (ctrl.rawShowDistAz && classification.Distance >= 0 && classification.Azimuth >= 0)
                 {
-                    int dist = metricUnits || classification.Distance < 0 ? classification.Distance : (int)((0.6213 * classification.Distance) + 0.5);
-                    string unitsStr = metricUnits ? "km" : "mi";
+                    int dist = DistanceUnits.FromKm(classification.Distance);
+                    string unitsStr = DistanceUnits.ShortName;
                     distAz = $", {dist}{unitsStr} {classification.Azimuth}°";
                 }
 

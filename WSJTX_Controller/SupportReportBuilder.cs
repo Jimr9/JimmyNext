@@ -396,6 +396,7 @@ namespace WSJTX_Controller
             sb.AppendLine($"  Show Country:    {ctrl.rawShowCountry}");
             sb.AppendLine($"  Show U.S. state: {ctrl.showUsStateCheckBox.Checked}");
             sb.AppendLine($"  Show Dist/Az:    {ctrl.rawShowDistAz}");
+            sb.AppendLine($"  Distance units:  {ctrl.distanceUnits} ({DistanceUnits.ShortName})");
             sb.AppendLine($"  Only callsigns:  {ctrl.rawOnlyCallsigns}");
             sb.AppendLine($"  Only unworked:   {ctrl.rawOnlyUnworked}");
             sb.AppendLine($"  Only ranked:     {ctrl.rawOnlyRanked}");

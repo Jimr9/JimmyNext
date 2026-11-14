@@ -89,6 +89,11 @@ namespace WSJTX_Controller
         // Short or long path to the selected station and which way to beam, from Nexus's own
         // path model (2026-11-09). No default key.
         PathToStation,
+        // Nexus 1.24 (2026-11-12): turn transmit back on after Nexus turned it off because the
+        // radio stopped answering CAT -- Nexus's own TX On. Ctrl+Shift+E, beside Alt+E.
+        TransmitOn,
+        // Nexus 1.24 (2026-11-12): Best times to work the selected station. No default key.
+        BestTimes,
     }
 
     public class HotkeyConfig
@@ -193,6 +198,8 @@ namespace WSJTX_Controller
             [HotkeyAction.PreparedStationReady]   = Keys.Alt | Keys.Shift | Keys.P,
             [HotkeyAction.WhoHearsMeStartFresh]   = Keys.None,
             [HotkeyAction.PathToStation]          = Keys.None,
+            [HotkeyAction.TransmitOn]             = Keys.Control | Keys.Shift | Keys.E,
+            [HotkeyAction.BestTimes]              = Keys.None,
         };
 
         public static readonly Dictionary<HotkeyAction, string> DisplayNames = new Dictionary<HotkeyAction, string>
@@ -259,6 +266,8 @@ namespace WSJTX_Controller
             [HotkeyAction.PreparedStationReady]  = "Prepared Station Ready",
             [HotkeyAction.WhoHearsMeStartFresh]  = "Who Hears Me Start Fresh",
             [HotkeyAction.PathToStation]         = "Path to Selected Station",
+            [HotkeyAction.TransmitOn]            = "Transmit On After CAT Loss",
+            [HotkeyAction.BestTimes]             = "Best Times to Work Selected Station",
         };
 
         // Actions that may be left unassigned (Keys.None) without triggering a validation error.
@@ -307,6 +316,10 @@ namespace WSJTX_Controller
             // No default key (2026-11-09).
             HotkeyAction.WhoHearsMeStartFresh,
             HotkeyAction.PathToStation,
+            // 2026-11-12: Transmit On has a default but may be left unassigned (its button does
+            // the same); Best times has none.
+            HotkeyAction.TransmitOn,
+            HotkeyAction.BestTimes,
         };
 
         private static readonly HashSet<Keys> ReservedKeys = new HashSet<Keys>
@@ -343,6 +356,8 @@ namespace WSJTX_Controller
             HotkeyAction.AntennaTuner,
             // 2026-10-13 -- same protection for Alt+Shift+P.
             HotkeyAction.PreparedStationReady,
+            // 2026-11-12 -- same protection for Ctrl+Shift+E.
+            HotkeyAction.TransmitOn,
         };
 
         // Populated by LoadFromIni: newer actions that were left unassigned because this

@@ -1,8 +1,8 @@
 diff --git a/src/station.rs b/src/station.rs
-index b5163df55..ccc0f5f5a 100644
+index 25e98e1..658c82e 100644
 --- a/src/station.rs
 +++ b/src/station.rs
-@@ -2587,6 +2587,14 @@ pub struct StationCore {
+@@ -2723,6 +2723,14 @@ pub struct StationCore {
      #[allow(clippy::type_complexity)]
      pub(crate) state_resolve:
          Option<Box<dyn Fn(&str, Option<&str>) -> Option<String> + Send + Sync>>,
@@ -14,18 +14,18 @@ index b5163df55..ccc0f5f5a 100644
 +    /// ([`Self::edit_ops`])). Jimmy turns it on; an edit then names the country again only when
 +    /// it corrects the callsign. The live insert (`Engine::log_qso`) keeps its fill either way.
 +    pub(crate) keep_logged_location: bool,
-     /// The log-time path grader, injected by the command layer (which holds the propagation
-     /// model and the path card it last computed): for a contact being logged, its graded route
-     /// ([`tempo_core::logbook::path_stamp`]). Same pattern as [`Self::set_state_resolver`], for
-@@ -2806,6 +2814,7 @@ impl StationCore {
+     /// What a contact being logged reads for its IOTA reference
+     /// ([`tempo_core::logbook::offer::fill_iota_at_log`]) and its group's name
+     /// ([`tempo_core::logbook::offer::note_iota_in_comment`]). Injected by the command layer, which
+@@ -2951,6 +2959,7 @@ impl StationCore {
              dxcc_country: None,
              country_dxcc: None,
              state_resolve: None,
 +            keep_logged_location: false,
+             iota_at_log: None,
              path_at_log: None,
              grid_rarity_resolve: None,
-             lotw_resolve: None,
-@@ -3462,7 +3471,9 @@ impl StationCore {
+@@ -3662,7 +3671,9 @@ impl StationCore {
              match (before, after) {
                  (None, Some(row)) => {
                      let mut row = QsoRecord::clone(&row);
@@ -36,7 +36,7 @@ index b5163df55..ccc0f5f5a 100644
                      if row.id.is_none() {
                          row.id = Some(self.minter.mint());
                      }
-@@ -4865,7 +4876,9 @@ impl StationCore {
+@@ -5083,7 +5094,9 @@ impl StationCore {
      pub(crate) fn edit_op(&self, id: RecordId, mut rec: QsoRecord, stored: &QsoRecord) -> LogOp {
          if !rec.call.trim().eq_ignore_ascii_case(stored.call.trim()) {
              rec.country = self.country_for(&rec.call, None);
@@ -47,7 +47,7 @@ index b5163df55..ccc0f5f5a 100644
              let no_country = stored
                  .country
                  .as_deref()
-@@ -5101,6 +5114,8 @@ impl StationCore {
+@@ -5319,6 +5332,8 @@ impl StationCore {
              .is_none_or(|c| c.trim().is_empty());
          rec.country = if call_changed {
              self.country_for(&rec.call, None)

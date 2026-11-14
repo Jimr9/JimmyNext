@@ -158,6 +158,14 @@ struct CachedSpaceWx {
     value: Option<SpaceWx>,
     last_ok: Option<Instant>,
     last_error: Option<String>,
+    /// When the value's numbers were measured, from Nexus's own SpaceWxStamps (2026-11-13): the
+    /// solar flux reading's time, and 00:00 UT of the day the daily A belongs to (None = NOAA's
+    /// daily A did not answer, so `value.a_index` is Nexus's stand-in, not a reading).
+    sfi_at: Option<i64>,
+    a_day: Option<i64>,
+    /// Nexus's own estimate of the A index right now, from the current 1-minute Kp
+    /// (SwpcReading::ap_now) -- the daily A above is for the last COMPLETE UT day.
+    ap_now: Option<f32>,
 }
 
 #[derive(Default)]
@@ -455,15 +463,18 @@ impl SharedCache {
                 sink(kp, a_daily, sfi, now_unix().max(0) as u64);
             }
             if r.stamps.sfi_at.is_some() && r.stamps.kp_at.is_some() {
-                Ok(r.wx)
+                Ok((r.wx, r.stamps.sfi_at, r.stamps.a_day, r.ap_now))
             } else {
                 Err("space weather: NOAA gave no current solar flux or Kp".to_string())
             }
         });
         match fetched {
-            Ok(wx) => {
+            Ok((wx, sfi_at, a_day, ap_now)) => {
                 let mut guard = self.space_wx.write().unwrap_or_else(|e| e.into_inner());
                 guard.value = Some(wx);
+                guard.sfi_at = sfi_at;
+                guard.a_day = a_day;
+                guard.ap_now = ap_now;
                 guard.last_ok = Some(Instant::now());
                 guard.last_error = None;
             }
@@ -584,6 +595,79 @@ impl SharedCache {
         .to_string()
     }
 
+    /// BEST_TIMES (2026-11-12, Nexus 1.24): Nexus's "Best times to work a station" for a station at
+    /// `grid` -- can I work it now and on which band, the next good windows over the coming day,
+    /// and which days this week the Kp forecast reaches the path (`propagation::besttimes`). Built
+    /// as the Nexus desktop's `get_best_times` builds it: the same two predictions PATH_TO makes,
+    /// the "now" overlay (a flare, a proton event) laid on each, then Nexus's own fold. `tx_bands`:
+    /// the bands the operator's licence lets them transmit on (None = any). Under 300 km gives no
+    /// answer, as Nexus's does (`state` "tooClose"). Runs the model: its own thread.
+    pub fn best_times_json(
+        &self,
+        grid: &str,
+        mode: propagation::besttimes::BestMode,
+        model: &str,
+        power_w: Option<f64>,
+        tx_bands: Option<Vec<String>>,
+    ) -> String {
+        use propagation::geo::{bearing_deg, haversine_km};
+        use propagation::pathnow::{footprint, path_overlay, ProtonSample};
+        let err = |e: &str| serde_json::json!({ "error": e }).to_string();
+        let Some(me) = self.me_latlon else { return err("My Grid is not set") };
+        let Some(dx) = maidenhead_to_latlon(grid.trim()) else { return err("no grid for the station") };
+        let km = haversine_km(me, dx);
+        if km < BEST_TIMES_TOO_CLOSE_KM {
+            return serde_json::json!({ "state": "tooClose", "km": km.round() }).to_string();
+        }
+        let now = now_unix();
+        let measured = self.current_space_wx();
+        let wx = measured.unwrap_or_default();
+        let forecast = self.kp_series.read().unwrap_or_else(|e| e.into_inner()).value.clone();
+        let kp = measured.map(|w| w.kp);
+        let engine = propagation::make_predictor(model, Some(me), power_w, 0.0);
+        let geom = |route| propagation::path_geometry_route(me, dx, route, now, kp, forecast.as_ref(), None);
+        let mut sp = engine.predict(dx, now, &wx);
+        sp.geometry = Some(geom(propagation::Route::Short));
+        let mut lp = engine.predict_route(dx, propagation::Route::Long, now, &wx).map(|mut lp| {
+            lp.geometry = Some(geom(propagation::Route::Long));
+            lp
+        });
+        // The "now" overlay, as the desktop's attach_now lays it (GOES estimate, no D-RAP grid).
+        let xray = *self.xray_sample.read().unwrap_or_else(|e| e.into_inner());
+        let fp = footprint(xray, None, now);
+        let protons = self
+            .protons
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .value
+            .map(|p| ProtonSample { j1: p.j1, j5: p.j5, j10: p.j10, at: p.at });
+        let over = |p: &propagation::PathPrediction, route| {
+            let g = p.geometry.as_ref()?;
+            let h = usize::from(g.now_hour);
+            path_overlay(me, dx, route, &p.bands, g.hours.get(h)?, h, now, fp.as_ref(), protons)
+        };
+        sp.overlay = over(&sp, propagation::Route::Short);
+        if let Some(lp) = lp.as_mut() {
+            lp.overlay = over(lp, propagation::Route::Long);
+        }
+        let answer = propagation::besttimes::best_times(&propagation::besttimes::BestAsk {
+            sp: &sp,
+            lp: lp.as_ref(),
+            mode,
+            tx_bands: tx_bands.as_deref(),
+            forecast: forecast.as_ref(),
+            now,
+        });
+        serde_json::json!({
+            "state": "answer",
+            "km": km.round(),
+            "bearingDeg": bearing_deg(me, dx).round(),
+            "answer": answer,
+            "measuredSpaceWeather": measured.is_some(),
+        })
+        .to_string()
+    }
+
     /// The current cached space-weather value (if any fetch has ever succeeded), for
     /// live_feeds.rs's band-conditions advisory -- reuses this cache's own refresh loop rather
     /// than fetching a second time. SpaceWx is Copy, so this is a cheap by-value read.
@@ -660,6 +744,10 @@ impl SharedCache {
             space_now,
             kp_measured,
             value: wire.as_ref(),
+            sfi_at: guard.value.and(guard.sfi_at),
+            a_day: guard.value.and(guard.a_day),
+            a_stand_in: guard.value.is_some() && guard.a_day.is_none(),
+            ap_now: guard.value.and(guard.ap_now),
             age_secs,
             last_error: guard.last_error.as_deref(),
             muf_now,
@@ -963,6 +1051,17 @@ struct SpaceWxPayload<'a> {
     #[serde(rename = "kpMeasured", skip_serializing_if = "Option::is_none")]
     kp_measured: Option<KpMeasured>,
     value: Option<&'a SpaceWxWire>,
+    // When value's solar flux was measured and which UT day its daily A is for (2026-11-13), and
+    // Nexus's own estimate of the A index now. aStandIn: NOAA's daily A did not answer, so
+    // value.aIndex is a stand-in, not a reading.
+    #[serde(rename = "sfiAt", skip_serializing_if = "Option::is_none")]
+    sfi_at: Option<i64>,
+    #[serde(rename = "aDay", skip_serializing_if = "Option::is_none")]
+    a_day: Option<i64>,
+    #[serde(rename = "aStandIn", skip_serializing_if = "std::ops::Not::not")]
+    a_stand_in: bool,
+    #[serde(rename = "apNow", skip_serializing_if = "Option::is_none")]
+    ap_now: Option<f32>,
     #[serde(rename = "ageSecs")]
     age_secs: Option<u64>,
     #[serde(rename = "lastError")]
@@ -1011,6 +1110,30 @@ mod space_wx_wire_tests {
         assert!(!json.contains("xray_long"), "must not regress to the snake_case name: {json}");
         assert!(json.contains("\"xrayClass\":\"C\""), "1e-6 is C-class: {json}");
         assert!(json.contains("\"rScale\":0"), "1e-6 is below the R1 threshold (1e-5): {json}");
+    }
+
+    #[test]
+    fn space_wx_json_dates_the_flux_and_daily_a_and_carries_the_a_estimate_now() {
+        let cache = SharedCache::new("EN52");
+        {
+            let mut guard = cache.space_wx.write().unwrap();
+            guard.value = Some(SpaceWx::default());
+            guard.last_ok = Some(Instant::now());
+            guard.sfi_at = Some(1_763_064_000);
+            guard.a_day = Some(1_762_992_000);
+            guard.ap_now = Some(3.0);
+        }
+        let v: serde_json::Value = serde_json::from_str(&cache.space_wx_json()).unwrap();
+        assert_eq!(v["sfiAt"].as_i64(), Some(1_763_064_000));
+        assert_eq!(v["aDay"].as_i64(), Some(1_762_992_000));
+        assert_eq!(v["apNow"].as_f64(), Some(3.0));
+        assert!(v.get("aStandIn").is_none(), "a measured daily A is not a stand-in");
+
+        // NOAA's daily A did not answer: the A is Nexus's stand-in and says so.
+        cache.space_wx.write().unwrap().a_day = None;
+        let v: serde_json::Value = serde_json::from_str(&cache.space_wx_json()).unwrap();
+        assert_eq!(v["aStandIn"].as_bool(), Some(true));
+        assert!(v.get("aDay").is_none());
     }
 
     #[test]
@@ -1209,6 +1332,32 @@ mod space_wx_wire_tests {
         assert_eq!(none["error"], "My Grid is not set");
     }
 
+    // 2026-11-12 (Nexus 1.24): Best times to a station by its grid, licence bands honoured, and no
+    // answer under 300 km.
+    #[test]
+    fn best_times_answers_now_windows_and_week_and_honours_the_licence() {
+        use propagation::besttimes::BestMode;
+        let cache = SharedCache::new("EN52");
+        let t = Instant::now();
+        let v: serde_json::Value =
+            serde_json::from_str(&cache.best_times_json("PM95", BestMode::Ft8, "p533", Some(100.0), None)).unwrap();
+        println!("BEST_TIMES took {:?}: {v}", t.elapsed());
+        assert_eq!(v["state"], "answer", "{v}");
+        let a = &v["answer"];
+        assert!(a["now"]["kind"].is_string() && a["windows"].is_array() && a["week"].is_object(), "{v}");
+        assert_eq!(a["mode"], "FT8");
+
+        let only_10m: serde_json::Value = serde_json::from_str(&cache.best_times_json(
+            "PM95", BestMode::Ft8, "p533", Some(100.0), Some(vec!["10m".to_string()]))).unwrap();
+        for w in only_10m["answer"]["windows"].as_array().unwrap() {
+            assert_eq!(w["band"], "10m", "only a licensed band is offered: {only_10m}");
+        }
+
+        let near: serde_json::Value =
+            serde_json::from_str(&cache.best_times_json("EN53", BestMode::Ft8, "p533", None, None)).unwrap();
+        assert_eq!(near["state"], "tooClose", "{near}");
+    }
+
     // The fast-lane X-ray (2026-10-08): its own camelCase fields, Nexus's own class and R, and
     // a failed refresh keeps the last good reading and its age, with the error beside it.
     #[test]
@@ -1279,7 +1428,11 @@ pub fn qrz_logbook_status(args: &QrzLogbookStatusArgs) -> Result<serde_json::Val
 /// this `PROGRAMVERSION`, as eQSL asks of client programs), and since Nexus 1.20 the version in the
 /// `Nexus/<version>` User-Agent QRZ is sent. The Nexus release EngineHost is built from -- keep it
 /// with `nexus-compat/pin.txt`.
-pub const EQSL_PROGRAM_VERSION: &str = "1.23.0";
+pub const EQSL_PROGRAM_VERSION: &str = "1.24.0";
+
+/// Best times gives no answer for a station nearer than this (the Nexus desktop's
+/// `best_times::TOO_CLOSE_KM`, which lives in its app crate, not a library EngineHost links).
+pub const BEST_TIMES_TOO_CLOSE_KM: f64 = 300.0;
 
 pub fn eqsl_upload(args: &EqslUploadArgs) -> Result<&'static str, String> {
     // qth_nickname: `None` -- Jimmy Next has no UI for eQSL's multi-profile "QTH Nickname"
