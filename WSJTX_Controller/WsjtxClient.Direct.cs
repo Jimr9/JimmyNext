@@ -508,17 +508,35 @@ namespace WSJTX_Controller
         // connection, one JSON round-trip) and independent of the FT8 slot period -- polling
         // faster than new data can arrive just re-reads the same slot's decodes, which
         // _directSeenDecodeSignatures below already dedupes for free.
-        private const int DirectPollIntervalMs = 1000;
+        //
+        // 300 ms, Nexus's own screen cadence (ui/src/api.ts subscribeSnapshot): decodes, transmit
+        // state, CAT state and meters reach Jimmy within 0.3 s instead of up to 1 s (2026-11-15:
+        // decodes were landing 12.25-13.75 s into the FT8 period, some after it ended). Single
+        // flight like Nexus's: a tick skips while the last snapshot is still out (_directPollInFlight).
+        private const int DirectPollIntervalMs = 300;
+
+        // Every limit that used to count polls is set in time and turned into a number of polls
+        // at the steady pace -- the way Nexus counts its own steady radio reads (FREQ_MISS_LIMIT)
+        // and never how often its screen asks -- so changing the pace changes no behavior. A poll
+        // that runs late makes a hold longer, never shorter.
+        internal static int PollsFor(int milliseconds) =>
+            (milliseconds + DirectPollIntervalMs - 1) / DirectPollIntervalMs;
+
+        // The clock DirectHandlePollFailure measures with; tests move it forward.
+        internal Func<DateTime> DirectClock = () => DateTime.UtcNow;
 
         // UDP-to-Direct parity pass, 2026-08-12: the UDP path announces "WSJT-X disconnected"
         // (Notify.Publish(ConnectionLostEvent) + a sound cue) via HeartbeatNotRecd once its own
         // heartbeat watchdog times out. DirectPollTick's failure branch below used to only log
         // to DebugOutput -- a hung-but-still-running control port produced no user-facing signal
-        // at all under Direct mode. Threshold of 3 consecutive failed polls (~3s at the default
-        // 1s poll interval) rather than announcing on the very first miss, so one transient
-        // hiccup doesn't false-positive; _directLossAnnounced makes sure this fires once per
-        // loss episode, not on every failed poll after the threshold.
+        // at all under Direct mode. Needs 3 consecutive failed polls spanning at least 2 s (what
+        // 3 failures took at the old 1 s pace) rather than announcing on the very first miss, so
+        // one transient hiccup doesn't false-positive. Time, not a poll count: a hung engine makes
+        // every failed poll wait out its own timeout, so a count alone would stretch with it.
+        // _directLossAnnounced makes sure this fires once per loss episode.
         private const int DirectPollFailureThreshold = 3;
+        private static readonly TimeSpan DirectPollFailureMinSpan = TimeSpan.FromSeconds(2);
+        private DateTime _directFirstPollFailureUtc;
         private int _directConsecutivePollFailures;
         private bool _directLossAnnounced;
 
@@ -528,6 +546,27 @@ namespace WSJTX_Controller
         // DirectApplyStatus's own check below. Edge-triggered (tracks the PREVIOUS poll's state)
         // so this fires HaltTx()/announces once per episode, not every tick while SWR stays high.
         private bool _swrOverThreshold;
+        // Polls in a row over the limit (SwrHighCount). Halts at SwrHighReadingsToHalt, not on one.
+        private int _swrHighCount;
+
+        // Over the limit for ~1.2 s, never on one reading -- Nexus's own high-SWR cutoff
+        // (Engine::observe_swr_for_cutoff) halts on two consecutive readings, and its SWR refreshes
+        // about every 600 ms, so two readings are ~1.2 s. Counted in polls, not readings: at the
+        // 300 ms poll each reading is seen about twice, and 4 polls always span a fresh reading.
+        // A single reading caught while the radio is still powering up, or a tuner stepping, read
+        // SWR 10 and 2.5 on a station whose every other over read 1.08-1.25, and each one halted a
+        // QSO (KF4CCG's support reports, 2026-10-21 and 2026-11-12). A real fault stays high.
+        internal static readonly int SwrHighReadingsToHalt = PollsFor(1200);
+
+        // The next count. A normal reading resets it; so does being out of transmit and tune
+        // (Nexus clears the transmit meters on unkey, so a run never spans two overs). A missing
+        // reading while keyed leaves it as it was: no measurement, nothing to count either way.
+        internal static int SwrHighCount(int count, bool haltEnabled, double? swr, double limit, bool keyed)
+        {
+            if (!haltEnabled) return 0;
+            if (swr.HasValue) return swr.Value > limit ? count + 1 : 0;
+            return keyed ? count : 0;
+        }
 
         // Item 4 (2026-09-02) -- ALC lifecycle diagnostics. Jimmy holds NO ALC state of its own
         // (Alt+Q/ReportPowerSwr pulls a fresh SNAPSHOT every press and displays radio.TxAlc
@@ -650,7 +689,7 @@ namespace WSJTX_Controller
         // where the DX never actually reports. Reset on any callInProg transition (SetCallInProg)
         // and on a successful teardown.
         private int _directRr73LogRetries;
-        private const int MaxDirectRr73LogRetries = 4;
+        private static readonly int MaxDirectRr73LogRetries = PollsFor(4000);   // ~4 s
 
         // Audit finding, 2026-08-30: the parallel Is73orRR73 hold for a FAILED local logbook
         // write (Finding 2, 2.0.45) had no bound at all. A locked / full / unavailable SQLite
@@ -670,7 +709,7 @@ namespace WSJTX_Controller
         // (disk full) loses the contact regardless of how long we hold. Reset like
         // _directRr73LogRetries.
         private int _directWriteFailRetries;
-        private const int MaxDirectWriteFailRetries = 10;
+        private static readonly int MaxDirectWriteFailRetries = PollsFor(10000);   // ~10 s
 
         // T17 fix, 2026-08-23: what Jimmy last actually commanded via SET_FREQUENCY's own
         // sideband argument (WsjtxClient.BandAudio.cs's RetuneBand, on CONFIRMED success only --
@@ -700,7 +739,7 @@ namespace WSJTX_Controller
         // comment for why this exists (stop warning forever) and why it requires sustained
         // agreement, not a single reading (a stale/transient readback must not overwrite the
         // newest requested state on its own).
-        private const int SidebandReconcileAfterConsecutiveMismatches = 5;
+        private static readonly int SidebandReconcileAfterConsecutiveMismatches = PollsFor(5000);   // ~5 s
         private int _sidebandMismatchStreak;
 
         // Normalizes both sides to a simple USB/LSB substring check rather than an exact string
@@ -812,6 +851,7 @@ namespace WSJTX_Controller
             _directConsecutivePollFailures = 0;
             _directLossAnnounced = false;
             _swrOverThreshold = false;
+            _swrHighCount = 0;
             _directOrphanTxOvers = 0;
             _directRr73LogRetries = 0;
             _directWriteFailRetries = 0;
@@ -990,9 +1030,7 @@ namespace WSJTX_Controller
                         return;
                     }
 
-                    // A real snapshot came back -- whatever failure streak was building is over.
-                    _directConsecutivePollFailures = 0;
-                    _directLossAnnounced = false;
+                    DirectPollSucceeded();
 
                     // Independent audit finding, 2026-08-23 (EngineHost ownership / session
                     // identity, HIGH PRIORITY): a real, well-formed SNAPSHOT response alone used
@@ -1163,11 +1201,21 @@ namespace WSJTX_Controller
         // no persistent socket of its own to reset; NegoState is set back to WAIT so
         // DirectPollTick's own "first snapshot received" promotion logic naturally re-fires
         // (and re-announces via existing status machinery) once polling recovers.
+        // A real snapshot came back -- whatever failure streak was building is over.
+        private void DirectPollSucceeded()
+        {
+            _directConsecutivePollFailures = 0;
+            _directLossAnnounced = false;
+        }
+
         private void DirectHandlePollFailure()
         {
             if (!_directConnected) return;
             _directConsecutivePollFailures++;
-            if (_directLossAnnounced || _directConsecutivePollFailures < DirectPollFailureThreshold) return;
+            DateTime now = DirectClock();
+            if (_directConsecutivePollFailures == 1) _directFirstPollFailureUtc = now;
+            if (_directLossAnnounced || _directConsecutivePollFailures < DirectPollFailureThreshold
+                || now - _directFirstPollFailureUtc < DirectPollFailureMinSpan) return;
 
             _directLossAnnounced = true;
             DebugOutput($"{Time()} [DIRECT] {_directConsecutivePollFailures} consecutive SNAPSHOT poll failures -- treating as disconnected");
@@ -1488,8 +1536,9 @@ namespace WSJTX_Controller
             // RadioControlMode.WsjtxCat, which the old RigctldClient-based polling never could.
             ApplyTxLock(radio.TxAllowed);
 
-            bool swrOver = ctrl.Radio.HaltTxOnHighSwr && radio.TxSwr.HasValue
-                           && radio.TxSwr.Value > ctrl.Radio.SwrHaltThreshold;
+            _swrHighCount = SwrHighCount(_swrHighCount, ctrl.Radio.HaltTxOnHighSwr, radio.TxSwr,
+                ctrl.Radio.SwrHaltThreshold, radio.Transmitting || radio.Tuning);
+            bool swrOver = _swrHighCount >= SwrHighReadingsToHalt && radio.TxSwr.HasValue;
             if (swrOver && !_swrOverThreshold)
             {
                 HaltTx();
@@ -1512,7 +1561,7 @@ namespace WSJTX_Controller
                            + $" swr={(radio.TxSwr.HasValue ? radio.TxSwr.Value.ToString("0.##") : "null")}"
                            + $" lvl={radio.TxLevel:0.###}"
                            + $" cat={(radio.CatOk?.ToString() ?? "null")} tuning={radio.Tuning}";
-                if (key != _alcDiagLastKey || (_alcDiagTxPollRun % 5) == 0)
+                if (key != _alcDiagLastKey || (_alcDiagTxPollRun % PollsFor(5000)) == 0)
                 {
                     _alcDiagLastKey = key;
                     DebugOutput($"{Time()} [ALC-DIAG] tx over poll#{_alcDiagTxPollRun} slot={radio.Slot} localTx={transmitting} {key}");
@@ -4273,6 +4322,7 @@ namespace WSJTX_Controller
         internal int TestConsecTxCount => consecTxCount;
         internal void TestSetDirectConnected(bool connected) => _directConnected = connected;
         internal void TestDirectHandlePollFailure() => DirectHandlePollFailure();
+        internal void TestDirectPollSucceeded() => DirectPollSucceeded();
         internal int TestDirectConsecutivePollFailures => _directConsecutivePollFailures;
         // Finding 2, 2026-08-28: the call whose local logbook write failed and is awaiting a
         // retry (null = none). DirectLogRetryAndEarlyRrrTests asserts it is set after a failed
@@ -4281,6 +4331,7 @@ namespace WSJTX_Controller
         // Audit finding, 2026-08-30: DirectFailedWriteRetryIsBoundedTests asserts the failed-
         // write callInProg hold gives up after this many polls instead of holding forever.
         internal int TestMaxDirectWriteFailRetries => MaxDirectWriteFailRetries;
+        internal static int TestMaxDirectRr73LogRetries => MaxDirectRr73LogRetries;
         internal int TestDirectWriteFailRetries => _directWriteFailRetries;
 
         // "Remember F11/F12 audio level per band" regression coverage: bandIdx is private,
@@ -4437,6 +4488,7 @@ namespace WSJTX_Controller
         // already internal and needs no accessor.
         internal void TestSetLastCommandedSidebandChangedUtc(DateTime utc) => _lastCommandedSidebandChangedUtc = utc;
         internal int TestSidebandMismatchStreak => _sidebandMismatchStreak;
+        internal static int TestSidebandReconcileAfter => SidebandReconcileAfterConsecutiveMismatches;
 
         // CAT-health notification coverage (2.0.58): drive the exact edge logic
         // DirectApplyStatus runs, without a full synthetic snapshot.

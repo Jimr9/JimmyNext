@@ -1703,7 +1703,10 @@ namespace WSJTX_Controller
         internal static string FormatSunspotRow(float? current, SolarHistoryResult history)
         {
             if (current.HasValue) return $"Sunspot number {current.Value:0}";
-            var day = history?.Days?.Where(d => d.Ssn.HasValue).OrderByDescending(d => d.DayUnix).FirstOrDefault();
+            // NOAA's observed count is usually dated today, a day newer than the daily file; the
+            // newest dated count wins either way (2026-11-15).
+            var day = (history?.Days ?? Array.Empty<SolarDay>()).Append(history?.ObservedSsn)
+                .Where(d => d != null && d.Ssn.HasValue).OrderByDescending(d => d.DayUnix).FirstOrDefault();
             if (day == null) return "Sunspot number not available";
             var date = DateTimeOffset.FromUnixTimeSeconds(day.DayUnix).UtcDateTime;
             return $"Sunspot number {day.Ssn.Value:0}, daily count for {date.ToString("MMMM d", System.Globalization.CultureInfo.InvariantCulture)}";

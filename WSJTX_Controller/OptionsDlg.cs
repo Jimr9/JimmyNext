@@ -5116,8 +5116,9 @@ namespace WSJTX_Controller
         }
 
         // Applies the fields above to a throwaway RigctldClient, launching the bundled copy
-        // (or connecting to the external one) exactly as SaveRadioTab would, then polls once.
-        // Never touches ctrl.rigctldClient -- a failed test must not disturb a working session.
+        // (or connecting to the external one) exactly as SaveRadioTab would, then asks for the
+        // frequency once. If the engine's own rigctld already answers on the port, that is the
+        // PASS and nothing is launched, so a test never disturbs a working session.
         // Sets the test-result label's text AND fires the MSAA NameChanged notification --
         // JAWS/NVDA do not announce a plain Label.Text change on an unfocused control, so
         // without this the result was only ever visible to sighted users (confirmed live,

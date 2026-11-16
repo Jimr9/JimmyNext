@@ -334,6 +334,9 @@ namespace WSJTX_Controller
         public SolarDay[] Days { get; set; } = Array.Empty<SolarDay>();   // oldest first
         public long? FetchedAgeSecs { get; set; }
         public string Error { get; set; }
+        // NOAA's newest observed sunspot count with its day (2026-11-15) -- usually today, one day
+        // newer than Days. Jimmy's own feed until Nexus has it (kd9taw/Nexus#523); null until read.
+        public SolarDay ObservedSsn { get; set; }
     }
 
     public class SolarDay

@@ -168,6 +168,13 @@ namespace WSJTX_Controller
         // documented wall-clock backstop.
         public DateTime LastUsableDecodeUtc { get; private set; }
 
+        // The target's most recent CQ heard while watched (KF4CCG, 2026-11-15). A call started
+        // from the target's sign-off to someone else (tail-ending) replies to that sign-off, not
+        // to the CQ, so the CQ -- "CQ POTA", "CQ DX" -- would otherwise be lost: the contact was
+        // logged without POTA and the park was not counted as worked today. The caller records
+        // it with the call (WsjtxClient.RememberTargetCq).
+        public EnqueueDecodeMessage LastCqDecode { get; private set; }
+
         // True once at least one confident decode FROM THE TARGET has been observed on the live
         // decode feed since this monitor was armed. An operator's selected/queued decode
         // (SeedSelectedDecode) sets this ONLY when that decode is still current (see
@@ -347,6 +354,7 @@ namespace WSJTX_Controller
             CallsThisTurn = 0;
             LastUsableDecode = null;
             LastUsableDecodeUtc = default;
+            LastCqDecode = null;
             HasLiveTargetEvidence = false;
             OpportunitiesSinceLiveEvidence = 0;
             BusyWithOther = false;
@@ -379,6 +387,7 @@ namespace WSJTX_Controller
             CallsThisTurn = 0;
             LastUsableDecode = null;
             LastUsableDecodeUtc = default;
+            LastCqDecode = null;
             HasLiveTargetEvidence = false;
             OpportunitiesSinceLiveEvidence = 0;
             BusyWithOther = false;
@@ -498,6 +507,7 @@ namespace WSJTX_Controller
             TransmittedCallCount = cumulativeCallCount;   // cumulative across the hand-off -- NOT reset
             LastUsableDecode = null;
             LastUsableDecodeUtc = default;
+            LastCqDecode = null;
             HasLiveTargetEvidence = false;
             OpportunitiesSinceLiveEvidence = 0;
             BusyWithOther = false;
@@ -576,6 +586,7 @@ namespace WSJTX_Controller
             // Always: remember it as the decode to reply from, and its real age.
             LastUsableDecode = d;
             LastUsableDecodeUtc = decodeUtc;
+            if (d.EffectiveSemantic(myCall).IsCq) LastCqDecode = d;   // even stale: it says what the station is
 
             if (ageSeconds > _periodSeconds * SeedFreshLimitPeriods)
             {
@@ -694,6 +705,7 @@ namespace WSJTX_Controller
 
             if (sem.IsCq)
             {
+                LastCqDecode = d;
                 ApparentPeer = null;
                 BusyWithOther = false;                 // calling CQ -> available
                 _rr73AwaitingOneMoreOpportunity = false;

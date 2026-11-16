@@ -2,12 +2,9 @@ using System;
 
 namespace WSJTX_Controller
 {
-    // Phase 0 of the self-sufficiency plan: settings shape for direct Hamlib/rigctld radio
-    // control, modeled on JimmySettings.cs's LoadFromIni/SaveToIni pattern. Nothing reads these
-    // fields yet -- Mode defaults to WsjtxCat, so behavior is unchanged until Phase 1 wires a
-    // RigctldClient up to them. Field set already reflects Phase 1's planned bundled-rigctld
-    // design (UseExternalRigctld/RigModel/ComPort/PttEnabled) so this file doesn't need to be
-    // revisited structurally when Phase 1 lands.
+    // Radio settings (Options > Radio), modeled on JimmySettings.cs's LoadFromIni/SaveToIni
+    // pattern. The engine host reads these at start (rig model, COM port, baud, PTT, external
+    // rigctld) and its Nexus radio loop does all CAT; Jimmy keeps no radio connection of its own.
     public class RadioSettings
     {
         // 2026-10-01: Hamlib rigctld is the only radio mode (Receive Only removed; a saved
@@ -23,7 +20,6 @@ namespace WSJTX_Controller
         public int RigctldPort { get; set; } = 4532;   // Hamlib's documented rigctld default
 
         // Hamlib rig-model number as a string (e.g. "2037" for the Kenwood TS-590SG).
-        // Display/config only until Phase 1's RigctldClient reads it.
         public string RigModel { get; set; } = "";
         public string ComPort { get; set; } = "";
 

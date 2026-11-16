@@ -9,16 +9,18 @@ using System.Threading.Tasks;
 
 namespace WSJTX_Controller
 {
-    // Plain TCP text-protocol client for Hamlib's rigctld (self-sufficiency plan, Phase 1),
-    // plus process management for Jimmy's own bundled copy -- mirrors Nexus's approach of
-    // bundling and auto-launching rigctld rather than making the operator find and run it
-    // separately (see scripts/fetch-hamlib.ps1). No P/Invoke, no native dependency beyond the
+    // Plain TCP text-protocol client for Hamlib's rigctld, plus process management for the
+    // bundled copy (see scripts/fetch-hamlib.ps1). No P/Invoke, no native dependency beyond the
     // bundled binary itself.
     //
-    // Not thread-safe by design: meant to be owned and polled by one dedicated timer, matching
-    // WsjtxClient's existing timer pattern (e.g. StartStatusTimer2), not called concurrently
-    // from a background Task. LastError property with no exceptions for expected failures
-    // follows the same convention as QrzLogbookClient/ClubLogUploadClient/LoTWQsoClient.
+    // No longer a live radio connection: the engine host's Nexus radio loop owns CAT, and Jimmy
+    // reads frequency and meters from the engine's SNAPSHOT. What still uses this class:
+    // Options > Radio's rig model list (ListRigModels) and Test button (a throwaway instance),
+    // and the bundled Hamlib version in the debug log (GetBundledHamlibVersion).
+    //
+    // Not thread-safe by design: each instance is used by one caller at a time. LastError
+    // property with no exceptions for expected failures follows the same convention as
+    // QrzLogbookClient/ClubLogUploadClient/LoTWQsoClient.
     public class RigctldClient : IDisposable
     {
         public string LastError { get; private set; }

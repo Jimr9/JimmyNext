@@ -42,8 +42,7 @@ namespace WSJTX_Controller
         // properties, kept under the original field names so the ~65 existing call
         // sites across Controller/WsjtxClient/OptionsDlg/SupportReportBuilder are unaffected.
         public JimmySettings Settings = new JimmySettings();
-        // Self-sufficiency plan, Phase 0: radio-backend settings (Hamlib/rigctld). Mode defaults
-        // to WsjtxCat, so nothing reads/uses this yet -- Phase 1 wires a RigctldClient to it.
+        // Radio settings (Hamlib/rigctld), handed to the engine host, whose Nexus radio loop does all CAT.
         public RadioSettings Radio = new RadioSettings();
         // Options > Decode tab: WSJT-X decode-related settings (Fast/Normal/Deep, F Low/F High,
         // Enable AP, AP-CQ-only, Single decode), ported over in Nexus but never previously

@@ -19,10 +19,11 @@
 //! protocol bridge Jimmy already speaks), `Engine::call_station_ctx` is the exact WSJT-X
 //! double-click-to-reply entry point (using `tempo_core::qso::Station` directly -- the same type
 //! the old hand-rolled scheduler used), and `Engine::halt_tx()`/`set_tx_enabled(false)` already
-//! implement WSJT-X's own Halt-Tx `auto_only` distinction. Retuning (Band Up/Down) and S-meter/
-//! SWR/power telemetry are NOT handled here at all -- Jimmy's own `Radio/RigctldClient.cs` talks
-//! directly to the same `rigctld` daemon this process launches (a multi-client TCP daemon), so
-//! no private protocol is needed for those either.
+//! implement WSJT-X's own Halt-Tx `auto_only` distinction. Retuning (Band Up/Down) goes through
+//! this process's SET_FREQUENCY command, so Nexus is the only writer of the radio's frequency, and
+//! S-meter/SWR/ALC/power come from Nexus's own radio loop via the SNAPSHOT's `radio` section.
+//! Jimmy keeps no CAT connection of its own; `Radio/RigctldClient.cs` is used only by Options >
+//! Radio (the rig model list and the Test button) and to report the bundled Hamlib version.
 //!
 //! Launched by Jimmy's `NativeEngineClient.cs` (spawned on demand, killed on Jimmy shutdown) when
 //! `EngineModeCutover.Mode == DecodeEngineMode.JimmyNative`.
@@ -361,11 +362,9 @@ struct Args {
     /// "cat" | "vox" | "rts" | "dtr" -- matches `RadioConfig.ptt_method`'s own expected strings
     /// verbatim.
     ptt_method: String,
-    /// Local TCP port this process runs its own bundled rigctld on (and connects to). Jimmy's
-    /// own `RigctldClient` connects here too, read-only, for S-meter/SWR/power/frequency --
-    /// rigctld is a multi-client daemon, so this is a second independent connection, not a
-    /// conflict (same reasoning `NativeTxPttListener`'s own header comment gave for Stage 3,
-    /// now generalized: Jimmy no longer needs a private channel for ANY of this).
+    /// Local TCP port this process runs its own bundled rigctld on (and connects to). Jimmy reads
+    /// S-meter/SWR/power/frequency from the SNAPSHOT, not from here; the only other client is
+    /// Options > Radio's Test button, which asks this port once whether rigctld answers.
     rigctld_port: u16,
     /// When true, sets `Settings.data_modes_plain_ssb` -- Digital operating mode normally
     /// unconditionally commands the rig's DATA submode (PKTUSB/PKTLSB) over CAT for every FT8/

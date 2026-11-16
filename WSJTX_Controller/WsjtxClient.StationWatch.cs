@@ -107,7 +107,8 @@ namespace WSJTX_Controller
         // change context) so RevalidateForAutoStart can abort BEFORE anything transmits.
         private TargetMonitor _pendingAutoStart;
         private int _pendingAutoStartPollsRemaining;
-        private const int PendingAutoStartFinalityPolls = 3;
+        // ~3 s, the three 1 s polls it always was (see PollsFor).
+        private static readonly int PendingAutoStartFinalityPolls = PollsFor(3000);
 
         // Operator policy (2026-09-08): a fresh CQ / RR73 / 73 from the target is a positive call
         // opportunity -- call at our next legitimate transmit opportunity, do NOT wait extra FT8
@@ -753,6 +754,7 @@ namespace WSJTX_Controller
             if (_stationWatch.IsActive && string.Equals(_stationWatch.TargetCall, target, StringComparison.OrdinalIgnoreCase))
                 StopStationWatch();
             RecordSmartStartHandoffOrigin(target);
+            if (callInProg == null && enq != null) RememberTargetCq(_smartStart);   // before Stop clears it
             _smartStart.Stop(announce: false);
             // Answer the target's actual to-us decode. If a contact is somehow already running
             // (an in-flight dispatch beat us here), leave it alone -- the sequencer owns it.
@@ -1040,6 +1042,19 @@ namespace WSJTX_Controller
             foreach (var m in _smartMore) m.OnSmartStartNonActionable();
         }
 
+        // A call Smart Mode or Work Watched Station Now starts from the target's sign-off or report
+        // (tail-ending) replies to THAT decode, so ReplyTo records no CQ for it -- only a reply to
+        // the CQ itself does. The CQ the monitor heard is recorded here instead, the same way, so
+        // the contact is known for what the station called: a "CQ POTA" contact is logged as POTA
+        // and its park counted as worked today (KF4CCG, 2026-11-15: N4NJJ worked by tail-ending,
+        // logged without POTA, then announced and called again at its next CQ POTA).
+        private void RememberTargetCq(TargetMonitor monitor)
+        {
+            var cq = monitor?.LastCqDecode;
+            if (cq == null || string.IsNullOrEmpty(monitor.TargetCall)) return;
+            AddAllCallDict(monitor.TargetCall, cq);
+        }
+
         // ── Deferred auto-start (snapshot-finality guard) ───────────────────────────────────────
 
         private void ArmPendingAutoStart(TargetMonitor monitor)
@@ -1134,6 +1149,7 @@ namespace WSJTX_Controller
             try
             {
                 Notify?.Publish(new SmartStartCallStartingEvent(SC(monitor.TargetCall), monitor.ArmGeneration, monitor.AdvanceStateSeq()));
+                RememberTargetCq(monitor);
                 ReplyTo(monitor.LastUsableDecode);
             }
             finally

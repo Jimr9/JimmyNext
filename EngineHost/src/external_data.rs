@@ -37,6 +37,15 @@ const SPOT_REFRESH: Duration = Duration::from_secs(90);
 const SPACE_WX_REFRESH: Duration = Duration::from_secs(600);
 /// NOAA's daily solar indices change once a day; every three hours is plenty (2026-10-04).
 const SOLAR_HISTORY_REFRESH: Duration = Duration::from_secs(3 * 3600);
+/// NOAA's observed sunspot numbers, which carry one more day than daily-solar-indices.txt: a count
+/// dated TODAY (2026-11-15). Read hourly, as Nexus desktop reads the daily file -- about 1 KB per
+/// month of history.
+///
+/// JIMMY'S OWN, until Nexus has it: suggested upstream as kd9taw/Nexus#523. When Nexus shows
+/// today's count itself, switch to Nexus's and delete this feed (OBSERVED_SSN_*, observed_ssn,
+/// parse_observed_ssn, SolarHistoryPayload.observed_ssn, and the C# SolarHistoryResult.ObservedSsn).
+const OBSERVED_SSN_URL: &str = "https://services.swpc.noaa.gov/json/solar-cycle/swpc_observed_ssn.json";
+const OBSERVED_SSN_REFRESH: Duration = Duration::from_secs(3600);
 /// GOES X-ray, on its own (operator, 2026-10-08): a flare's radio blackout reaches the operator
 /// within about a minute instead of waiting up to ten for the SFI/Kp refresh above -- Nexus's own
 /// 60-second "fast lane" (propagation::live::swpc::fetch_xray_trace), one small request.
@@ -97,6 +106,8 @@ pub struct SharedCache {
     // parsers (propagation::live::swpc::fetch_daily_solar_indices, live::solar_wind). Kept on
     // error like every cache here: a failed fetch leaves the last good copy, with its own dates.
     solar_history: RwLock<Cached<DailySolarIndices>>,
+    /// The newest dated entry of NOAA's observed sunspot numbers: (00:00 UT of its day, count).
+    observed_ssn: RwLock<Cached<(i64, f32)>>,
     solar_wind: RwLock<Cached<SolarWind>>,
     // The fast-lane X-ray flux (W/m², GOES long band), its own age and error -- separate from
     // space_wx's, so the other readings keep their own ages.
@@ -183,6 +194,7 @@ impl SharedCache {
             space_wx: RwLock::new(CachedSpaceWx::default()),
             scales: RwLock::new(CachedScales::default()),
             solar_history: RwLock::new(Cached::default()),
+            observed_ssn: RwLock::new(Cached::default()),
             solar_wind: RwLock::new(Cached::default()),
             xray: RwLock::new(Cached::default()),
             xray_sample: RwLock::new(None),
@@ -227,6 +239,14 @@ impl SharedCache {
             let r = swpc::fetch_daily_solar_indices();
             store(&cache.solar_history, r);
             std::thread::sleep(SOLAR_HISTORY_REFRESH);
+        });
+        let cache = self.clone();
+        std::thread::spawn(move || loop {
+            let r = contests::fetch(OBSERVED_SSN_URL).and_then(|body| {
+                parse_observed_ssn(&body).ok_or_else(|| "observed sunspot numbers: no dated count in the reply".to_string())
+            });
+            store(&cache.observed_ssn, r);
+            std::thread::sleep(OBSERVED_SSN_REFRESH);
         });
         let cache = self.clone();
         std::thread::spawn(move || loop {
@@ -427,6 +447,12 @@ impl SharedCache {
                 .unwrap_or_default(),
             fetched_age_secs: g.last_ok.map(|t| t.elapsed().as_secs()),
             error: g.last_error.clone(),
+            observed_ssn: self
+                .observed_ssn
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .value
+                .map(|(day_unix, ssn)| ObservedSsnPayload { day_unix, ssn }),
         };
         serde_json::to_string(&payload).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     }
@@ -792,6 +818,48 @@ struct SolarHistoryPayload {
     days: Vec<SolarDayPayload>,
     fetched_age_secs: Option<u64>,
     error: Option<String>,
+    /// NOAA's newest observed sunspot count with its day -- usually TODAY, one day newer than
+    /// `days` (see OBSERVED_SSN_URL). Absent until first read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_ssn: Option<ObservedSsnPayload>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ObservedSsnPayload {
+    day_unix: i64,
+    ssn: f32,
+}
+
+/// The newest dated count in NOAA's swpc_observed_ssn.json (`[{"Obsdate":"YYYY-MM-DDT00:00:00",
+/// "swpc_ssn":N}, ...]`, oldest first): (00:00 UT of its day, count). An entry without a readable
+/// date or count is skipped, never guessed.
+fn parse_observed_ssn(body: &str) -> Option<(i64, f32)> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    v.as_array()?
+        .iter()
+        .filter_map(|e| {
+            let date = e.get("Obsdate")?.as_str()?;
+            let ssn = e.get("swpc_ssn")?.as_f64()? as f32;
+            let mut ymd = date.get(..10)?.split('-').map(|x| x.parse::<i64>().ok());
+            let (y, m, d) = (ymd.next()??, ymd.next()??, ymd.next()??);
+            if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+                return None;
+            }
+            Some((days_from_civil(y, m, d) * 86_400, ssn))
+        })
+        .max_by_key(|(day, _)| *day)
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's days_from_civil).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 #[derive(serde::Serialize)]
@@ -1110,6 +1178,25 @@ mod space_wx_wire_tests {
         assert!(!json.contains("xray_long"), "must not regress to the snake_case name: {json}");
         assert!(json.contains("\"xrayClass\":\"C\""), "1e-6 is C-class: {json}");
         assert!(json.contains("\"rScale\":0"), "1e-6 is below the R1 threshold (1e-5): {json}");
+    }
+
+    #[test]
+    fn observed_ssn_takes_the_newest_dated_count() {
+        let body = r#"[{"Obsdate":"2026-11-14T00:00:00","swpc_ssn":121},
+                      {"Obsdate":"2026-11-15T00:00:00","swpc_ssn":96},
+                      {"Obsdate":"bad","swpc_ssn":5},
+                      {"Obsdate":"2026-11-16T00:00:00","swpc_ssn":null}]"#;
+        // 2026-11-15 00:00 UT = 1_794_700_800.
+        assert_eq!(parse_observed_ssn(body), Some((1_794_700_800, 96.0)));
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(parse_observed_ssn("<html>error</html>"), None);
+        assert_eq!(parse_observed_ssn("[]"), None);
+
+        let cache = SharedCache::new("EN52");
+        cache.observed_ssn.write().unwrap().value = Some((1_794_700_800, 96.0));
+        let v: serde_json::Value = serde_json::from_str(&cache.solar_history_json()).unwrap();
+        assert_eq!(v["observedSsn"]["dayUnix"].as_i64(), Some(1_794_700_800));
+        assert_eq!(v["observedSsn"]["ssn"].as_f64(), Some(96.0));
     }
 
     #[test]

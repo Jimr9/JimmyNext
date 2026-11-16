@@ -2164,6 +2164,8 @@ static class JimmyTests
         StationWatchHotkeyDefaultsTests();
         SmartStartNarrationPresentationTests();
         SmartStartSeedNoImmediateCqTests();
+        SmartStartTailEndKeepsTheCqTests();
+        SwrHaltNeedsTwoReadingsTests();
         NotificationSpaceCallsignsAndGridsTests();
         NotificationJoiningTests();
         SpeechJoinEverythingTests();
@@ -4449,16 +4451,18 @@ static class JimmyTests
             // ── Case 2: the roger genuinely never comes -> the hold is bounded, QSO tears down ──
             var wc2 = MakeClient();
             SeedReportSentRogerNotYetDecoded(wc2);
+            // ~4 s of polls (2026-11-15: 14 at the 300 ms pace, was 4 at 1 s).
+            int rogerCap = WsjtxClient.TestMaxDirectRr73LogRetries;
             bool heldThrough4 = true;
-            for (ulong i = 0; i < 4; i++)
+            for (ulong i = 0; i < (ulong)rogerCap; i++)
             {
                 wc2.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(7100 + i));
                 if (wc2.callInProg != dx) heldThrough4 = false;
             }
-            Check("bounded hold: callInProg survives the first MaxDirectRr73LogRetries (4) polls",
+            Check("bounded hold: callInProg survives the first MaxDirectRr73LogRetries (~4 s) polls",
                   heldThrough4, true);
-            wc2.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(7104));
-            Check("bounded hold: the 5th poll with still no roger tears the QSO down (CheckLateLog remains the net)",
+            wc2.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(7100 + (ulong)rogerCap));
+            Check("bounded hold: the next poll with still no roger tears the QSO down (CheckLateLog remains the net)",
                   wc2.callInProg == null, true);
         }
         catch (Exception ex)
@@ -8752,7 +8756,7 @@ static class JimmyTests
     // a separate test-side constant (not a reflection read of the production one) so this test
     // fails loudly if the two ever drift apart instead of silently adapting to whatever the
     // production value happens to be.
-    private const int SidebandReconcileAfterConsecutiveMismatchesForTest = 5;
+    private static readonly int SidebandReconcileAfterConsecutiveMismatchesForTest = WsjtxClient.TestSidebandReconcileAfter;
 
     // ── Persisted settings validation (independent audit finding, 2026-08-23): timeoutNumUpDown
     // must never crash startup on a malformed/corrupted/out-of-range persisted "timeout" value ──
@@ -12897,6 +12901,7 @@ static class JimmyTests
             //    LastUsableDecode), and pumping the poll feed actually sends the REPLY from it.
             Check("cached decode was recorded -> auto-start armed", wc.TestAutoStartPending, true);
             for (ulong s = 102; s <= 120; s += 2) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(s));
+            for (int i = 0; i < WsjtxClient.PollsFor(3000) + 1 && !SawReply(); i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(120));   // ~3 s finality hold
             try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 3000); } catch (TimeoutException) { }
             PumpUntil(SawReply, 2000);
             Check("the initial REPLY is constructed and sent from the cached decode", SawReply(), true);
@@ -12949,6 +12954,119 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  SmartStartSeedNoImmediateCqTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // KF4CCG's support reports: one SWR reading caught while the radio was still powering up
+    // (10 at a limit of 2 on 2026-10-21; 1.0 then 2.5 at 1.8 on 2026-11-12) halted a QSO on a
+    // station whose every other over read 1.08-1.25. The halt now needs two of Nexus's readings
+    // in a row (~1.2 s). Nexus refreshes SWR about every 600 ms and Jimmy polls every 300 ms, so
+    // each reading below is seen twice, as on the air.
+    static void SwrHaltNeedsTwoReadingsTests()
+    {
+        Console.WriteLine("\n── SWR halt: two high readings in a row, never one ──");
+        int Run(double limit, params double?[] readings)
+        {
+            int count = 0;
+            foreach (var r in readings)
+                for (int seen = 0; seen < 2; seen++)
+                    count = WsjtxClient.SwrHighCount(count, true, r, limit, keyed: true);
+            return count;
+        }
+        int halt = WsjtxClient.SwrHighReadingsToHalt;
+        Check("the halt is ~1.2 s of polls (4 at 300 ms)", halt == 4, true);
+
+        Check("KF4CCG 10-21: one reading of 10, then normal -- no halt",
+            Run(2.0, 10, 1.08) >= halt, false);
+        Check("KF4CCG 11-12: 1.0, 2.5, then normal -- no halt",
+            Run(1.8, 1.0, 2.5, 1.17) >= halt, false);
+        Check("a real fault, two high readings in a row -- halts",
+            Run(2.0, 3.0, 3.2) >= halt, true);
+        Check("high, normal, high is not two in a row -- no halt",
+            Run(2.0, 3.0, 1.1, 3.0) >= halt, false);
+        Check("a missing reading between two high ones keeps the run -- halts",
+            Run(2.0, 3.0, null, 3.0) >= halt, true);
+        Check("exactly at the limit is not over it (W0CAS's steady 2.5 at 2.5) -- no halt",
+            Run(2.5, 2.5, 2.5, 2.5) >= halt, false);
+
+        int c = WsjtxClient.SwrHighCount(0, true, 3.0, 2.0, keyed: true);
+        Check("end of the over (no reading, unkeyed) resets the run",
+            WsjtxClient.SwrHighCount(c, true, null, 2.0, keyed: false) == 0, true);
+        Check("halt turned off never counts",
+            WsjtxClient.SwrHighCount(5, false, 9.0, 2.0, keyed: true) == 0, true);
+    }
+
+    // KF4CCG, 2026-11-15: Smart Mode called a "CQ POTA" station after its RR73 to someone else
+    // (tail-ending). The REPLY went out from that RR73, so the station's CQ was never recorded:
+    // the contact was logged without POTA, the park was not counted as worked today, and the
+    // station's next "CQ POTA" was announced and called again. The CQ the monitor heard is now
+    // recorded with the call.
+    static void SmartStartTailEndKeepsTheCqTests()
+    {
+        Console.WriteLine("\n── Smart QSO Start: a call started after the target's RR73 keeps its CQ POTA ──");
+
+        var seenLock = new object();
+        var seenCmds = new List<string>();
+        var listener = new StubEngineHost(line => { lock (seenLock) seenCmds.Add(line); return "OK"; });
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_TailEndCq_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var _ = ctrl.Handle;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            wc.StatusView = new FakeStatusView();
+            ctrl.smartQsoStartEnabled = true;
+            ctrl.smartStartSilencePeriods = 6;
+
+            const string myCall = "KB0UZT", myGrid = "FN42", target = "N4NJJ", peer = "AC0DH";
+            bool SawReply() { lock (seenLock) return seenCmds.Exists(c => c.StartsWith("REPLY")); }
+            EnqueueDecodeMessage Fresh(string msg) => new EnqueueDecodeMessage
+            {
+                Message = msg, RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                DeltaFrequency = 1554, Snr = -3,
+            };
+            DirectSnapshot Snap(ulong slot) => ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
+                ""recentDecodes"": [] }");
+
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));   // establish band / mode
+            Check("tail-end: Smart Mode takes the CQ POTA station", wc.TestTryCaptureSmartStart(target, Fresh($"CQ POTA {target} DM26")), true);
+            wc.TestClearPendingAutoStart();                                    // not called on the CQ itself
+            wc.TestFeedTargetMonitorsDecode(Fresh($"{peer} {target} -05"), true);   // working someone else
+            Check("tail-end: no CQ is on record before the call", wc.CqMsg(target) == null, true);
+            wc.TestFeedTargetMonitorsDecode(Fresh($"{peer} {target} RR73"), true);  // closing -> call now
+            for (ulong s = 102; s <= 120 && !SawReply(); s += 2) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(s));
+            for (int i = 0; i < WsjtxClient.PollsFor(3000) + 1 && !SawReply(); i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(120));   // ~3 s finality hold
+            try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 3000); } catch (TimeoutException) { }
+            PumpUntil(SawReply, 2000);
+            Check("tail-end: the call went out", SawReply(), true);
+            Check("tail-end: the station's CQ POTA is on record with the call",
+                wc.CqMsg(target)?.Message == $"CQ POTA {target} DM26", true);
+            Check("tail-end: its report to us is known as a POTA station's",
+                wc.IsPotaCall(Fresh($"{myCall} {target} -11")), true);
+            wc.TestCancelStationWatchPendingStart();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SmartStartTailEndKeepsTheCqTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
         finally
@@ -15572,7 +15690,7 @@ static class JimmyTests
             // same-slot polls Nexus can still deliver that period's decodes across.
             void PumpFinality(WsjtxClient wc, ulong slot)
             {
-                for (int i = 0; i < 4; i++)
+                for (int i = 0; i < WsjtxClient.PollsFor(3000) + 1; i++)
                     wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
                         ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
                         ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": " + slot + @" },
@@ -20348,7 +20466,7 @@ static class JimmyTests
 
             // Our closing 73 first (operator, 2026-10-05, W0YRE: the call to AD9GE replaced it).
             wc.TestSetClosingOverDue(DateTime.UtcNow.AddSeconds(18), tx: true);
-            for (int i = 0; i < 8; i++) wc.TestServicePendingAutoStart();
+            for (int i = 0; i < WsjtxClient.PollsFor(3000) + 5; i++) wc.TestServicePendingAutoStart();
             Check("a Smart Mode start waits while our closing 73 goes out", wc.TestAutoStartPending, true);
             wc.TestSetClosingOverDue(DateTime.UtcNow.AddSeconds(18), tx: false);
             Check("  ...and while it is still due", wc.TestClosingOverPending, true);
@@ -20914,6 +21032,12 @@ static class JimmyTests
         CheckStr("sunspots: the newest daily count, dated", OtaSpotsWindow.FormatSunspotRow(null, days), "Sunspot number 78, daily count for October 7");
         CheckStr("sunspots: a current reading still wins", OtaSpotsWindow.FormatSunspotRow(120f, days), "Sunspot number 120");
         CheckStr("sunspots: none anywhere", OtaSpotsWindow.FormatSunspotRow(null, null), "Sunspot number not available");
+        // 2026-11-15: NOAA's observed count is usually a day newer than the daily file -- the
+        // newest dated count is the one said; an older observed count never hides a newer daily one.
+        days.ObservedSsn = new SolarDay { DayUnix = 1759881600, Ssn = 96 };   // 2025-10-08
+        CheckStr("sunspots: today's observed count, dated", OtaSpotsWindow.FormatSunspotRow(null, days), "Sunspot number 96, daily count for October 8");
+        days.ObservedSsn = new SolarDay { DayUnix = 1759708800, Ssn = 50 };   // 2025-10-06, older
+        CheckStr("sunspots: an older observed count does not win", OtaSpotsWindow.FormatSunspotRow(null, days), "Sunspot number 78, daily count for October 7");
 
         // A list left with a line selected keeps its rows (rewriting it was read out while the
         // operator was in another list); one never entered is filled as before.
@@ -25566,13 +25690,23 @@ static class JimmyTests
             WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
             wc.TestSetDirectConnected(true);
 
-            wc.TestDirectHandlePollFailure();
-            wc.TestDirectHandlePollFailure();
+            // 2026-11-15: the poll runs every 300 ms, so three quick failures span 0.6 s -- a
+            // hiccup, not a loss. The loss needs the 2 s three failures took at the old 1 s pace.
+            var clock = new DateTime(2026, 11, 15, 12, 0, 0, DateTimeKind.Utc);
+            wc.DirectClock = () => clock;
+            for (int i = 0; i < 3; i++) { wc.TestDirectHandlePollFailure(); clock = clock.AddMilliseconds(300); }
+            Check("Three failures in 0.6 s (the 300 ms pace) -> no announcement, a hiccup",
+                delivery.AnnounceCount == 0, true);
+            wc.TestDirectPollSucceeded();
+            clock = clock.AddSeconds(10);
+
+            wc.TestDirectHandlePollFailure(); clock = clock.AddSeconds(1);
+            wc.TestDirectHandlePollFailure(); clock = clock.AddSeconds(1);
             Check("Two consecutive poll failures (below the 3-failure threshold) -> no announcement yet",
                 delivery.AnnounceCount == 0, true);
 
             wc.TestDirectHandlePollFailure();
-            Check("Third consecutive poll failure -> ConnectionLost announced",
+            Check("Third consecutive poll failure, 2 s after the first -> ConnectionLost announced",
                 delivery.AnnounceCount == 1, true);
             Check("...NegoState reset to WAIT so a later reconnect is detected as fresh",
                 WsjtxMessage.NegoState == WsjtxMessage.NegoStates.WAIT, true);
@@ -27739,6 +27873,8 @@ static class JimmyTests
             Check("fresh CQ start is deferred, not sent in the capture pass", SawReply(), false);
             for (ulong s = 200; s <= 210; s += 2)
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(s));
+            for (int i = 0; i < WsjtxClient.PollsFor(3000) + 1 && !SawReply(); i++)   // the ~3 s finality hold, at the 300 ms pace
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(210));
             try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 3000); } catch (TimeoutException) { }
             Check("after the finality-deferral window a clean fresh CQ DOES send a REPLY", SawReply(), true);
 
@@ -28028,7 +28164,7 @@ static class JimmyTests
             lock (seenLock) seen.Clear();
             wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(119, target, $"{B} {target} RR73"));   // RR73 to the peer -> immediately available
             Check("target -> peer RR73 -> Smart Start re-arms a start with no silence wait", wc.TestAutoStartPending, true);
-            Polls(119, 4);                                                                        // 3-poll finality window (same slot)
+            Polls(119, WsjtxClient.PollsFor(3000) + 1);                                                // ~3 s finality window (same slot)
             try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 3000); } catch (TimeoutException) { }
             Check("...and after only the finality window it sends a new REPLY", SawReply(), true);
             Check("...the start was dispatched (no longer pending)", wc.TestAutoStartPending, false);
@@ -29253,7 +29389,7 @@ static class JimmyTests
             //    guard), NOT an extra full FT8 period, precedes the dispatch. ══
             Check("fresh CQ captured + auto-start armed", wc.TestTryCaptureSmartStart(target, FreshCq()) && wc.TestAutoStartPending, true);
             wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"CQ {target} FK92", DeltaFrequency = 1500, Snr = -6 }, true);  // live CQ -> parity/evidence
-            for (int i = 0; i < 4; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1000));   // 3-poll finality, SAME slot -- no extra period
+            for (int i = 0; i < WsjtxClient.PollsFor(3000) + 1; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1000));   // 3-poll finality, SAME slot -- no extra period
             try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 2000); } catch (TimeoutException) { }
             Check("fresh CQ -> REPLY dispatched after only the finality window (no extra FT8 period)", SawReply(), true);
             Check("...no longer pending", wc.TestAutoStartPending, false);
@@ -29275,7 +29411,7 @@ static class JimmyTests
             PumpUntil(() => wc.TestAutoStartPending, 1000);
             Check("DX RR73 to a peer -> re-armed", wc.TestAutoStartPending, true);
             wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"{A} {target} -09", DeltaFrequency = 1500, Snr = -6 }, true);   // straggler: DX still reporting to A -> busy
-            for (int i = 0; i < 4; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1000));   // finality elapses
+            for (int i = 0; i < WsjtxClient.PollsFor(3000) + 1; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1000));   // finality elapses
             System.Threading.Thread.Sleep(30);
             Check("a 'DX working a peer' straggler during the finality window -> start declined, NO REPLY", SawReply(), false);
             Check("...Smart Start stays armed, callInProg clear", wc.TestSmartStartTarget == target && wc.callInProg == null, true);
@@ -29404,7 +29540,7 @@ static class JimmyTests
                     // A straggler "target working a peer" decode during the finality window -> the
                     // deferred dispatch declines as TargetBusy -- a busy sighting, not silence.
                     wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"{peer} {target} -09", DeltaFrequency = 1500, Snr = -6 }, true);
-                    for (int i = 0; i < 4; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(2000));
+                    for (int i = 0; i < WsjtxClient.PollsFor(3000) + 1; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(2000));
                     Check("cap=1: a pre-transmit busy decline does NOT stand Smart Start down any more",
                         view.LastShowMessageText == null || !view.LastShowMessageText.Contains("not heard"), true);
                     Check("...still armed for the same target", wc.TestSmartStartTarget == target, true);
@@ -31101,6 +31237,8 @@ static class JimmyTests
             Check("Smart Start captured a fresh CQ for K4YT", wc.TestTryCaptureSmartStart(t2, FreshCq(t2)), true);
             for (ulong s = 200; s <= 212; s += 2)
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(s));
+            for (int i = 0; i < WsjtxClient.PollsFor(3000) + 1 && !SawReply(); i++)   // the ~3 s finality hold, at the 300 ms pace
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(212));
             try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 3000); } catch (TimeoutException) { }
             PumpUntil(() => wc.TestSmartStartAwaitingEngagement, 2000);
             Check("Smart Start dispatched its REPLY", SawReply(), true);
