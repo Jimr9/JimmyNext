@@ -574,6 +574,28 @@ the source of truth; the nine are itemised in the `###` sections below). Jimmy's
 behavior these preserve is the **Jimmy Next 2.0.55 operator experience** -- that is the
 compatibility baseline.
 
+Since 2026-11-18 there is a tenth, `tempo-app-cq-none.patch` (below). It touches the same file
+as `tempo-app-engine.patch` but is made against clean Nexus and applies first (patches apply in
+name order), so it can be deleted on its own.
+
+### `patches/tempo-app-cq-none.patch` -- CQ run that answers nobody by itself, `crates/tempo-app/src/engine.rs` (added 2026-11-18)
+
+Jimmy Next's Call CQ is Nexus's CQ run (`Engine::start_cq`, EngineHost `call_cq_outside_contest`)
+since 2026-11-18. It used to be `Engine::call_cq`, Nexus's chat CQ, which only sends from Chat
+mode: after any reply nothing went out (KF4CCG support report, 2026-11-17). Jimmy picks who to
+answer (CallQueueRanker), so the run must never answer a caller by itself. This adds
+`best_caller = "none"` (WSJT-X's "CQ: None", "to choose callers manually") in `pick_caller`:
+the run then answers nobody and keeps calling CQ, as when every caller is blocked. EngineHost
+sets it. Test `cq_run_none_answers_nobody_and_keeps_calling_cq`.
+
+Asked upstream as Nexus #538 (part 1). **Retire** when a release's `pick_caller` (or
+`best_caller` docs) has a "none" choice that answers nobody: delete this patch and its
+`$PatchTargets` line, keep EngineHost's `best_caller` setting (use upstream's word if it differs),
+and keep EngineHost's `call_cq_goes_on_the_air_after_a_reply` test.
+
+**How to check:** `grep -n '"none"' crates/tempo-app/src/engine.rs` near `fn pick_caller` --
+upstream without this patch has no match there.
+
 ### `patches/tempo-app-engine.patch` -- 6 behaviors (the Fake-It status setter retired 2026-10-13, `last_own_tx_text` 2026-10-22), `crates/tempo-app/src/engine.rs`
 
 | Behavior | Why Jimmy needs it | What's missing / wrong upstream |

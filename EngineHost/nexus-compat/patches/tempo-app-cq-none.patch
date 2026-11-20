@@ -1,0 +1,51 @@
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -38136,6 +38136,13 @@
+         .filter(|(_, c)| min_snr.is_none_or(|floor| c.snr >= floor))
+         .map(|(i, _)| i)
+         .collect();
++    // JIMMY COMPAT (EngineHost/nexus-compat/README.md, tempo-app-cq-none.patch; asked upstream
++    // as Nexus #538): "none" is WSJT-X's "CQ: None", "to choose callers manually" -- the run
++    // answers nobody by itself and keeps calling CQ, as when every caller is blocked; the
++    // operator picks one (`call_station_ctx`).
++    if strategy == "none" {
++        return None;
++    }
+     if eligible.is_empty() {
+         return None;
+     }
+@@ -69959,6 +69966,34 @@
+         assert!(qso.dxcall.is_none(), "neither blocked answer was locked");
+     }
+ 
++    // JIMMY COMPAT (tempo-app-cq-none.patch, Nexus #538): best_caller "none" (WSJT-X "CQ: None")
++    // answers nobody, however many answer, and the run keeps calling CQ.
++    #[test]
++    fn cq_run_none_answers_nobody_and_keeps_calling_cq() {
++        let mut e = Engine::new("W9XYZ", "EN37", 0);
++        e.settings.best_caller = "none".to_string();
++        e.set_mode("qso-run").unwrap();
++        e.poll_tx(0);
++        e.ingest_decodes_for_test(
++            &[
++                dec_snr("W9XYZ K1ABC FN42", -18),
++                dec_snr("W9XYZ W5LOUD EM12", -3),
++            ],
++            1,
++        );
++        let qso = e.snapshot().qso.expect("still running");
++        assert_eq!(qso.state, "CallingCq", "nobody answered by the run itself");
++        assert!(qso.dxcall.is_none(), "no caller was locked");
++        assert!(qso.cq_running, "the run goes on calling CQ");
++        let callers = vec![CqCaller {
++            decode_idx: 0,
++            snr: -3,
++            calling_cq: false,
++            grid: Some("EM12".into()),
++        }];
++        assert_eq!(pick_caller(&callers, "none", None, "EN37"), None);
++    }
++
+     #[test]
+     fn an_empty_blocklist_leaves_stock_selection_byte_identical() {
+         // The pinning control: with the list empty and stock defaults, the filter

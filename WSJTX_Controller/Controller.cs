@@ -3797,34 +3797,19 @@ namespace WSJTX_Controller
                 // is hidden), so the guard was really just "if currently in Listen mode, refuse to
                 // switch to CQ mode" -- which made Alt+C, whose entire purpose is that exact
                 // switch, permanently unable to start CQ from Listen mode.
-                if (wsjtxClient.ConnectedToWsjtx())
+                if (!wsjtxClient.ConnectedToWsjtx())
                 {
-                    // Requested 2026-08-21: warn once per session, before the FIRST Alt+C, that
-                    // the CQ options this is about to call CQ WITH (directed CQ / CQ DX only /
-                    // CQ and CQ DX, etc. -- CallCqDlg) haven't been reviewed yet this session and
-                    // may be carrying over whatever was last saved, possibly from a prior
-                    // session. Asked before the transmit-slot-analysis check below -- deciding
-                    // WHAT to call CQ with logically comes before deciding WHEN/WHERE to
-                    // transmit it. "Yes" opens the dialog and stops here -- CQ does not start
-                    // automatically once it's reviewed; the operator presses Alt+C again (or the
-                    // dialog's own controls) when actually ready. "No" proceeds with whatever is
-                    // already saved, exactly as Alt+C always has, and is remembered for the rest
-                    // of this session so this never asks twice.
-                    if (!_callCqOptionsReviewedThisSession)
-                    {
-                        var optDlg = new ConfirmDlg();
-                        optDlg.text = "Call CQ options (directed CQ, CQ DX only, etc.) have not been reviewed " +
-                            "this session and may not be set the way you want.\nOpen Call CQ options now?";
-                        optDlg.Owner = this;
-                        optDlg.ShowDialog();
-                        if (optDlg.DialogResult == DialogResult.Yes)
-                        {
-                            OpenCallCqDialog();
-                            return true;
-                        }
-                        _callCqOptionsReviewedThisSession = true;
-                    }
-
+                    // 2026-11-17: Alt+C before Jimmy Next was ready used to do nothing, silently --
+                    // a tester could not get CQ started. Now it says why, or starts CQ by itself
+                    // once the transmit slot check it is waiting for finishes.
+                    wsjtxClient.CqRequestedBeforeReady();
+                }
+                else
+                {
+                    // The once-per-session "Call CQ options have not been reviewed" question
+                    // (2026-08-21) is removed 2026-11-17: answering Yes opened the options and did
+                    // NOT start CQ, so CQ seemed not to work. The options are saved, and Call CQ
+                    // Options (Alt+B) opens them at any time.
                     if (wsjtxClient.txMode == WsjtxClient.TxModes.LISTEN && wsjtxClient.AnalysisNeeded)
                     {
                         var confDlg = new ConfirmDlg();
@@ -7910,7 +7895,6 @@ namespace WSJTX_Controller
         // moment the dialog is actually opened (see OpenCallCqDialog below) or once the operator
         // has explicitly been asked and chosen to proceed anyway (see the CallCqMode handler in
         // ProcessCmdKey) -- either way, asked at most once per session.
-        private bool _callCqOptionsReviewedThisSession = false;
 
         // Non-modal (Show(), not ShowDialog()) -- found 2026-07-11: a modal dialog here
         // blocked Alt+Tab back to the main window's status bar entirely, which matters a lot
@@ -7920,7 +7904,6 @@ namespace WSJTX_Controller
         // kept in front of its owner at the Win32 level regardless of modality.
         private void OpenCallCqDialog()
         {
-            _callCqOptionsReviewedThisSession = true;
             if (_callCqDlg != null && !_callCqDlg.IsDisposed)
             {
                 _callCqDlg.Activate();

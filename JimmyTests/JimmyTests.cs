@@ -2109,6 +2109,8 @@ static class JimmyTests
         ImportKeepsSourceTests();
         CqTypeRowFieldTests();
         NexusNewFeedTextTests();
+        CallCqFailureReasonTests();
+        CallCqResumeTests();
         SmartModeKeepsStationDecodesTests();
         LocationEvidenceTests();
         ContestCalendarAndTimeZoneTests();
@@ -20866,6 +20868,53 @@ static class JimmyTests
 
     // Who hears me, solar wind, daily solar history, Smart Mode rows (2026-10-04): missing values
     // are said as unknown, never shown as 0; an old solar-wind reading says so.
+    // 2026-11-17: a refused Call CQ says the engine's own reason, not a generic line.
+    static void CallCqFailureReasonTests()
+    {
+        Console.WriteLine("\n--- Call CQ failure says why ---");
+        CheckStr("the engine's reason, without ERR and the closing period",
+            WsjtxClient.CallCqFailureDetail("ERR Set your 4-character grid in Settings before calling CQ."),
+            "Set your 4-character grid in Settings before calling CQ");
+        CheckStr("no answer at all", WsjtxClient.CallCqFailureDetail(null), "no answer from the engine");
+        CheckStr("a bare ERR", WsjtxClient.CallCqFailureDetail("ERR"), "the engine did not say why");
+    }
+
+    // KF4CCG report, 2026-11-18: Call CQ is Nexus's CQ run, which replaces the contact when it
+    // starts -- so after a contact, CQ waits until our closing RR73/73 has gone out.
+    static void CallCqResumeTests()
+    {
+        Console.WriteLine("\n--- Call CQ after a contact waits for the closing over ---");
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var _ = ctrl.Handle;
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        var later = DateTime.UtcNow.AddSeconds(30);
+
+        wc.TestSetCqResume(later, tx: false, WsjtxClient.TxModes.CALL_CQ);
+        wc.TestCheckCqResume("W9XYZ KB0UZT RR73", tx: false);
+        Check("our RR73 still queued: no CQ yet", wc.TestCqResumeStarts == 0 && wc.TestCqResumePending, true);
+        wc.TestCheckCqResume(null, tx: true);
+        Check("  ...nor while it is on the air", wc.TestCqResumeStarts == 0 && wc.TestCqResumePending, true);
+        wc.TestCheckCqResume(null, tx: false);
+        Check("  ...CQ once it has gone out", wc.TestCqResumeStarts == 1 && !wc.TestCqResumePending, true);
+
+        wc.TestSetCqResume(DateTime.UtcNow.AddSeconds(-1), tx: false, WsjtxClient.TxModes.CALL_CQ);
+        wc.TestCheckCqResume("W9XYZ KB0UZT RR73", tx: false);
+        Check("a closing over that never goes out does not stop CQ for good", wc.TestCqResumeStarts == 2, true);
+
+        wc.TestSetCqResume(later, tx: false, WsjtxClient.TxModes.LISTEN);
+        wc.TestCheckCqResume(null, tx: false);
+        Check("Listen: no CQ", wc.TestCqResumeStarts == 2 && !wc.TestCqResumePending, true);
+
+        wc.TestSetCqResume(later, tx: false, WsjtxClient.TxModes.CALL_CQ);
+        wc.HaltTx();
+        wc.TestCheckCqResume(null, tx: false);
+        Check("a Halt stays halted: no CQ", wc.TestCqResumeStarts == 2 && !wc.TestCqResumePending, true);
+    }
+
     static void NexusNewFeedTextTests()
     {
         Console.WriteLine("\n── Who hears me / solar wind / solar history text ──");
@@ -20919,9 +20968,9 @@ static class JimmyTests
         CheckStr("heard summary since Start fresh", OtaSpotsWindow.FormatHeardMeSummary(new GettingOutResult { Count = 2, MaxKm = 900, WindowMinutes = 60, SinceUnix = 1791331200 + 14 * 3600 + 32 * 60 }),
             "2 stations heard you since 14:32 UTC, furthest 900 km.");
         CheckStr("flare sentence", SpaceWeatherAlerts.FlareSentence(new NowFlare { R = 2, XrayLong = 5.2e-5f, Out = "20m", Weak = "15m", Recovery = new NowRecovery { At = 1791331200 + 14 * 3600 + 50 * 60 } }),
-            "M5.2 solar flare, 20 meters and lower out on daylight paths, up to 15 meters weakened, until about 14:50 UTC.");
+            "M5.2 solar flare, 20 meters and lower out on daylight paths, up to 15 meters weakened, until about 14:50 UTC");
         CheckStr("watch sentence", SpaceWeatherAlerts.WatchSentence(new NowWatch { G = 2, From = 1791331200 + 86400, To = 1791331200 + 2 * 86400, Issued = 1 }, 1791331200 + 3600),
-            "Geomagnetic storm watch, G2, expected tomorrow.");
+            "Geomagnetic storm watch, G2, expected tomorrow");
         var alerts = new SpaceWeatherAlerts();
         var m1 = new SpaceNow { Flare = new NowFlare { R = 1, XrayLong = 1.1e-5f, XrayAt = 10, Weak = "20m" }, Watch = new NowWatch { G = 1, From = 0, To = 1791331200 + 86400, Issued = 7 } };
         Check("alerts: a flare and a watch are said when they begin", alerts.Check(m1, 1791331200).Count == 2, true);
@@ -21002,24 +21051,33 @@ static class JimmyTests
         Check("dxped: needed only keeps known needs, drops worked and counts the unknown it left out",
             Calls(neededOnly) == "H49A 3Y0J T30XX" && neededOnly.UnknownHidden == 1, true);
 
-        // Ionosondes (2026-10-08): name or position (never a made-up name), "not reported" for a
-        // missing reading, "not known" for a missing time, the last day's readings first.
+        // Ionosondes (2026-10-08; 2026-11-16 last day only, UTC clock time, code said once): name or
+        // position (never a made-up name), "not reported" for a missing reading, nearest first.
+        long ionoNow = 1791331200 + 13 * 3600 + 30 * 60;   // 13:30 UTC
         var iono = OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult { Ionosondes = new[] {
-            new Ionosonde { Name = "Austin, TX, USA", Code = "AU930", Lat = 30.4, Lon = -97.7, MufMhz = 28.83, Fof2Mhz = 8.6, MeasuredAgeSecs = 202 * 86400L, DistanceKm = 120 },
-            new Ionosonde { Name = "Boulder, CO, USA", Code = "BC840", Lat = 40, Lon = -105.3, MufMhz = null, Fof2Mhz = 6.1, MeasuredAgeSecs = 600, DistanceKm = 1250 },
-            new Ionosonde { Lat = 51.7, Lon = -1.3, MufMhz = 20, Fof2Mhz = null, MeasuredAgeSecs = null, DistanceKm = 7400 } } }, null);
-        CheckStr("ionosondes: recent first, a missing MUF said, the position when there is no name, old and unknown times said",
+            new Ionosonde { Name = "Austin, TX, USA", Code = "AU930", Lat = 30.4, Lon = -97.7, MufMhz = 28.83, Fof2Mhz = 8.6, MeasuredUnix = ionoNow - 202 * 86400L, DistanceKm = 120 },
+            new Ionosonde { Name = "Boulder, CO, USA", Code = "BC840", Lat = 40, Lon = -105.3, MufMhz = null, Fof2Mhz = 6.1, MeasuredUnix = ionoNow - 600, DistanceKm = 1250 },
+            new Ionosonde { Name = "Rome, Italy RO041", Code = "RO041", Lat = 41.9, Lon = 12.5, MufMhz = 29.4, Fof2Mhz = 8.5, MeasuredUnix = ionoNow - 16 * 3600, DistanceKm = 7300 },
+            new Ionosonde { Lat = 51.7, Lon = -1.3, MufMhz = 20, Fof2Mhz = null, MeasuredUnix = ionoNow - 3600, DistanceKm = 7400 },
+            new Ionosonde { Name = "Fairford", Code = "FF051", MufMhz = 25, MeasuredUnix = null, DistanceKm = 7500 } } }, null, ionoNow);
+        CheckStr("ionosondes: only the last day, a missing MUF said, the position when there is no name, the code once",
             string.Join(" | ", iono),
-            "Boulder, CO, USA: MUF not reported, foF2 6.1 megahertz, 1,250 kilometers, measured 10 minutes ago, BC840 | " +
-            "Austin, TX, USA: MUF 28.8 megahertz, foF2 8.6 megahertz, 120 kilometers, measured 202 days ago, AU930 | " +
-            "Station near 51.7 north, 1.3 west: MUF 20 megahertz, foF2 not reported, 7,400 kilometers, measurement time not known");
+            "Boulder, CO, USA: MUF not reported, foF2 6.1 megahertz, 1,250 kilometers, measured at 13:20 UTC, BC840 | " +
+            "Rome, Italy RO041: MUF 29.4 megahertz, foF2 8.5 megahertz, 7,300 kilometers, measured yesterday at 21:30 UTC | " +
+            "Station near 51.7 north, 1.3 west: MUF 20 megahertz, foF2 not reported, 7,400 kilometers, measured at 12:30 UTC");
+        Check("ionosondes: the same readings a minute later are the same rows (nothing to read out again)",
+            string.Join(" | ", OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult { Ionosondes = new[] {
+                new Ionosonde { Name = "Boulder, CO, USA", Code = "BC840", MufMhz = null, Fof2Mhz = 6.1, MeasuredUnix = ionoNow - 600, DistanceKm = 1250 } } }, null, ionoNow + 60))
+            == "Boulder, CO, USA: MUF not reported, foF2 6.1 megahertz, 1,250 kilometers, measured at 13:20 UTC, BC840", true);
         Check("ionosondes: no grid means no distance, the list still there",
-            OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult { Ionosondes = new[] { new Ionosonde { Name = "Austin", MufMhz = 20, MeasuredAgeSecs = 60 } } }, null)[0]
-            == "Austin: MUF 20 megahertz, foF2 not reported, measured 1 minute ago", true);
-        Check("ionosondes: loading, failed, empty, older host",
+            OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult { Ionosondes = new[] { new Ionosonde { Name = "Austin", MufMhz = 20, MeasuredUnix = ionoNow - 60 } } }, null, ionoNow)[0]
+            == "Austin: MUF 20 megahertz, foF2 not reported, measured at 13:29 UTC", true);
+        Check("ionosondes: loading, failed, empty, none in the last day",
             OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult(), null)[0] == "Ionosonde readings loading"
             && OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult { IonosondesLastError = "timeout" }, null)[0] == "Ionosonde readings not available: timeout"
-            && OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult { Ionosondes = new Ionosonde[0] }, null)[0] == "No ionosonde readings", true);
+            && OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult { Ionosondes = new Ionosonde[0] }, null)[0] == "No ionosonde readings"
+            && OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult { Ionosondes = new[] { new Ionosonde { Name = "Austin", MufMhz = 20, MeasuredUnix = ionoNow - 2 * 86400 } } }, null, ionoNow)[0]
+                == "No ionosonde has reported in the last 24 hours", true);
         Check("ionosondes: the modeled long-haul MUF row is still there",
             OtaSpotsWindow.FormatSpaceWeatherRows(new SpaceWxResult { Value = new SpaceWx { Sfi = 100 }, MufNow = 21f }, null, null, null)
                 .Contains("Long-haul MUF 21 megahertz"), true);

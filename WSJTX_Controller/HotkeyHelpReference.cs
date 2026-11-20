@@ -53,7 +53,7 @@ namespace WSJTX_Controller
         {
             new Section("Operating commands", new[]
             {
-                new Item(HotkeyAction.CallCqMode,         "Start the selected CQ mode (CQ only / CQ DX only / CQ and CQ DX). Does nothing in Listen mode."),
+                new Item(HotkeyAction.CallCqMode,         "Start calling CQ with your Call CQ options (CQ only / CQ DX only / CQ and CQ DX), also from Listen mode."),
                 new Item(HotkeyAction.CallCqOptions,      "Open Call CQ options (CQ only / CQ DX only / CQ and CQ DX, directed CQ, and more)."),
                 new Item(HotkeyAction.ListenMode,         "Select 'Listen for calls' mode."),
                 new Item(HotkeyAction.TransmitOn,          "Turn transmit back on after the radio stopped answering CAT."),

@@ -56,11 +56,12 @@ namespace WSJTX_Controller
             return said;
         }
 
-        // The Space Weather tab's rows: the default wording, filled the same way.
+        // The Space Weather tab's rows: the default wording, filled the same way -- without the
+        // closing period, like every other row on that page (2026-11-16).
         internal static string FlareSentence(NowFlare f) =>
-            $"{FlareClass(f.XrayLong)} solar flare, {FlareEffect(f)}, until about {Until(f)}.";
-        internal static string ProtonsSentence(NowProtons p) => $"Solar proton event, S{p.S}, polar paths absorbed.";
-        internal static string WatchSentence(NowWatch w, long nowUnix) => $"Geomagnetic storm watch, G{w.G}, {WatchWhen(w, nowUnix)}.";
+            $"{FlareClass(f.XrayLong)} solar flare, {FlareEffect(f)}, until about {Until(f)}";
+        internal static string ProtonsSentence(NowProtons p) => $"Solar proton event, S{p.S}, polar paths absorbed";
+        internal static string WatchSentence(NowWatch w, long nowUnix) => $"Geomagnetic storm watch, G{w.G}, {WatchWhen(w, nowUnix)}";
 
         // NOAA's flare class from the long-band flux: "M5", "X1.2" (one decimal only when it says something).
         internal static string FlareClass(float flux)

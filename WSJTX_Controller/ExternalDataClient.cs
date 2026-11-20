@@ -270,6 +270,7 @@ namespace WSJTX_Controller
         public double? MufMhz { get; set; }
         public double? Fof2Mhz { get; set; }
         public long? MeasuredAgeSecs { get; set; }
+        public long? MeasuredUnix { get; set; }
         public double? DistanceKm { get; set; }
     }
 

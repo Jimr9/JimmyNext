@@ -752,6 +752,7 @@ impl SharedCache {
                 muf_mhz: st.muf_mhz,
                 fof2_mhz: st.fof2_mhz,
                 measured_age_secs: st.measured_unix.map(|t| (now - t).max(0)),
+                measured_unix: st.measured_unix,
                 distance_km: self.me_latlon.map(|me| haversine_km(me, (st.lat, st.lon)).round()),
             })
             .collect();
@@ -1072,6 +1073,9 @@ struct IonosondeWire<'a> {
     muf_mhz: Option<f64>,
     fof2_mhz: Option<f64>,
     measured_age_secs: Option<i64>,
+    /// When it was measured (unix seconds): a fixed fact, so a list of these only changes when a
+    /// station reports again -- unlike the age, which grows every second (2026-11-16).
+    measured_unix: Option<i64>,
     distance_km: Option<f64>,
 }
 
@@ -1318,6 +1322,7 @@ mod space_wx_wire_tests {
         assert_eq!(first["code"], "AU930", "nearest first: {json}");
         assert!(first["distanceKm"].as_f64().unwrap() < 200.0, "{json}");
         assert!(first["measuredAgeSecs"].as_i64().unwrap() > 0, "age counted from the measurement: {json}");
+        assert_eq!(first["measuredUnix"], 1_791_450_601, "the measurement time itself: {json}");
         assert!(w["ionosondes"][1]["measuredAgeSecs"].is_null() || w["ionosondes"][2]["measuredAgeSecs"].is_null(), "{json}");
         assert!(json.contains("\"mufMhz\"") && json.contains("\"fof2Mhz\"") && json.contains("\"ionosondesAgeSecs\""), "camelCase: {json}");
     }

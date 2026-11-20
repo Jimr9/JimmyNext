@@ -198,6 +198,8 @@ namespace WSJTX_Controller
             pendingCqAfterAnalysis = false;
             TxModes prevTxMode = txMode;
             txMode = tMode;
+            if (tMode == TxModes.LISTEN) _cqWhenReady = false;   // a CQ waiting for the slot check is cancelled
+            CancelCqResume();   // a Call CQ waiting for a closing over: this choice replaces it
             DebugOutput($"{nl}{Time()} TxModeChanged, txMode:{txMode} cqPaused:{cqPaused} txEnabled:{txEnabled}");
             UpdateModeSelection();
             UpdateListenModeTxPeriod();
@@ -227,6 +229,7 @@ namespace WSJTX_Controller
 
                     HaltTx();           //stop CQing immediately
                     DisableTx(true);    //set WSJT-X tx to disable
+                    if (_directConnected) DirectSendEndCq();   // and end the engine's CQ run
                     txEnableChanged = true;
                     modePrompt = true;
                 }

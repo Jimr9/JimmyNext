@@ -1063,6 +1063,40 @@ fn parse_call_cq_line(line: &str) -> Option<Option<&str>> {
     Some(if dir.is_empty() { None } else { Some(dir) })
 }
 
+/// `Settings.best_caller` for Jimmy: the CQ run answers nobody by itself (WSJT-X "CQ: None").
+const CQ_RUN_ANSWERS_NOBODY: &str = "none";
+
+/// Call CQ outside a contest: Nexus's own FT8/FT4 Call CQ, its CQ run (`start_cq`), which
+/// calls CQ every own-parity period like WSJT-X's Tx 6 until someone is answered.
+///
+/// KF4CCG support report, 2026-11-17: this used to be `Engine::call_cq`, Nexus's CHAT CQ. It
+/// queues one frame that `plan_tx` only sends in Chat mode, and every REPLY leaves the engine in
+/// its contact mode, so after the first reply Call CQ answered OK, armed transmit, and nothing
+/// went out (and even before one, it sent a single CQ and never repeated it). Going back to Chat
+/// is no answer: on FT8/FT4 `set_mode("chat")` moves the tier to TempoFast.
+///
+/// The run never answers a caller by itself here: `best_caller` is "none" (see the settings
+/// built in main, and nexus-compat's tempo-app-cq-none.patch, reported upstream as Nexus #538),
+/// so Jimmy's CallQueueRanker still picks who to work and answers with REPLY, which ends the run
+/// (`call_station_ctx` clears `cq_running`). Jimmy calls CQ again after the contact, once its
+/// closing over has gone out (WsjtxClient.Direct.cs). A run is ended by END_CQ when Jimmy goes
+/// to Listen, since HALT_TX and SET_TX_ENABLED 0 leave a Nexus run waiting to call again.
+fn call_cq_outside_contest(eng: &mut Engine, dir: Option<&str>) -> Result<(), String> {
+    eng.start_cq(dir)
+}
+
+/// END_CQ (Jimmy going to Listen): end a CQ run that is still waiting to call, by Nexus's own
+/// S&P (`qso-monitor`), so a later SET_TX_ENABLED 1 can't start calling CQ again. With
+/// `best_caller` "none" a running CQ is never in a contact (only a REPLY starts one, and that
+/// ends the run), so nothing in progress is dropped. No run: nothing changes.
+fn end_cq_run(eng: &mut Engine) -> Result<(), String> {
+    let running = eng.snapshot().qso.as_ref().is_some_and(|q| q.cq_running);
+    if running {
+        eng.set_mode("qso-monitor")?;
+    }
+    Ok(())
+}
+
 /// Release-audit finding, 2026-08-20: the SET_FREQUENCY handler used to only check that
 /// hz/band/mode were each individually well-formed (finite/positive/non-empty), never that
 /// they actually agreed WITH EACH OTHER -- a malformed internal caller could request e.g.
@@ -1529,7 +1563,7 @@ fn handle_control_connection(
             // A contact the contest's sequencer is working is never restarted by it: the run
             // goes on by itself, and nothing is lost.
             let result = if !in_contest {
-                eng.call_cq(dir)
+                call_cq_outside_contest(&mut eng, dir)
             } else if eng.snapshot().field_day.as_ref().is_some_and(|fd| fd.dxcall.is_some()) {
                 Ok(())
             } else {
@@ -1540,6 +1574,9 @@ fn handle_control_connection(
         } else if line == "HALT_TX" {
             engine.lock().unwrap_or_else(|e| e.into_inner()).halt_tx();
             let _ = writeln!(stream, "OK");
+        } else if line == "END_CQ" {
+            let result = end_cq_run(&mut engine.lock().unwrap_or_else(|e| e.into_inner()));
+            let _ = writeln!(stream, "{}", reply_wire_response(result));
         } else if let Some(v) = line.strip_prefix("SET_TX_ENABLED ") {
             engine.lock().unwrap_or_else(|e| e.into_inner()).set_tx_enabled(v.trim() == "1");
             let _ = writeln!(stream, "OK");
@@ -2642,6 +2679,9 @@ fn main() {
         audio_in: args.device.clone().unwrap_or_default(),
         audio_out: args.output_device.clone().unwrap_or_default(),
         auto_log: false, // Jimmy owns logbook writes; the native engine must never double-log.
+        // Jimmy picks who to answer (CallQueueRanker); the CQ run never answers a caller by
+        // itself -- WSJT-X's "CQ: None". See call_cq_outside_contest's own comment.
+        best_caller: CQ_RUN_ANSWERS_NOBODY.to_string(),
         data_modes_plain_ssb: args.plain_ssb_data_modes,
         tx_audio_source: tx_audio_source(args.ptt_data_source),
         pskreporter: args.pskreporter,
@@ -3068,6 +3108,57 @@ mod tests {
 
         eng.set_tx_enabled(true);
         assert!(!cat_tx_off(&eng.snapshot().radio.cat_detail), "transmit on again");
+    }
+
+    /// The over the engine would key in the next own-parity slot, as text.
+    fn next_over_text(eng: &mut Engine) -> Option<String> {
+        (0..2u64).find_map(|slot| eng.plan_tx(slot)).and_then(|p| match p.waveform {
+            tempo_app::engine::TxWaveform::Native { text, .. } => Some(text),
+            _ => None,
+        })
+    }
+
+    // KF4CCG support report, 2026-11-17: on FT4, Call CQ after a contact armed transmit and
+    // answered OK, but no CQ ever went out. A reply leaves the engine in its contact mode, and
+    // Nexus's call_cq (its chat CQ) only sends from Chat mode. Call CQ must put a CQ on the air
+    // after a reply.
+    #[test]
+    fn call_cq_goes_on_the_air_after_a_reply() {
+        let mut eng = Engine::new("KB0UZT", "EN34", 0);
+        eng.set_tier(tempo_app::dto::Tier::Ft4);
+        eng.call_station_ctx("W9XYZ", Some("EN37"), None, None, None).unwrap();
+        eng.halt_tx();
+        call_cq_outside_contest(&mut eng, Some("DX")).unwrap();
+        assert_eq!(next_over_text(&mut eng).as_deref(), Some("CQ DX KB0UZT EN34"));
+    }
+
+    // Listen: a Nexus CQ run outlives HALT_TX and SET_TX_ENABLED 0, so END_CQ ends it -- after
+    // it, turning transmit on again must not start calling CQ.
+    #[test]
+    fn end_cq_ends_a_waiting_run_so_transmit_on_does_not_call_cq() {
+        let mut eng = Engine::new("KB0UZT", "EN34", 0);
+        eng.set_tier(tempo_app::dto::Tier::Ft4);
+        call_cq_outside_contest(&mut eng, None).unwrap();
+        eng.halt_tx();
+        eng.set_tx_enabled(false);
+        eng.set_tx_enabled(true);
+        assert_eq!(next_over_text(&mut eng).as_deref(), Some("CQ KB0UZT EN34"), "the run was still waiting");
+        eng.halt_tx();
+        eng.set_tx_enabled(false);
+        end_cq_run(&mut eng).unwrap();
+        eng.set_tx_enabled(true);
+        assert_eq!(next_over_text(&mut eng), None, "no CQ after END_CQ");
+        assert!(!eng.snapshot().qso.is_some_and(|q| q.cq_running));
+    }
+
+    // END_CQ never drops a contact: with no run it changes nothing.
+    #[test]
+    fn end_cq_leaves_a_contact_alone() {
+        let mut eng = Engine::new("KB0UZT", "EN34", 0);
+        eng.set_tier(tempo_app::dto::Tier::Ft4);
+        eng.call_station_ctx("W9XYZ", Some("EN37"), None, None, None).unwrap();
+        end_cq_run(&mut eng).unwrap();
+        assert_eq!(next_over_text(&mut eng).as_deref(), Some("W9XYZ KB0UZT EN34"));
     }
 
     #[test]

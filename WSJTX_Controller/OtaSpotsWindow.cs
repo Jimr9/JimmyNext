@@ -1486,7 +1486,7 @@ namespace WSJTX_Controller
             var ionoPanel = new Panel { Dock = DockStyle.Bottom, Height = 150, AccessibleName = "", AccessibleRole = AccessibleRole.None };
             _wxIonoList = MakeListBox("Ionosondes, measured MUF");
             ionoPanel.Controls.Add(_wxIonoList);
-            ionoPanel.Controls.Add(new Label { Text = "Ionosondes, measured MUF (recent first, nearest first):", Dock = DockStyle.Top, Height = 20, TabStop = false });
+            ionoPanel.Controls.Add(new Label { Text = "Ionosondes, measured MUF (last 24 hours, nearest first):", Dock = DockStyle.Top, Height = 20, TabStop = false });
 
             var historyPanel = new Panel { Dock = DockStyle.Bottom, Height = 150, AccessibleName = "", AccessibleRole = AccessibleRole.None };
             _wxHistoryList = MakeListBox("Daily solar history, newest first");
@@ -1713,33 +1713,43 @@ namespace WSJTX_Controller
         }
 
         // One line per ionosonde (2026-10-08): where it is (KC2G's name, else its position -- no
-        // name is ever made up), its measured MUF and foF2 (or "not reported"), how far, and how
-        // old the measurement is ("measurement time not known" when KC2G gave none). Readings
-        // from the last day first, each group nearest first (EngineHost's order); a station whose
-        // last reading is months old stays listed, saying so.
+        // name is ever made up), its measured MUF and foF2 (or "not reported"), how far, and when
+        // it was measured. Nearest first (EngineHost's order).
+        // 2026-11-16 (operator's speech buffer): only stations that reported in the last day. The
+        // list was 101 lines, 73 of them months or years old (up to 11 years), useless for working
+        // the bands now; Nexus's own panel shows only the freshest. And the time is said as a UTC
+        // clock time, not an age: "measured 10 minutes ago" changed every minute, so every 15 s
+        // refresh rewrote the list and the line the operator was on (or had just left) was read
+        // out again. A clock time changes only when the station reports again. The station code
+        // is said once: KC2G's own name sometimes already ends with it ("Rome, Italy RO041").
         internal const long IonosondeRecentSecs = 24 * 3600;
 
-        internal static List<string> FormatIonosondeRows(SpaceWxResult result, string error)
+        internal static List<string> FormatIonosondeRows(SpaceWxResult result, string error, long? nowUnix = null)
         {
             var list = result?.Ionosondes;
             if (error != null || list == null)
                 return new List<string> { "Ionosonde readings " + (error != null || result?.IonosondesLastError != null
                     ? "not available: " + (error ?? result.IonosondesLastError) : "loading") };
             if (list.Length == 0) return new List<string> { "No ionosonde readings" };
+            long now = nowUnix ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             string Mhz(double? v, string what) => v.HasValue ? $"{what} {v.Value.ToString("0.#", inv)} megahertz" : $"{what} not reported";
             string Where(Ionosonde s) => !string.IsNullOrWhiteSpace(s.Name) ? s.Name.Trim()
                 : $"Station near {Math.Abs(s.Lat).ToString("0.#", inv)} {(s.Lat >= 0 ? "north" : "south")}, " +
                   $"{Math.Abs(s.Lon).ToString("0.#", inv)} {(s.Lon >= 0 ? "east" : "west")}";
-            bool Recent(Ionosonde s) => s.MeasuredAgeSecs.HasValue && s.MeasuredAgeSecs.Value <= IonosondeRecentSecs;
-            return list.Select((s, i) => (s, i)).OrderBy(x => Recent(x.s) ? 0 : 1).ThenBy(x => x.i).Select(x =>
+            long? Measured(Ionosonde s) => s.MeasuredUnix ?? (s.MeasuredAgeSecs.HasValue ? now - s.MeasuredAgeSecs.Value : (long?)null);
+            var today = DateTimeOffset.FromUnixTimeSeconds(now).UtcDateTime.Date;
+            var rows = list.Where(s => Measured(s) is long t && now - t <= IonosondeRecentSecs).Select(s =>
             {
-                var s = x.s;
+                var at = DateTimeOffset.FromUnixTimeSeconds(Measured(s).Value).UtcDateTime;
+                string when = (at.Date == today ? "measured at " : "measured yesterday at ") + at.ToString("HH:mm", inv) + " UTC";
                 string dist = s.DistanceKm.HasValue ? $", {DistanceUnits.FromKm(s.DistanceKm.Value).ToString("#,0", inv)} {DistanceUnits.LongName}" : "";
-                string age = s.MeasuredAgeSecs.HasValue ? "measured " + LongAgeWords(s.MeasuredAgeSecs.Value) : "measurement time not known";
-                string code = string.IsNullOrWhiteSpace(s.Code) ? "" : ", " + s.Code.Trim();
-                return $"{Where(s)}: {Mhz(s.MufMhz, "MUF")}, {Mhz(s.Fof2Mhz, "foF2")}{dist}, {age}{code}";
+                string where = Where(s);
+                string code = string.IsNullOrWhiteSpace(s.Code) || where.IndexOf(s.Code.Trim(), StringComparison.OrdinalIgnoreCase) >= 0
+                    ? "" : ", " + s.Code.Trim();
+                return $"{where}: {Mhz(s.MufMhz, "MUF")}, {Mhz(s.Fof2Mhz, "foF2")}{dist}, {when}{code}";
             }).ToList();
+            return rows.Count > 0 ? rows : new List<string> { "No ionosonde has reported in the last 24 hours" };
         }
 
         // AgeWords, and days past two days ("202 days ago", not "4848 hours ago").

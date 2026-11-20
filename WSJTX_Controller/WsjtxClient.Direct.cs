@@ -619,6 +619,61 @@ namespace WSJTX_Controller
         private bool ClosingOverPending =>
             _closingOverDueUntilUtc != null && (transmitting || DateTime.UtcNow < _closingOverDueUntilUtc.Value);
 
+        // Call CQ after a contact (2026-11-18, KF4CCG report): Call CQ is Nexus's CQ run
+        // (EngineHost call_cq_outside_contest), and starting it replaces the engine's contact --
+        // so CALL_CQ waits until our closing RR73/73 has gone out: the engine has nothing left
+        // to send (Qso.TxNow empty; Nexus clears it once the closing over is keyed) and is not
+        // transmitting. As WSJT-X, which returns to Tx 6 after the 73 is sent. Cancelled by a
+        // Halt, by leaving Call CQ, or by a new contact. The give-up time only guards against a
+        // closing over that never goes out (logged; CQ then starts anyway rather than never).
+        private bool _cqResumePending;
+        private DateTime _cqResumeGiveUpUtc;
+
+        private void ScheduleCqResumeAfterClosingOver()
+        {
+            _cqResumePending = true;
+            _cqResumeGiveUpUtc = DateTime.UtcNow.AddMilliseconds(3 * (trPeriod ?? DefaultTrPeriodMs(mode)) + 3000);
+            DebugOutput($"{Time()} [DIRECT] Call CQ resumes once the closing over has gone out");
+        }
+
+        private void CheckCqResumeAfterClosingOver(string engineTxNow)
+        {
+            if (!_cqResumePending) return;
+            if (txMode != TxModes.CALL_CQ || callInProg != null)
+            {
+                _cqResumePending = false;
+                return;
+            }
+            if (transmitting) return;
+            bool closingOverOut = string.IsNullOrEmpty(engineTxNow);
+            if (!closingOverOut && DateTime.UtcNow < _cqResumeGiveUpUtc) return;
+            _cqResumePending = false;
+            DebugOutput(closingOverOut
+                ? $"{Time()} [DIRECT] closing over sent -- Call CQ resumes"
+                : $"{Time()} [DIRECT] closing over still queued ('{engineTxNow}') after the wait -- Call CQ resumes anyway");
+            TestCqResumeStarts++;
+            SetupCq(true);
+        }
+        internal int TestCqResumeStarts { get; private set; }
+
+        internal void CancelCqResume() => _cqResumePending = false;
+
+        // Test hooks: TestSetCqResume puts the resume in the state ScheduleCqResumeAfterClosingOver
+        // leaves it; TestCheckCqResume runs one poll's check and says whether CQ was started.
+        internal void TestSetCqResume(DateTime giveUpUtc, bool tx, TxModes mode)
+        {
+            _cqResumePending = true;
+            _cqResumeGiveUpUtc = giveUpUtc;
+            transmitting = tx;
+            txMode = mode;
+        }
+        internal bool TestCqResumePending => _cqResumePending;
+        internal void TestCheckCqResume(string engineTxNow, bool tx)
+        {
+            transmitting = tx;
+            CheckCqResumeAfterClosingOver(engineTxNow);
+        }
+
         // Operator finding, 2026-09-13 (CT2HEX/LX1TI live session): _finishingCall had NO
         // expiration -- it protected the engine's legitimate closing-tail repeats forever,
         // however long that took. That is right for the REAL closing tail (bounded by Nexus's
@@ -2153,6 +2208,7 @@ namespace WSJTX_Controller
                 else
                     consecTxCount = 0;
             }
+            CheckCqResumeAfterClosingOver(snap.Qso?.TxNow);
 
             // Found live (release blocker follow-up, 2026-08-19): Jimmy's own `txEnabled` field
             // was NEVER reconciled from the engine's real state in Direct mode -- only ever
@@ -2627,7 +2683,11 @@ namespace WSJTX_Controller
                         xmitCycleCount = 0;
                         txTimeout = false;
                         timedOutCall = null;
-                        SetupCq(true);
+                        // 2026-11-18: not SetupCq right here -- Call CQ is now Nexus's CQ run,
+                        // and starting it replaces the contact, so our closing RR73/73 (still
+                        // only queued when the roger has just been decoded) would never go out.
+                        // See ScheduleCqResumeAfterClosingOver.
+                        ScheduleCqResumeAfterClosingOver();
                     }
                     }   // end Finding-2 "write landed" else -- teardown only when the QSO is on record
 
@@ -3386,6 +3446,19 @@ namespace WSJTX_Controller
             }, isPriority: true);
         }
 
+        // END_CQ (2026-11-18): Listen ends the engine's CQ run. A Nexus CQ run outlives HALT_TX
+        // and SET_TX_ENABLED 0, so without this, turning transmit on again later (Alt+E, a
+        // reply's arm) could start it calling CQ in Listen mode. EngineHost end_cq_run: no run,
+        // no change; it never drops a contact.
+        public void DirectSendEndCq()
+        {
+            EnqueueDirectCommand("END_CQ", resp =>
+            {
+                if (resp == null || resp.Length == 0 || resp.StartsWith("ERR"))
+                    DebugOutput($"{Time()} [DIRECT] END_CQ did not return OK (response: {(resp ?? "<no response>")})");
+            });
+        }
+
         // Codex Audit 04 finding 1, 2026-08-21: shutdown-only variant of DirectSendHaltTx --
         // called from WsjtxClient.Closing(), which Controller.cs's CloseComm() now runs BEFORE
         // disposing nativeEngineClient (previously reversed: HALT_TX had nothing left to reach by
@@ -3523,8 +3596,10 @@ namespace WSJTX_Controller
                 if (!ok)
                 {
                     DebugOutput($"{Time()} [DIRECT] CALL_CQ '{dir}' did not return OK (response: {(resp ?? "<no response>")})");
-                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Call CQ failed",
-                        "the engine host did not confirm the CQ -- not treated as started"));
+                    // 2026-11-17: say the engine's own reason ("Set your 4-character grid in
+                    // Settings before calling CQ") instead of a generic line -- a tester heard
+                    // only that CQ failed, never what to fix.
+                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Call CQ failed", CallCqFailureDetail(resp)));
                 }
                 else if (capturedContactEpoch != System.Threading.Interlocked.Read(ref _contactEpoch))
                 {
@@ -3535,6 +3610,16 @@ namespace WSJTX_Controller
                 }
                 onComplete?.Invoke(ok);
             }, isTxArm: true);
+        }
+
+        // What a refused CALL_CQ says: the engine's own words after "ERR ", without a closing
+        // period (the "Call CQ failed" line adds the context).
+        internal static string CallCqFailureDetail(string resp)
+        {
+            if (string.IsNullOrWhiteSpace(resp)) return "no answer from the engine";
+            string reason = resp.StartsWith("ERR", StringComparison.Ordinal) ? resp.Substring(3).Trim() : resp.Trim();
+            reason = reason.TrimEnd('.', ' ');
+            return reason.Length > 0 ? reason : "the engine did not say why";
         }
 
         public void DirectSetTxEnabled(bool enabled)

@@ -153,6 +153,7 @@ Write-Host "Verified: $($Pin.NEXUS_TAG) = $actualCommit"
 # --- Apply each compatibility patch, dry-run first --------------------------------------
 # Maps each patch file to the directory (relative to $StagingDir) it must be applied from.
 $PatchTargets = @{
+    "tempo-app-cq-none.patch"                    = "crates\tempo-app"
     "tempo-app-engine.patch"                     = "crates\tempo-app"
     "tempo-app-settings.patch"                   = "crates\tempo-app"
     "tempo-app-station.patch"                    = "crates\tempo-app"

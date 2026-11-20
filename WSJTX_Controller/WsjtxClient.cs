@@ -2580,9 +2580,43 @@ namespace WSJTX_Controller
                 ctrl.OnJimmyReachedActive();    //kicks off automatic logbook sync, once per session, after a short delay
                 DebugOutput($"{Time()} opMode START -> ACTIVE");
                 UpdateDebug();
+                if (_cqWhenReady)
+                {
+                    // Alt+C was pressed while the slot check was running (CqRequestedBeforeReady):
+                    // start CQ now, exactly as Alt+C does when ready. Deferred so this transition
+                    // finishes first.
+                    _cqWhenReady = false;
+                    DebugOutput($"{spacer}starting the CQ asked for before ready");
+                    ctrl.BeginInvoke(new Action(() => ctrl.cqModeButton_Click(null, null)));
+                }
                 return true;
             }
             return false;
+        }
+
+        // Alt+C before Jimmy Next is ready to call CQ (2026-11-17). It used to do nothing, silently.
+        // While only the transmit slot check holds it back (opMode START with everything else in
+        // place; CheckActive moves on once both periods are measured), CQ starts by itself when
+        // that finishes. Anything else is said in a few words. Listen mode or a session reset
+        // cancels a waiting CQ.
+        private bool _cqWhenReady;
+
+        internal void CqRequestedBeforeReady()
+        {
+            string key;
+            if (opMode == OpModes.START && myCall != null && supportedModes.Contains(mode) && specOp == 0)
+            {
+                _cqWhenReady = true;
+                key = "Msg.CqWhenSlotChecked";
+            }
+            else if (!_directConnected || opMode == OpModes.IDLE)
+                key = "Msg.CqEngineNotReady";
+            else if (myCall == null)
+                key = "Msg.CqNoCallsign";
+            else
+                key = "Msg.CqNotReady";
+            DebugOutput($"{Time()} Alt+C before ready: opMode:{opMode} myCall:'{myCall}' mode:'{mode}' -> {key}");
+            StatusView.ShowMessage(Wording.Get(key), false);
         }
 
         // StartProcessDecodeTimer() and CheckMyCall(StatusMessage) were removed 2026-08-18:
@@ -2832,6 +2866,7 @@ namespace WSJTX_Controller
             // The canonical trio: queue, then contact, then band session.
             ClearCalls();
             cqPaused = true;
+            _cqWhenReady = false;
             if (WsjtxMessage.NegoState != WsjtxMessage.NegoStates.WAIT) HaltTx();
             opMode = OpModes.IDLE;
             bandIdx = null;
@@ -4002,6 +4037,7 @@ namespace WSJTX_Controller
             _finishingCall = null;
             _finishingTailExemptedOvers = 0;
             _closingOverDueUntilUtc = null;
+            CancelCqResume();   // a Halt stays halted: no Call CQ after the closing over
             // UDP transport cleanup, 2026-08-18: the classic UDP path's own standard HaltTx
             // message (msg type 8, gated on udpClient2 being open) is removed -- route through
             // the control port's own HALT_TX command instead. AutoOnly is explicitly false
