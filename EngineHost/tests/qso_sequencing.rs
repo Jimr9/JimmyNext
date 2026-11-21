@@ -61,6 +61,7 @@ fn cq_grid_report_exchange_sequences_correctly_and_every_message_is_valid_ft8() 
         rv: None,
         mode: None,
         raw: None,
+        unchecked: false,
     };
     a.observe(std::slice::from_ref(&d));
     b.after_tx();

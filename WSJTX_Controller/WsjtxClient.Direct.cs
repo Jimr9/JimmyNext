@@ -1546,6 +1546,7 @@ namespace WSJTX_Controller
             // false -> reconnect-reset -> true recovery path is unit-testable directly (see
             // TestApplyCatHealth / ApplyCatHealthNotification).
             ApplyCatTxOff(snap.CatTxOff);
+            ApplyFt8StepDown(snap.Ft8StepDown);
             ApplyCatHealthNotification(radio.CatOk, radio.CatDetail);
 
             // Fake It split: the radio did not go back to the operating frequency after an over
@@ -3319,6 +3320,24 @@ namespace WSJTX_Controller
             ctrl.UpdateTransmitOnButton(CatTxOffActive);
         }
 
+        // Nexus 1.25 (2026-11-20): Nexus's own CPU guard stepped the JTDX preset down
+        // (AppSnapshot.ft8_step_down). Its seq rises once per step; each is said once. A new
+        // engine starts again from no step.
+        private long _ft8StepDownSeq;
+
+        internal void ApplyFt8StepDown(DirectFt8StepDown stepDown)
+        {
+            long seq = stepDown?.Seq ?? 0;
+            if (seq == _ft8StepDownSeq) return;
+            _ft8StepDownSeq = seq;
+            if (stepDown == null || seq == 0) return;
+            string change = string.IsNullOrEmpty(stepDown.To)
+                ? " Already at Easy."
+                : " JTDX preset now " + char.ToUpperInvariant(stepDown.To[0]) + stepDown.To.Substring(1) + ".";
+            DebugOutput($"{Time()} [DECODE] Nexus stepped JTDX down: from {stepDown.From} to {stepDown.To ?? "(floor)"}, {stepDown.DecodeMs} ms > {stepDown.BudgetMs} ms");
+            Notify?.Publish(new DecoderSteppedDownEvent(change));
+        }
+
         // "Press Ctrl+Shift+E to transmit again." -- or the button, with no key assigned.
         internal string CatTxOffHowToResume()
         {
@@ -3783,6 +3802,13 @@ namespace WSJTX_Controller
         public void DirectSetDecodeDepth(int depth)
         {
             EnqueueDirectCommand("SET_DECODE_DEPTH " + depth, null);
+        }
+
+        // Options > Decode tab's decoder choices (Nexus 1.25: FT8/FT4 decoder, JTDX preset,
+        // Custom knobs) -- live through EngineHost's SET_DECODERS, no engine restart.
+        public void DirectSetDecoders(string spec)
+        {
+            EnqueueDirectCommand("SET_DECODERS " + spec, null);
         }
 
         // "Use best Tx frequency" apply step, restored 2026-08-18 -- see CalcBestOffset's own
@@ -4637,6 +4663,9 @@ namespace WSJTX_Controller
         // SNAPSHOT injection (main.rs cat_tx_off); false from an older EngineHost.
         public bool CatTxOff { get; set; }
 
+        // Nexus 1.25: the JTDX preset stepped down for a slow computer; null when it has not.
+        public DirectFt8StepDown Ft8StepDown { get; set; }
+
         // 2026-09-26: Nexus's own base call (message::base_call) of qso.dxcall -- "VA3LG/W2" ->
         // "VA3LG". EngineHost SNAPSHOT injection; null with no active QSO / older EngineHost.
         public string QsoDxcallBase { get; set; }
@@ -4768,6 +4797,18 @@ namespace WSJTX_Controller
         // How many times the current message has been transmitted this step, resetting when the
         // partner advances (QsoStatus.tx_count) -- the engine's own "I've called them N times".
         public int TxCount { get; set; }
+    }
+
+    // Nexus 1.25 AppSnapshot.ft8StepDown (dto::Ft8StepDown). Presets are lowercase names; To is
+    // null when the preset was already Easy.
+    internal class DirectFt8StepDown
+    {
+        public long Seq { get; set; }
+        public string Chosen { get; set; }
+        public string From { get; set; }
+        public string To { get; set; }
+        public int DecodeMs { get; set; }
+        public int BudgetMs { get; set; }
     }
 
     internal class DirectRadioStatus

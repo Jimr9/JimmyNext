@@ -836,6 +836,8 @@ impl ContestBridge {
             contest_category_station: active.category_station.clone(),
             mygrid: active.mygrid.clone(),
             dxcc: false,
+            // Nexus 1.25: typed slots of an operator's own (custom) contest; Jimmy runs none.
+            entered: std::collections::BTreeMap::new(),
         };
         match tempo_core::fd_rules::ruleset_by_id(&active.event_id, tempo_core::fd_rules::CURRENT_RULES_YEAR) {
             Some(rs) => tempo_core::contest::ContestSession::for_ruleset(rs, &station),

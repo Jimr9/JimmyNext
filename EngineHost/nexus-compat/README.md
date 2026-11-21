@@ -59,6 +59,30 @@ stay pinned; do NOT import `main`. What the next stable upgrade needs:
   SET_CLOCK_CHECK uses Nexus's public `apply_settings` + `clear_clock_offset(true)`; ATU_STATUS
   reads PTT with Nexus's `Rig::read_ptt`. Both are public API -- check they still exist.
 
+## Eight-patch re-assessment -- 2026-11-20 (v1.24.0 -> v1.25.0-beta.2, TESTER BUILD)
+
+Pinned to a PRE-RELEASE at the operator's request so testers get Nexus 1.25's JTDX-style FT8/FT4
+decoder; move to v1.25.0 stable when it ships.
+
+- **Retired: `tempo-core-message.patch` and `tempo-core-inbox.patch`.** #512 is upstream in 1.25:
+  `message.rs` makes a grid-less CQ or call between standard calls a standard message
+  (`a_gridless_cq_or_call_between_standard_calls_...`), and `inbox.rs` keeps a chat chunk whose
+  header reads as a call (`chunk_not_call`) as chat -- both halves of what the two patches did.
+- **`tempo-app-engine.patch` re-anchored and extended.** 1.25 runs `error_checked` (unchecked `^`
+  decodes are kept from automation, UDP and PSK Reporter) before `hound_split`'s wire copy. New:
+  `Engine::last_decodes_counted()` -- per `last_decodes` row, the verdict of Nexus's OWN
+  `error_checked` (recorded inside it, not a copy of its rule), so EngineHost's SNAPSHOT drops the
+  rows Nexus's automation does not act on (`drop_uncounted_rows`, main.rs). A `^` decode that
+  repeats a checked message word for word on the same parity counts, as in Nexus; with no verdict
+  in step, every `^` row is dropped. Test: `jimmy_compat_counted_marks_the_rows_automation_acts_on`.
+- The other six apply as they were (settings hunk 2 lands in `Settings`' Default; the service
+  patch's test hunk applies with fuzz 1, checked).
+- EngineHost: `--decoders` / `SET_DECODERS` set `Settings.ft8_decoder`, `ft4_decoder`,
+  `jtdx_preset`, `jtdx_custom` (live via `apply_settings`); SNAPSHOT's `ft8StepDown` (Nexus's CPU
+  guard) is announced by Jimmy. EQSL_PROGRAM_VERSION 1.25.0.
+- **Next: when upstream's DTO or the radio loop forwards decodes by another path**, re-check that
+  SNAPSHOT `recent_decodes` is still the only way decodes reach Jimmy.
+
 ## Nine-patch re-assessment -- 2026-11-12 (v1.23.0 -> v1.24.0 upgrade)
 
 `pin.txt` now names v1.24.0 (`8f510d4b`, a lightweight tag). Every patch was tried against a clean
@@ -853,7 +877,7 @@ full rebuild from a **fresh** build directory fails every Fortran compile step i
 **How to check:** `grep -n "canonicalize\|strip_verbatim" crates/tempo-fast-sys/build.rs`, and
 try a build after `cargo clean` (the bug does not reproduce on an incremental build).
 
-### `patches/tempo-core-message.patch` -- grid-less standard CQ/reply (protocol fix)
+### RETIRED 2026-11-20 (upstream in 1.25, #512; kept here as history): `patches/tempo-core-message.patch` -- grid-less standard CQ/reply (protocol fix)
 
 `crates/tempo-core/src/message.rs` (added 2026-09-26): `Msg::parse` treated `CQ W1AW` and
 `W9XYZ K2DEF` -- two plain standard calls with no third word -- as free text, on the stated
@@ -884,7 +908,7 @@ asserting `Msg::Other` there means the bug is still present.
 as a callsign (`A13DE W9XYZ` = header `A13` + payload `DE W9XYZ`) -- see `tempo-core-inbox.patch`
 below, which keeps Tempo chat reassembly working (operator-approved 2026-09-26).
 
-### `patches/tempo-core-inbox.patch` -- Tempo chat chunk vs grid-less call, `crates/tempo-core/src/inbox.rs`
+### RETIRED 2026-11-20 (upstream in 1.25, #512; kept here as history): `patches/tempo-core-inbox.patch` -- Tempo chat chunk vs grid-less call, `crates/tempo-core/src/inbox.rs`
 
 Added 2026-09-26 as the companion to `tempo-core-message.patch`. The inbox asks "standard message?"
 before "chat chunk?", and a chunk whose 3-character header happens to spell a call (`A13DE W9XYZ`)

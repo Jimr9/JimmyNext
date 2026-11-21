@@ -1520,7 +1520,7 @@ pub fn qrz_logbook_status(args: &QrzLogbookStatusArgs) -> Result<serde_json::Val
 /// this `PROGRAMVERSION`, as eQSL asks of client programs), and since Nexus 1.20 the version in the
 /// `Nexus/<version>` User-Agent QRZ is sent. The Nexus release EngineHost is built from -- keep it
 /// with `nexus-compat/pin.txt`.
-pub const EQSL_PROGRAM_VERSION: &str = "1.24.0";
+pub const EQSL_PROGRAM_VERSION: &str = "1.25.0";
 
 /// Best times gives no answer for a station nearer than this (the Nexus desktop's
 /// `best_times::TOO_CLOSE_KM`, which lives in its app crate, not a library EngineHost links).

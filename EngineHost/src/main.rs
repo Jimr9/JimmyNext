@@ -427,6 +427,9 @@ struct Args {
     /// Engine::set_decode_depth is safe to call mid-session (the decoder reads it fresh on
     /// every slot). Defaults to Nexus's own Settings::default() (3 = Deep) when not passed.
     decode_depth: Option<u8>,
+    /// Nexus 1.25 decoder choice, a `decoder_spec` string (`--decoders`). Live after startup via
+    /// SET_DECODERS. None = Nexus's own defaults.
+    decoders: Option<String>,
     /// WSJT-X "F Low" -- decoder passband low edge in Hz. Settings.decode_flow_hz. Startup-only:
     /// Engine has no live setter for this (its `settings` field is private to the tempo-app
     /// crate), so unlike decode_depth this can only be set once, at Engine::with_settings(...)
@@ -594,6 +597,7 @@ fn parse_args() -> Args {
     let mut split_mode = "none".to_string();
     let mut control_port: u16 = 58239;
     let mut decode_depth: Option<u8> = None;
+    let mut decoders: Option<String> = None;
     let mut decode_flow_hz: Option<u32> = None;
     let mut decode_fhigh_hz: Option<u32> = None;
     let mut ap_decode: Option<bool> = None;
@@ -663,6 +667,7 @@ fn parse_args() -> Args {
                     decode_depth = v.parse::<u8>().ok().map(|d| d.clamp(1, 3));
                 }
             }
+            "--decoders" => decoders = it.next(),
             "--decode-flow-hz" => {
                 if let Some(v) = it.next() {
                     decode_flow_hz = v.parse().ok();
@@ -747,6 +752,7 @@ fn parse_args() -> Args {
         split_mode,
         control_port,
         decode_depth,
+        decoders,
         decode_flow_hz,
         decode_fhigh_hz,
         ap_decode,
@@ -857,6 +863,11 @@ fn parse_args() -> Args {
 ///                                          This mirrors that, so Jimmy can trust the response
 ///                                          immediately instead of polling SNAPSHOT afterward to
 ///                                          find out what it was already told.
+///   SET_DECODERS <spec>                  -- Nexus 1.25 decoder choice, live (apply_settings):
+///                                          "ft8=jtdx|standard ft4=jtdx|standard
+///                                          preset=easy|keen|ludicrous|custom
+///                                          custom=cycles,sens,rxsens,threads,wide,thin,swl".
+///                                          Any subset. Responds "OK" or "ERR <message>".
 ///   SET_DECODE_DEPTH 1|2|3               -- calls Engine::set_decode_depth(u8) (WSJT-X's
 ///                                          "Fast/Normal/Deep"). Responds "OK" or "ERR <message>".
 ///                                          Live, mid-session -- unlike the rest of Jimmy's Decode
@@ -981,6 +992,85 @@ fn best_times_tx_bands(
 fn cat_tx_off(cat_detail: &str) -> bool {
     use tempo_app::engine::{CAT_BACK_TX_OFF, CAT_SILENT_TX_OFF};
     cat_detail.ends_with(CAT_SILENT_TX_OFF) || cat_detail.ends_with(CAT_BACK_TX_OFF)
+}
+
+/// Applies a decoder spec (`--decoders`, SET_DECODERS) to `s`: `key=value` pairs separated by `;` or spaces,
+/// any subset of `ft8=jtdx|standard`, `ft4=jtdx|standard`, `preset=easy|keen|ludicrous|custom`
+/// and `custom=cycles,sensitivity,rx_sensitivity,threads,wide_dx(0|1),cand_thin,swl(0|1)`.
+/// Nothing is changed unless the whole spec reads.
+fn apply_decoder_spec(s: &mut tempo_app::settings::Settings, spec: &str) -> Result<(), String> {
+    use tempo_app::settings::{DecoderStyle, JtdxCustom, JtdxPreset};
+    let style = |v: &str| match v {
+        "jtdx" => Ok(DecoderStyle::Jtdx),
+        "standard" => Ok(DecoderStyle::Standard),
+        _ => Err(format!("bad decoder: {v}")),
+    };
+    let mut out = s.clone();
+    for pair in spec.split(|c: char| c.is_whitespace() || c == ';').filter(|t| !t.is_empty()) {
+        let (k, v) = pair.split_once('=').ok_or_else(|| format!("bad item: {pair}"))?;
+        match k {
+            "ft8" => out.ft8_decoder = style(v)?,
+            "ft4" => out.ft4_decoder = style(v)?,
+            "preset" => {
+                out.jtdx_preset = match v {
+                    "easy" => JtdxPreset::Easy,
+                    "keen" => JtdxPreset::Keen,
+                    "ludicrous" => JtdxPreset::Ludicrous,
+                    "custom" => JtdxPreset::Custom,
+                    _ => return Err(format!("bad preset: {v}")),
+                }
+            }
+            "custom" => {
+                let n: Vec<u8> = v
+                    .split(',')
+                    .map(|x| x.trim().parse::<u8>())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| format!("bad custom: {v}"))?;
+                let [cycles, sensitivity, rx_freq_sensitivity, threads, wide, cand_thin, swl] = n[..] else {
+                    return Err(format!("custom needs 7 numbers: {v}"));
+                };
+                // Stored as given; Nexus clamps each knob to its range when it runs (JtdxPreset::knobs).
+                out.jtdx_custom = JtdxCustom {
+                    cycles,
+                    sensitivity,
+                    rx_freq_sensitivity,
+                    threads,
+                    wide_dx_search: wide != 0,
+                    cand_thin,
+                    swl: swl != 0,
+                };
+            }
+            _ => return Err(format!("unknown item: {k}")),
+        }
+    }
+    *s = out;
+    Ok(())
+}
+
+/// Removes the decode rows Nexus's automation does not act on (Nexus 1.25's unchecked `^`
+/// decodes), keeping `split` in step with `rows`. `counted` is the engine's per-row verdict
+/// (`Engine::last_decodes_counted`, Jimmy compat patch) for the first rows; a row past it
+/// (our own TX) or with no verdict is kept only when it is not unchecked.
+fn drop_uncounted_rows<T>(rows: &mut Vec<T>, split: &mut Vec<bool>, counted: &[bool], unchecked: impl Fn(&T) -> bool) {
+    if !rows.iter().any(&unchecked) {
+        return;
+    }
+    let keep: Vec<bool> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| !unchecked(r) || counted.get(i).copied().unwrap_or(false))
+        .collect();
+    let mut i = 0;
+    rows.retain(|_| {
+        i += 1;
+        keep[i - 1]
+    });
+    // `split` lines up with the first rows (empty when out of step), so it drops the same ones.
+    let mut j = 0;
+    split.retain(|_| {
+        j += 1;
+        keep.get(j - 1).copied().unwrap_or(true)
+    });
 }
 
 /// The engine's ACTUAL special-operation state as Jimmy sees it: `"hound"` (incl. the retired
@@ -1385,7 +1475,7 @@ fn handle_control_connection(
             // ability to report state down with it.
             // split_provenance is read under the SAME lock as the snapshot, so its flags line up
             // with this snapshot's recent_decodes rows (built 1:1, in order, from last_decodes).
-            let (snap, special_op, split_provenance) = {
+            let (mut snap, special_op, mut split_provenance, counted) = {
                 let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
                 // Nexus-owned logbook only (logbook_host.rs): Nexus's own resend of a change the
                 // disk refused for a reason that can pass -- where the Nexus desktop makes the same
@@ -1393,8 +1483,17 @@ fn handle_control_connection(
                 if log_host.is_some() {
                     eng.log_resend_due();
                 }
-                (eng.snapshot(), special_op_wire(&eng), eng.last_decodes_multiplexed().to_vec())
+                (
+                    eng.snapshot(),
+                    special_op_wire(&eng),
+                    eng.last_decodes_multiplexed().to_vec(),
+                    eng.last_decodes_counted().to_vec(),
+                )
             };
+            // Nexus 1.25 JTDX-style decoder: Jimmy gets only the rows Nexus's own automation acts
+            // on. An unchecked `^` row is dropped unless Nexus counted it (a repeat of a checked
+            // message); with no verdict in step, every unchecked row is dropped.
+            drop_uncounted_rows(&mut snap.recent_decodes, &mut split_provenance, &counted, |r| r.unchecked);
             // Independent audit finding, 2026-08-23 (EngineHost ownership / session identity):
             // sessionToken/pid are injected at the JSON level, AFTER AppSnapshot (a pinned
             // Nexus/tempo-app type) has already been serialized normally -- this never touches
@@ -1841,6 +1940,20 @@ fn handle_control_connection(
                 }
                 Err(e) => {
                     let _ = writeln!(stream, "ERR bad SET_WORKING_FREQUENCIES args: {e}");
+                }
+            }
+        } else if let Some(v) = line.strip_prefix("SET_DECODERS ") {
+            // Nexus 1.25's decoder settings: no narrow setter, so the engine's own apply_settings
+            // with only these fields changed -- the path Nexus's Settings save takes.
+            let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = eng.settings().clone();
+            match apply_decoder_spec(&mut s, v) {
+                Ok(()) => {
+                    eng.apply_settings(s);
+                    let _ = writeln!(stream, "OK");
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR {e}");
                 }
             }
         } else if let Some(v) = line.strip_prefix("SET_DECODE_DEPTH ") {
@@ -2778,6 +2891,11 @@ fn main() {
     // setter (Engine.settings is private to the tempo-app crate), so they're startup-only, same
     // as rig-model/data-modes-plain-ssb/etc. above.
     if let Some(v) = args.decode_depth { settings.decode_depth = v; }
+    if let Some(spec) = args.decoders.as_deref() {
+        if let Err(e) = apply_decoder_spec(&mut settings, spec) {
+            eprintln!("--decoders ignored: {e}");
+        }
+    }
     if let Some(v) = args.decode_flow_hz { settings.decode_flow_hz = v; }
     if let Some(v) = args.decode_fhigh_hz { settings.decode_fhigh_hz = v; }
     if let Some(v) = args.ap_decode { settings.ap_decode = v; }
@@ -3021,6 +3139,34 @@ mod tests {
         assert!(super::parse_ft_drive_entries("").unwrap().is_empty());
         assert!(super::parse_ft_drive_entries("20m=1.5").is_err(), "out of range");
         assert!(super::parse_ft_drive_entries("20m").is_err(), "no level");
+    }
+
+    #[test]
+    fn decoder_spec_sets_nexus_decoder_settings() {
+        use tempo_app::settings::{DecoderStyle, JtdxPreset};
+        let mut s = tempo_app::settings::Settings::default();
+        apply_decoder_spec(&mut s, "ft8=jtdx;ft4=standard;preset=custom;custom=3,2,3,4,1,90,1").unwrap();
+        assert_eq!((s.ft8_decoder, s.ft4_decoder, s.jtdx_preset), (DecoderStyle::Jtdx, DecoderStyle::Standard, JtdxPreset::Custom));
+        let c = s.jtdx_custom;
+        assert_eq!((c.cycles, c.sensitivity, c.rx_freq_sensitivity, c.threads, c.wide_dx_search, c.cand_thin, c.swl), (3, 2, 3, 4, true, 90, true));
+        let before = s.clone();
+        assert!(apply_decoder_spec(&mut s, "ft8=standard preset=fast").is_err());
+        assert_eq!(s, before, "a bad spec changes nothing");
+    }
+
+    #[test]
+    fn only_rows_nexus_counts_reach_jimmy() {
+        // (message, unchecked). Rows 0-2 are the engine's decodes, row 3 our own TX.
+        let mut rows = vec![("CQ K1ABC FN31", false), ("CQ N3QQ FM19", true), ("CQ K4ZZ EM73", true), ("CQ W9XYZ EN37", false)];
+        let mut split = vec![true, false, true];
+        drop_uncounted_rows(&mut rows, &mut split, &[true, false, true], |r| r.1);
+        assert_eq!(rows.iter().map(|r| r.0).collect::<Vec<_>>(), ["CQ K1ABC FN31", "CQ K4ZZ EM73", "CQ W9XYZ EN37"]);
+        assert_eq!(split, [true, true], "split marks stay in step");
+        // No verdict in step: every unchecked row goes, the rest stay.
+        let mut rows = vec![("A", true), ("B", false)];
+        let mut split = Vec::new();
+        drop_uncounted_rows(&mut rows, &mut split, &[], |r| r.1);
+        assert_eq!(rows, [("B", false)]);
     }
 
     #[test]

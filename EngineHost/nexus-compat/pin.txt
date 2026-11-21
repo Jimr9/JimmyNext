@@ -6,7 +6,15 @@
 # pin, and its "Checking a patch against a newer Nexus" section for what to do when this pin
 # is updated.
 #
-# This integration pins the newest official STABLE release tag, v1.24.0 (2026-11-11), by its
+# TESTER BUILD (2026-11-20, operator's request): pins PRE-RELEASE v1.25.0-beta.2 (2026-11-19, a
+# LIGHTWEIGHT tag) for the JTDX-style decoder testers asked for. Move to v1.25.0 stable when it
+# ships. Eight patches: tempo-core-message.patch and tempo-core-inbox.patch retired (#512 is
+# upstream in 1.25: a grid-less CQ/call between standard calls is a standard message, chat chunks
+# guarded in inbox.rs); tempo-app-engine.patch re-anchored (1.25 runs error_checked before
+# hound_split's wire copy) and gains last_decodes_counted (Nexus's own error_checked verdict per
+# row, so EngineHost hands Jimmy only the rows Nexus's automation acts on). The other six apply
+# as they were (settings hunk 2 checked: it lands in Settings' Default).
+# Was: the newest official STABLE release tag, v1.24.0 (2026-11-11), by its
 # exact commit. NEXUS_COMMIT is the real lock; NEXUS_TAG is the honest human reference.
 # prepare-nexus.ps1 clones --branch NEXUS_TAG --single-branch and then verifies the resolved
 # HEAD equals NEXUS_COMMIT exactly. v1.24.0 is a LIGHTWEIGHT tag: it names the commit below
@@ -52,10 +60,11 @@
 # re-assessment.
 
 NEXUS_REPO=https://github.com/kd9taw/Nexus.git
-NEXUS_TAG=v1.24.0
-NEXUS_COMMIT=8f510d4bac14c12e70d7191e277727e76de77cf1
+NEXUS_TAG=v1.25.0-beta.2
+NEXUS_COMMIT=21f743404bf3efdddcb24ab2f802f77c0b6afe06
 
-# DISPOSITION: 2026-11-12 -- pinned AT stable v1.24.0 (operator asked for the upgrade), nothing from main.
+# DISPOSITION: 2026-11-20 -- pinned AT pre-release v1.25.0-beta.2 for a tester build (operator asked), nothing from main.
+# Was: 2026-11-12 -- pinned AT stable v1.24.0 (operator asked for the upgrade), nothing from main.
 # Was: 2026-11-06 -- pinned AT stable v1.23.0 (operator asked for the upgrade), nothing from main.
 # Was: 2026-10-30 -- pinned AT stable v1.21.0 (operator asked for the upgrade), nothing from main
 # (main 437 commits past 1.21.0, not reviewed).

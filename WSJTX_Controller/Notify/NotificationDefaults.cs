@@ -265,6 +265,17 @@ namespace WSJTX_Controller
                 Template = "Transmit off, the radio stopped answering CAT. {HowToResume}",
             },
 
+            // Nexus 1.25 (2026-11-20): the computer could not finish a JTDX decode in time, so
+            // Nexus lowered the preset for this session. Said once per step.
+            [NotificationEventType.DecoderSteppedDown] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                RepeatSeconds = 0,
+                ThrottleMilliseconds = 0,
+                Template = "Decoding running late.{Change}",
+            },
+
             // Added 2026-09-02 (2.0.58): the rig's CAT link going down, as its own typed event
             // instead of a generic ErrorWarningEvent carrying Nexus/Hamlib's raw cat_detail
             // ("RPRT -20", escaped newlines, rigctld backend wording) straight into speech.
@@ -566,6 +577,7 @@ namespace WSJTX_Controller
             [NotificationEventType.RadioCatRecovered] = "Radio CAT link recovered",
             [NotificationEventType.RadioCatLost] = "Radio CAT link lost",
             [NotificationEventType.TransmitOffCat] = "Transmit off after CAT loss",
+            [NotificationEventType.DecoderSteppedDown] = "JTDX decoder slowed down",
             [NotificationEventType.AutoTxResume] = "Automatic transmit resume",
             [NotificationEventType.SpaceWeatherStormWatch] = "Geomagnetic storm watch",
             [NotificationEventType.SpaceWeatherFlare] = "Solar flare",

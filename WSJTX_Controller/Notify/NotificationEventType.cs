@@ -60,6 +60,9 @@ namespace WSJTX_Controller
         // Nexus 1.24 (2026-11-12): Nexus turned transmit off because the radio stopped answering
         // CAT; it stays off until the operator turns it back on (Transmit On).
         TransmitOffCat,
+        // Nexus 1.25 (2026-11-20): a JTDX decode ran too long for a reply, so Nexus runs the
+        // decoder one preset lower for the session (or says it is already at Easy).
+        DecoderSteppedDown,
 
         // Added 2026-09-04: Jimmy's transmit was resumed automatically (the native engine's
         // own "wait and reply" cooperation resuming a stalled QSO after the other station

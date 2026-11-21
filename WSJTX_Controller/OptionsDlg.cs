@@ -1790,6 +1790,18 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox _decodeApDecodeCheckBox;
         private System.Windows.Forms.CheckBox _decodeApCqOnlyCheckBox;
         private System.Windows.Forms.CheckBox _decodeSingleDecodeCheckBox;
+        private System.Windows.Forms.ComboBox _decodeFt8DecoderCombo;
+        private System.Windows.Forms.ComboBox _decodeFt4DecoderCombo;
+        private System.Windows.Forms.ComboBox _decodeJtdxPresetCombo;
+        private System.Windows.Forms.NumericUpDown _decodeJtdxCyclesUpDown;
+        private System.Windows.Forms.NumericUpDown _decodeJtdxSensitivityUpDown;
+        private System.Windows.Forms.NumericUpDown _decodeJtdxRxSensitivityUpDown;
+        private System.Windows.Forms.NumericUpDown _decodeJtdxThreadsUpDown;
+        private System.Windows.Forms.NumericUpDown _decodeJtdxCandThinUpDown;
+        private System.Windows.Forms.CheckBox _decodeJtdxWideDxCheckBox;
+        private System.Windows.Forms.CheckBox _decodeJtdxSwlCheckBox;
+        private static readonly string[] DecoderKeys = { "standard", "jtdx" };
+        private static readonly string[] JtdxPresetKeys = { "easy", "keen", "ludicrous", "custom" };
 
         // Working copy, cloned from ctrl.Frequencies.Bands when the dialog opens, mutated freely
         // by Add/Remove/edit within this session, only committed back in SaveFrequenciesTab (OK
@@ -3404,9 +3416,9 @@ namespace WSJTX_Controller
                 ForeColor = System.Drawing.SystemColors.ControlText,
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(w, 48),
-                Text = "The engine's decode settings (Decode Engine tab). Decode depth " +
-                       "takes effect immediately; the rest take effect the next time the engine restarts " +
-                       "(changing them here, or changing decode engine/radio settings, restarts it).",
+                Text = "The engine's decode settings (Decode Engine tab). Decode depth, the decoders " +
+                       "and the JTDX settings take effect immediately; the rest take effect the next time " +
+                       "the engine restarts (changing them here, or changing decode engine/radio settings, restarts it).",
                 TabStop = false,
                 Font = font,
             };
@@ -3437,6 +3449,31 @@ namespace WSJTX_Controller
             decodePanel.Controls.Add(_decodeDepthCombo);
             y += 32;
 
+            // Nexus 1.25: which decoder runs each mode's full pass, and the JTDX-style decoder's
+            // preset (shared by both modes) with Custom's knobs. Decode depth above is Standard's.
+            _decodeFt8DecoderCombo = AddDecodeCombo("FT8 decoder:", "FT8 decoder", left, ref y, 1,
+                new object[] { "Standard", "JTDX" }, Array.IndexOf(DecoderKeys, ctrl.Decode.Ft8Decoder), font);
+            _decodeFt4DecoderCombo = AddDecodeCombo("FT4 decoder:", "FT4 decoder", left, ref y, 2,
+                new object[] { "Standard", "JTDX" }, Array.IndexOf(DecoderKeys, ctrl.Decode.Ft4Decoder), font);
+            _decodeJtdxPresetCombo = AddDecodeCombo("JTDX preset:", "JTDX preset", left, ref y, 3,
+                new object[] { "Easy", "Keen", "Ludicrous", "Custom" }, Array.IndexOf(JtdxPresetKeys, ctrl.Decode.JtdxPreset), font);
+            _decodeJtdxCyclesUpDown = AddDecodeNumber("Decoding cycles:", "Decoding cycles", left, ref y, 4, 1, 3, ctrl.Decode.JtdxCycles, font);
+            _decodeJtdxSensitivityUpDown = AddDecodeNumber("Sensitivity:", "Sensitivity", left, ref y, 5, 1, 3, ctrl.Decode.JtdxSensitivity, font);
+            _decodeJtdxRxSensitivityUpDown = AddDecodeNumber("RX sensitivity:", "RX frequency sensitivity", left, ref y, 6, 1, 3, ctrl.Decode.JtdxRxSensitivity, font);
+            _decodeJtdxThreadsUpDown = AddDecodeNumber("Cores (0 = auto):", "Cores, 0 automatic", left, ref y, 7, 0, 12, ctrl.Decode.JtdxThreads, font);
+            _decodeJtdxCandThinUpDown = AddDecodeNumber("Candidates kept %:", "Candidates kept percent", left, ref y, 8, 1, 100, ctrl.Decode.JtdxCandThin, font);
+            _decodeJtdxWideDxCheckBox = MakeCheck(decodePanel,
+                "Band-wide DX call search", "Band-wide DX call search",
+                left, y, 9, ctrl.Decode.JtdxWideDxSearch, font);
+            y += 24;
+            _decodeJtdxSwlCheckBox = MakeCheck(decodePanel,
+                "SWL mode", "SWL mode",
+                left, y, 10, ctrl.Decode.JtdxSwl, font);
+            y += 32;
+            _decodeFt8DecoderCombo.SelectedIndexChanged += (s, e) => UpdateJtdxEnabled();
+            _decodeFt4DecoderCombo.SelectedIndexChanged += (s, e) => UpdateJtdxEnabled();
+            _decodeJtdxPresetCombo.SelectedIndexChanged += (s, e) => UpdateJtdxEnabled();
+
             var flowLabel = new System.Windows.Forms.Label
             {
                 Text = "F Low (Hz):",
@@ -3454,7 +3491,7 @@ namespace WSJTX_Controller
                 Value = Math.Max(200, Math.Min(3900, ctrl.Decode.DecodeFLowHz)),
                 Location = new System.Drawing.Point(left + 100, y),
                 Size = new System.Drawing.Size(70, 21),
-                TabIndex = 1,
+                TabIndex = 11,
                 Font = font,
                 AccessibleName = "Decode F Low Hz",
             };
@@ -3477,7 +3514,7 @@ namespace WSJTX_Controller
                 Value = Math.Max(200, Math.Min(3900, ctrl.Decode.DecodeFHighHz)),
                 Location = new System.Drawing.Point(left + 290, y),
                 Size = new System.Drawing.Size(70, 21),
-                TabIndex = 2,
+                TabIndex = 12,
                 Font = font,
                 AccessibleName = "Decode F High Hz",
             };
@@ -3486,21 +3523,81 @@ namespace WSJTX_Controller
 
             _decodeApDecodeCheckBox = MakeCheck(decodePanel,
                 "Enable AP", "Enable AP",
-                left, y, 3, ctrl.Decode.ApDecode, font);
+                left, y, 13, ctrl.Decode.ApDecode, font);
             _decodeApDecodeCheckBox.CheckedChanged += (s, e) => UpdateApCqOnlyEnabled();
             y += 24;
 
             _decodeApCqOnlyCheckBox = MakeCheck(decodePanel,
                 "AP for CQ only (expert)", "AP for CQ only, expert",
-                left, y, 4, ctrl.Decode.ApCqOnly, font);
+                left, y, 14, ctrl.Decode.ApCqOnly, font);
             y += 24;
 
             _decodeSingleDecodeCheckBox = MakeCheck(decodePanel,
                 "Single decode", "Single decode",
-                left, y, 5, ctrl.Decode.SingleDecode, font);
+                left, y, 15, ctrl.Decode.SingleDecode, font);
             y += 32;
 
             UpdateApCqOnlyEnabled();
+            UpdateJtdxEnabled();
+        }
+
+        private System.Windows.Forms.ComboBox AddDecodeCombo(string label, string accessibleName,
+            int left, ref int y, int tabIndex, object[] items, int selected, System.Drawing.Font font)
+        {
+            decodePanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = label, AutoSize = true, Location = new System.Drawing.Point(left, y + 3), Font = font, TabStop = false,
+            });
+            var combo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(left + 130, y),
+                Size = new System.Drawing.Size(100, 21),
+                TabIndex = tabIndex,
+                Font = font,
+                AccessibleName = accessibleName,
+            };
+            combo.Items.AddRange(items);
+            combo.SelectedIndex = Math.Max(0, Math.Min(items.Length - 1, selected));
+            decodePanel.Controls.Add(combo);
+            y += 32;
+            return combo;
+        }
+
+        private System.Windows.Forms.NumericUpDown AddDecodeNumber(string label, string accessibleName,
+            int left, ref int y, int tabIndex, int min, int max, int value, System.Drawing.Font font)
+        {
+            decodePanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = label, AutoSize = true, Location = new System.Drawing.Point(left, y + 3), Font = font, TabStop = false,
+            });
+            var num = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = min,
+                Maximum = max,
+                Value = Math.Max(min, Math.Min(max, value)),
+                Location = new System.Drawing.Point(left + 130, y),
+                Size = new System.Drawing.Size(70, 21),
+                TabIndex = tabIndex,
+                Font = font,
+                AccessibleName = accessibleName,
+            };
+            decodePanel.Controls.Add(num);
+            y += 32;
+            return num;
+        }
+
+        // The JTDX preset only matters while a mode uses JTDX; Custom's knobs only under Custom.
+        private void UpdateJtdxEnabled()
+        {
+            if (_decodeJtdxPresetCombo == null) return;
+            bool anyJtdx = _decodeFt8DecoderCombo.SelectedIndex == 1 || _decodeFt4DecoderCombo.SelectedIndex == 1;
+            _decodeJtdxPresetCombo.Enabled = anyJtdx;
+            bool custom = anyJtdx && _decodeJtdxPresetCombo.SelectedIndex == 3;
+            foreach (System.Windows.Forms.Control c in new System.Windows.Forms.Control[] {
+                _decodeJtdxCyclesUpDown, _decodeJtdxSensitivityUpDown, _decodeJtdxRxSensitivityUpDown,
+                _decodeJtdxThreadsUpDown, _decodeJtdxCandThinUpDown, _decodeJtdxWideDxCheckBox, _decodeJtdxSwlCheckBox })
+                c.Enabled = custom;
         }
 
         private void UpdateApCqOnlyEnabled()
@@ -4020,6 +4117,7 @@ namespace WSJTX_Controller
                 NotificationEventType.RadioCatLost,
                 NotificationEventType.RadioCatRecovered,
                 NotificationEventType.TransmitOffCat,
+                NotificationEventType.DecoderSteppedDown,
                 NotificationEventType.ClockOutOfSync,
                 NotificationEventType.ClockSynced,
                 NotificationEventType.AutoTxResume,
@@ -5371,6 +5469,19 @@ namespace WSJTX_Controller
 
             d.DecodeDepth = _decodeDepthCombo.SelectedIndex + 1;
 
+            string wasDecoders = d.DecoderSpec();
+            d.Ft8Decoder = DecoderKeys[_decodeFt8DecoderCombo.SelectedIndex];
+            d.Ft4Decoder = DecoderKeys[_decodeFt4DecoderCombo.SelectedIndex];
+            d.JtdxPreset = JtdxPresetKeys[_decodeJtdxPresetCombo.SelectedIndex];
+            d.JtdxCycles = (int)_decodeJtdxCyclesUpDown.Value;
+            d.JtdxSensitivity = (int)_decodeJtdxSensitivityUpDown.Value;
+            d.JtdxRxSensitivity = (int)_decodeJtdxRxSensitivityUpDown.Value;
+            d.JtdxThreads = (int)_decodeJtdxThreadsUpDown.Value;
+            d.JtdxCandThin = (int)_decodeJtdxCandThinUpDown.Value;
+            d.JtdxWideDxSearch = _decodeJtdxWideDxCheckBox.Checked;
+            d.JtdxSwl = _decodeJtdxSwlCheckBox.Checked;
+            bool decodersChanged = wasDecoders != d.DecoderSpec();
+
             // Release-audit finding, 2026-08-20: F Low and F High used to each be independently
             // clamped to [200, 3900] but never cross-validated against each other -- an operator
             // could save FLow=3900, FHigh=200 (or any other inverted range) and have it flow
@@ -5402,8 +5513,13 @@ namespace WSJTX_Controller
 
             if (restartNeededChanged)
                 ctrl.ApplyEngineMode();
-            else if (depthChanged)
-                ctrl.wsjtxClient?.DirectSetDecodeDepth(d.DecodeDepth);
+            else
+            {
+                if (depthChanged)
+                    ctrl.wsjtxClient?.DirectSetDecodeDepth(d.DecodeDepth);
+                if (decodersChanged)
+                    ctrl.wsjtxClient?.DirectSetDecoders(d.DecoderSpec());
+            }
         }
 
         // ===== SOUNDS TAB =====

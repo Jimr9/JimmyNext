@@ -262,6 +262,10 @@ namespace WSJTX_Controller
             {
                 new NotificationVariable("TransmitNote", "While transmit is still off after the outage: \" Transmit is off. Press ... to transmit again.\" Empty otherwise."),
             },
+            [NotificationEventType.DecoderSteppedDown] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Change", "\" JTDX preset now Keen.\" (the preset now running), or \" Already at Easy.\""),
+            },
             [NotificationEventType.TransmitOffCat] = new List<NotificationVariable>
             {
                 new NotificationVariable("HowToResume", "\"Press <your Transmit On key> to transmit again.\", or the Transmit on button when no key is assigned."),

@@ -346,6 +346,7 @@ namespace WSJTX_Controller
                 args += $" --ap-decode {(decode.ApDecode ? "1" : "0")}";
                 args += $" --ap-cq-only {(decode.ApCqOnly ? "1" : "0")}";
                 args += $" --single-decode {(decode.SingleDecode ? "1" : "0")}";
+                args += $" --decoders {decode.DecoderSpec()}";
             }
 
             // Independent of Radio.Mode -- spotting works whether or not CAT is configured,

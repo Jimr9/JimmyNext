@@ -1,25 +1,32 @@
 diff --git a/src/engine.rs b/src/engine.rs
-index ade8981..99ed269 100644
+index decf606..1defd11 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
-@@ -4507,6 +4507,8 @@ pub struct Engine {
+@@ -4668,6 +4668,13 @@ pub struct Engine {
      /// The last ingest's decodes as they were ON AIR (pre hound-split/rewrite)
      /// — what UDP consumers receive. Identical to `last_decodes` outside Hound.
      last_wire_decodes: Vec<modes::Decode>,
 +    /// JIMMY COMPAT: parallel to `last_decodes` -- see [`Engine::last_decodes_multiplexed`].
 +    last_decodes_multiplexed: Vec<bool>,
++    /// JIMMY COMPAT: parallel to `last_decodes` -- see [`Engine::last_decodes_counted`].
++    last_decodes_counted: Vec<bool>,
++    /// JIMMY COMPAT: the last [`Engine::error_checked`] call's verdict per decode, taken by the
++    /// write that stores those decodes in `last_decodes`.
++    last_error_checked: Vec<bool>,
      /// Directed-CQ token for CQ runs ("DX", "NA", "POTA", …): applied to the
      /// run's CQ message at start AND on the return-to-CQ after each pileup
      /// contact. None = plain CQ. Sticky until the operator starts a plain run
-@@ -7741,6 +7743,7 @@ impl Engine {
+@@ -7983,6 +7990,9 @@ impl Engine {
              hrd_link_up: None,
              cq_dir: None,
              last_wire_decodes: Vec::new(),
 +            last_decodes_multiplexed: Vec::new(),
++            last_decodes_counted: Vec::new(),
++            last_error_checked: Vec::new(),
              tx_dial_shift_hz: 0,
              prebuilt_over: None,
              tx_gate_gen: 0,
-@@ -12536,6 +12539,15 @@ impl Engine {
+@@ -12942,6 +12952,15 @@ impl Engine {
      /// The mode the radio loop should COMMAND: the operator's transient Phone override when set,
      /// else the band-derived policy (`settings.rig_mode`). Write-side canon for the rig `M` verb.
      pub fn rig_mode_effective(&self) -> String {
@@ -35,7 +42,7 @@ index ade8981..99ed269 100644
          // APRS parks the rig in FM regardless of the operating section it was navigated from — a
          // 2 m packet signal demodulated as USB is garbage, so this is a correctness gate, not a
          // preference. Gated on STILL being on 2 m: a knob-QSY (`observe_rig_freq`) or a manual
-@@ -13506,6 +13518,14 @@ impl Engine {
+@@ -13912,6 +13931,14 @@ impl Engine {
          self.settings.decode_depth = depth.clamp(1, 3);
      }
  
@@ -50,26 +57,27 @@ index ade8981..99ed269 100644
      /// Operator CW decode sensitivity in [0, 1] (0.5 = the original gates; higher catches
      /// weaker/off-pitch marks like the skimmer, lower rejects more noise).
      pub fn set_cw_sensitivity(&mut self, s: f32) {
-@@ -34624,6 +34644,7 @@ contact yourself."
+@@ -35544,6 +35571,8 @@ contact yourself."
          }
-         self.last_wire_decodes = fresh.clone();
+         self.last_wire_decodes = checked;
          self.note_band_activity(slot);
 +        self.last_decodes_multiplexed = vec![false; fresh.len()]; // JIMMY COMPAT: never split here
++        self.last_decodes_counted = std::mem::take(&mut self.last_error_checked); // JIMMY COMPAT
          self.last_decodes = fresh;
          n
      }
-@@ -34819,7 +34840,7 @@ contact yourself."
-             crate::settings::SpecialOp::Hound | crate::settings::SpecialOp::SuperHound
+@@ -35740,7 +35769,7 @@ contact yourself."
          );
-         let wire_copy: Option<Vec<modes::Decode>> = hound_active.then(|| decodes.clone());
+         let wire_copy: Option<Vec<modes::Decode>> =
+             hound_active.then(|| self.error_checked(&decodes, slot).into_owned());
 -        let decodes = self.hound_split(decodes);
 +        let (decodes, multiplexed) = self.hound_split(decodes);
          let n = decodes.len();
          // Tally IR-HARQ rescues (messages recovered by combining retransmissions).
          self.harq_rescues += decodes
-@@ -34903,10 +34924,19 @@ contact yourself."
+@@ -35827,10 +35856,22 @@ contact yourself."
          }
-         self.last_wire_decodes = wire_copy.unwrap_or_else(|| decodes.clone());
+         self.last_wire_decodes = wire_copy.unwrap_or_else(|| checked.into_owned());
          self.note_band_activity(slot);
 -        if continues {
 +        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): every later fold of the SAME slot
@@ -82,13 +90,16 @@ index ade8981..99ed269 100644
 +        if continues || self.last_decode_slot == Some(slot) {
              self.last_decodes.extend(decodes);
 +            self.last_decodes_multiplexed.extend(multiplexed);
++            self.last_decodes_counted
++                .extend(std::mem::take(&mut self.last_error_checked));
          } else {
              self.last_decodes = decodes;
 +            self.last_decodes_multiplexed = multiplexed;
++            self.last_decodes_counted = std::mem::take(&mut self.last_error_checked);
          }
          self.last_decode_slot = Some(slot);
          // A period shown from before a band or mode change gives way to this context's own.
-@@ -34933,7 +34963,11 @@ contact yourself."
+@@ -35857,7 +35898,11 @@ contact yourself."
      /// also keeps the blast radius small — a bystander's free text containing ';' is only
      /// ever split while we are mid-contact, and even then `reattach` fires on nothing but an
      /// exact 2-token `<call> RR73/RRR/73` half.
@@ -101,7 +112,7 @@ index ade8981..99ed269 100644
          let fox_capable = self
              .tier_mode_kind(self.app.tier())
              .is_some_and(|k| modes::make_mode(k).capabilities().fox_hound);
-@@ -34947,7 +34981,8 @@ contact yourself."
+@@ -35871,7 +35916,8 @@ contact yourself."
              // Fox multiplexing is an FT8 DXpedition construct — the mode declares
              // `fox_hound` (FT8 only, matching WSJT-X). Free text may legitimately
              // contain ';' and must never be split when we are not working anybody.
@@ -111,7 +122,7 @@ index ade8981..99ed269 100644
          }
          // A Fox confirm half is the SENDER-LESS 2-token "K1ABC RR73" — re-add
          // the Fox's call so it parses as a standard Rr73 and passes the
-@@ -34972,8 +35007,15 @@ contact yourself."
+@@ -35896,8 +35942,15 @@ contact yourself."
          // contact — the quiet finish, the >1000 Hz initial offset — was already captured once at
          // `call_station_ctx`; this was the one live read. A QSO in flight keeps the rules it
          // started under, and the toggle governs the NEXT one.
@@ -129,7 +140,7 @@ index ade8981..99ed269 100644
                  return m;
              }
              let t: Vec<&str> = m.split_whitespace().collect();
-@@ -34985,6 +35027,7 @@ contact yourself."
+@@ -35909,6 +35962,7 @@ contact yourself."
              m
          };
          let mut out = Vec::with_capacity(decodes.len());
@@ -137,7 +148,7 @@ index ade8981..99ed269 100644
          for d in decodes {
              let halves = d
                  .message
-@@ -34992,22 +35035,56 @@ contact yourself."
+@@ -35916,22 +35970,68 @@ contact yourself."
                  .map(|(a, b)| (a.trim().to_string(), b.trim().to_string()));
              match halves {
                  Some((a, b)) if !a.is_empty() && !b.is_empty() => {
@@ -195,10 +206,32 @@ index ade8981..99ed269 100644
 +        } else {
 +            &[]
 +        }
++    }
++
++    /// JIMMY COMPAT: per [`Self::last_decodes`] row (same order, same length), true when
++    /// automation acted on that row: Nexus's own [`Self::error_checked`] verdict, an unchecked
++    /// `^` decode counting only as a repeat of a checked one. Empty if ever out of step with
++    /// `last_decodes`; the caller then treats every `unchecked` row as not counted.
++    pub fn last_decodes_counted(&self) -> &[bool] {
++        if self.last_decodes_counted.len() == self.last_decodes.len() {
++            &self.last_decodes_counted
++        } else {
++            &[]
++        }
      }
  
      /// Fold a slot's decodes into the active mode's sequencer and, in QSO mode,
-@@ -36076,7 +36153,7 @@ contact yourself."
+@@ -36065,6 +36165,9 @@ contact yourself."
+                     .is_some_and(|h| *h < slot && (slot - h).is_multiple_of(2))
+         };
+         let all_count = decodes.iter().all(counts);
++        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): keep the verdict per decode, so
++        // Jimmy is handed exactly the rows automation acts on.
++        self.last_error_checked = decodes.iter().map(counts).collect();
+         let kept = if all_count {
+             std::borrow::Cow::Borrowed(decodes)
+         } else {
+@@ -37070,7 +37173,7 @@ contact yourself."
      #[cfg(any(test, feature = "test-util"))]
      pub(crate) fn ingest_decodes_for_test(&mut self, decodes: &[modes::Decode], slot: u64) {
          // Mirror the live path's Hound multi-payload split.
@@ -207,15 +240,16 @@ index ade8981..99ed269 100644
          let decodes = &decodes[..];
          for d in decodes {
              self.seen_decode = true;
-@@ -36113,6 +36190,7 @@ contact yourself."
+@@ -37107,6 +37210,8 @@ contact yourself."
              self.decode_history.pop_front();
          }
          self.last_decodes = decodes.to_vec();
 +        self.last_decodes_multiplexed = multiplexed;
++        self.last_decodes_counted = vec![true; decodes.len()]; // JIMMY COMPAT: observed every one
      }
  
      /// Export the Field Day log in `format` ("cabrillo" or "adif"). `Err` unless
-@@ -36571,6 +36649,25 @@ contact yourself."
+@@ -37565,6 +37670,25 @@ contact yourself."
          self.station.set_country_dxcc_resolver(number)
      }
  
@@ -241,7 +275,7 @@ index ade8981..99ed269 100644
      /// See [`StationCore::set_state_resolver`].
      pub fn set_state_resolver(
          &mut self,
-@@ -53197,6 +53294,64 @@ mod tests {
+@@ -54839,6 +54963,87 @@ mod tests {
          );
      }
  
@@ -270,6 +304,29 @@ index ade8981..99ed269 100644
 +        let next = found(&e, "CQ K4ZZ EM73", DecodePass::Early, 9);
 +        assert_eq!(e.apply_streamed_decode(next), 1);
 +        assert_eq!(shown(&e), vec!["CQ K4ZZ EM73"], "a newer period replaces them");
++    }
++
++    /// JIMMY COMPAT: Jimmy is handed only the rows automation acts on. An unchecked `^` decode
++    /// does not count; a word-for-word repeat of a checked message on the same parity does.
++    #[test]
++    fn jimmy_compat_counted_marks_the_rows_automation_acts_on() {
++        let mut e = Engine::new("W9XYZ", "EN37", 0);
++        e.set_tier(Tier::Ft8);
++        e.set_frequency(14.074, "20m", "USB");
++        let found = |e: &Engine, m: &str, unchecked: bool, slot: u64| StreamedDecode {
++            decode: modes::Decode { unchecked, ..dec_at(m, -10, 1500.0) },
++            pass: DecodePass::Boundary,
++            slot,
++            epoch: e.decode_epoch,
++        };
++        let checked = found(&e, "CQ K1ABC FN31", false, 7);
++        e.apply_streamed_decode(checked);
++        let guess = found(&e, "CQ N3QQ FM19", true, 7);
++        e.apply_streamed_decode(guess);
++        assert_eq!(e.last_decodes_counted(), &[true, false], "the unchecked row does not count");
++        let repeat = found(&e, "CQ K1ABC FN31", true, 9);
++        e.apply_streamed_decode(repeat);
++        assert_eq!(e.last_decodes_counted(), &[true], "a repeat of a checked message counts");
 +    }
 +
 +    /// JIMMY COMPAT: the other side of #236. A multi-answer frame FROM OUR PARTNER (MSHV

@@ -771,6 +771,20 @@ namespace WSJTX_Controller
         };
     }
 
+    // Nexus 1.25 (2026-11-20): Nexus stepped the JTDX preset down because a decode ran late.
+    // {Change} is a pre-built phrase: " JTDX preset now Keen." or " Already at Easy."
+    public sealed class DecoderSteppedDownEvent : INotificationEvent
+    {
+        public string Change { get; }
+        public DecoderSteppedDownEvent(string change) { Change = change ?? ""; }
+        public NotificationEventType EventType => NotificationEventType.DecoderSteppedDown;
+        public string DedupKey => null;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Change"] = Change,
+        };
+    }
+
     // The rig's CAT link going down. Its own type (not ErrorWarningEvent) so the default
     // announcement is concise, generic operator wording -- Nexus/Hamlib's raw cat_detail
     // ("RPRT -20", escaped newline data, rigctld/backend phrasing) never reaches speech through
