@@ -248,6 +248,17 @@ namespace WSJTX_Controller
         // an odd number of '\' immediately before it (so it's read as an escaped quote, not an
         // argument terminator), and a run of '\' immediately before the closing quote must be
         // doubled so it isn't misread as escaping that quote.
+        // ALL.TXT in Jimmy Next's own folder (%LOCALAPPDATA%\<program name>, where its log_*.txt
+        // files are and where a support report reads from -- SupportReportBuilder.GetLogDir).
+        internal const string AllTxtFileName = "ALL.TXT";
+        internal static string AllTxtPath => Path.Combine(JimmyFolder, AllTxtFileName);
+        internal const string DiagLogFileName = "nexus-diag.log";   // Nexus keeps nexus-diag.1.log beside it
+        internal const string HeardReportsFileName = "heard-reports.sqlite";   // Nexus's own name
+        internal static string DiagLogPath => Path.Combine(JimmyFolder, DiagLogFileName);
+        private static string JimmyFolder => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            Assembly.GetExecutingAssembly().GetName().Name);
+
         internal static string EscapeCommandLineArg(string arg)
         {
             var sb = new StringBuilder();
@@ -278,7 +289,8 @@ namespace WSJTX_Controller
             string outputDevice, RadioSettings radio, DecodeSettings decode, bool pskreporter,
             string dxClusterAddress, string sessionToken, int? repeatLimit,
             List<WorkingFreqArg> workingFrequencies, int? tuneTimeoutSeconds, bool? clockCheck, bool radioAndAudio,
-            bool logbookOnly = false, string licenseClass = null, string wsjtxOut = null, bool? logSpaceWeather = null)
+            bool logbookOnly = false, string licenseClass = null, string wsjtxOut = null, bool? logSpaceWeather = null,
+            int? stationPowerW = null, bool? logStationPowerWithAmp = null)
         {
             // Launch-only settings that a running engine also takes live (like the time check):
             // left out of the LaunchKey, so a profile switch keeps the engine and sends them live.
@@ -312,10 +324,26 @@ namespace WSJTX_Controller
             // Nexus's internet time check (NativeEngineSettings.ClockCheck, Options > General).
             if (clockCheck.HasValue && radioAndAudio)
                 args += clockCheck.Value ? " --clock-check on" : " --clock-check off";
+            // ALL.TXT (2026-11-22, operator): always written, in Jimmy Next's own folder beside its
+            // logs -- every decode, the JTDX decoder's unchecked "^" rows included (Jimmy itself is
+            // never handed those), and every transmission. Support reports carry its last days.
+            if (radioAndAudio)
+                args += $" --all-txt {EscapeCommandLineArg(AllTxtPath)}";
+            // Nexus's own diagnostic log (nexus-diag.log, ~8 MB at most, passwords masked by Nexus):
+            // audio and CAT failures in Nexus's words, and Record CAT traffic (Create Support Report).
+            args += $" --diag-log {EscapeCommandLineArg(DiagLogPath)}";
+            // Nexus 1.25's kept reports of who heard you (Who Hears Me, 24 hours and 7 days).
+            args += $" --heard-reports {EscapeCommandLineArg(Path.Combine(JimmyFolder, HeardReportsFileName))}";
             // Options > Logbook "Save space weather with each contact" (NativeEngineSettings.
             // LogSpaceWeather) -- a logbook-only engine logs contacts too, so not tied to radioAndAudio.
             if (logSpaceWeather.HasValue && launching)
                 args += logSpaceWeather.Value ? " --log-space-wx on" : " --log-space-wx off";
+            // Options > General "Station power" and Nexus 1.25's "an amplifier is inline" (#534):
+            // logging only. SET_STATION_POWER changes them live.
+            if (stationPowerW.HasValue && launching)
+                args += $" --station-power {Math.Max(0, stationPowerW.Value)}";
+            if (logStationPowerWithAmp.HasValue && launching)
+                args += logStationPowerWithAmp.Value ? " --amp-inline on" : " --amp-inline off";
             // Frequency-override authority split, 2026-08-24 -- see
             // WsjtxClient.BuildWorkingFrequencyEntries' own comment. Omitted entirely when
             // empty (no band customized), matching every other startup arg's "absent =
@@ -439,7 +467,9 @@ namespace WSJTX_Controller
                             bool logbookOnly = false,
                             string licenseClass = null,
                             string wsjtxOut = null,
-                            bool? logSpaceWeather = null)
+                            bool? logSpaceWeather = null,
+                            int? stationPowerW = null,
+                            bool? logStationPowerWithAmp = null)
         {
             LastError = null;
             try
@@ -483,7 +513,8 @@ namespace WSJTX_Controller
                 // (2026-08-18) not to remove. Do not treat this as leftover dead code in a future pass
                 // without re-checking that decision first.
                 var args = BuildArgs(mycall, mygrid, audioDevice, jimmyPort, outputDevice, radio, decode, pskreporter,
-                    dxClusterAddress, sessionToken, repeatLimit, workingFrequencies, tuneTimeoutSeconds, clockCheck, radioAndAudio: true, logbookOnly: logbookOnly, licenseClass: licenseClass, wsjtxOut: wsjtxOut, logSpaceWeather: logSpaceWeather);
+                    dxClusterAddress, sessionToken, repeatLimit, workingFrequencies, tuneTimeoutSeconds, clockCheck, radioAndAudio: true, logbookOnly: logbookOnly, licenseClass: licenseClass, wsjtxOut: wsjtxOut, logSpaceWeather: logSpaceWeather,
+                    stationPowerW: stationPowerW, logStationPowerWithAmp: logStationPowerWithAmp);
                 _sessionToken = sessionToken ?? "";
                 LogbookOnly = logbookOnly;
                 // What this engine was started with, less what can change live (radio, audio, the
@@ -836,6 +867,8 @@ namespace WSJTX_Controller
         // Nexus's internet time check on the running engine. True only on its "OK".
         public bool SetClockCheckLive(bool on) => SendControlLine("SET_CLOCK_CHECK " + (on ? "on" : "off"));
         public bool SetLogSpaceWeatherLive(bool on) => SendControlLine("SET_LOG_SPACE_WX " + (on ? "on" : "off"));
+        public bool SetStationPowerLive(int watts, bool ampInline) =>
+            SendControlLine($"SET_STATION_POWER {Math.Max(0, watts)} {(ampInline ? "on" : "off")}");
 
         // The operator's licence class on the running engine, which stops transmitting first and
         // does not start again by itself. "" = no lockout. True only on its "OK".

@@ -1307,19 +1307,26 @@ namespace WSJTX_Controller
         // _lastCatOk back to null in between (ConnectDirectEngine). A clean startup (no outage
         // ever observed) announces nothing.
         private ulong _lastSlotKeyRefusedAt, _lastSlotUnkeyFailedAt;
-        private void AnnounceSlotRefusal(DirectSlotRefusal refusal, ref ulong lastAt, string title, string what)
+        // A refused KEY (not the unkey, not a transmit-audio failure) carries Nexus 1.25's PTT line
+        // when there is one -- what to check first and what the radio answered -- in place of the
+        // bare answer; that line is then not said again on its own (WsjtxClient.AudioWatch.cs).
+        private void AnnounceSlotRefusal(DirectSlotRefusal refusal, ref ulong lastAt, string title, string what,
+            bool keyRefusal = false, string audioErrorKind = null, string audioError = null)
         {
             if (refusal == null || refusal.At == 0 || refusal.At == lastAt) return;
             lastAt = refusal.At;
             string why = string.IsNullOrWhiteSpace(refusal.Why) ? "" : $" ({refusal.Why.Trim()})";
             DebugOutput($"{Time()} [RADIO] {what}{why}; transmit stopped by the engine");
-            Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, title, $"{what}{why}. Transmit is stopped."));
+            string pttLine = keyRefusal && !refusal.TxAudioFailed
+                ? PttLineForKeyRefusal(audioErrorKind, audioError, DateTime.UtcNow) : null;
+            string detail = pttLine != null ? $"{pttLine.TrimEnd('.', ' ')}. Transmit is stopped." : $"{what}{why}. Transmit is stopped.";
+            Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, title, detail));
         }
         // Tests: the same call DirectApplyStatus makes for a refused key.
         internal void TestAnnounceKeyRefused(DirectSlotRefusal refusal)
         {
             var (title, what) = KeyRefusalWords(refusal);
-            AnnounceSlotRefusal(refusal, ref _lastSlotKeyRefusedAt, title, what);
+            AnnounceSlotRefusal(refusal, ref _lastSlotKeyRefusedAt, title, what, keyRefusal: true);
         }
 
         // Nexus 1.19: a refused key is either the radio refusing it, or the sound card's transmit
@@ -1571,7 +1578,12 @@ namespace WSJTX_Controller
             // off); this says why, once per event -- the event's own time is its identity, so
             // the same one is not repeated on every poll or after a reconnect.
             var (keyTitle, keyWhat) = KeyRefusalWords(radio.SlotKeyRefused);
-            AnnounceSlotRefusal(radio.SlotKeyRefused, ref _lastSlotKeyRefusedAt, keyTitle, keyWhat);
+            AnnounceSlotRefusal(radio.SlotKeyRefused, ref _lastSlotKeyRefusedAt, keyTitle, keyWhat,
+                keyRefusal: true, audioErrorKind: radio.AudioErrorKind, audioError: radio.AudioError);
+            // Nexus 1.25: no receive audio, and a PTT key the radio did not accept said on its own
+            // (a refused FT over above already carries it). See WsjtxClient.AudioWatch.cs.
+            ApplyReceiveAudioLine(radio.AudioErrorKind, radio.AudioError);
+            ApplyPttLine(radio.AudioErrorKind, radio.AudioError, DateTime.UtcNow);
             AnnounceOverDropped(radio.SlotOverDropped);
             AnnounceSlotRefusal(radio.SlotUnkeyFailed, ref _lastSlotUnkeyFailedAt,
                 "Radio did not return to receive", "The radio did not return to receive");
@@ -4938,6 +4950,11 @@ namespace WSJTX_Controller
         // (RadioStatus.tx_allowed). True when no class is set, and when an older engine does not
         // send it.
         public bool TxAllowed { get; set; } = true;
+        // Nexus 1.25 (RadioStatus.audio_error / audio_error_kind): the station's audio-error line,
+        // one sentence in Nexus's words, and what it is about ("noReceiveAudio", "soundCard",
+        // "ptt", "pttUnconfirmed", ...). Absent while there is none. Said by WsjtxClient.AudioWatch.
+        public string AudioError { get; set; }
+        public string AudioErrorKind { get; set; }
     }
 
     // When (Unix seconds) and what the radio link answered, in its own words.

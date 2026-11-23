@@ -73,6 +73,11 @@ namespace WSJTX_Controller
         // Options > Logbook. Default on (operator decision 2026-11-09).
         public bool LogSpaceWeather { get; set; } = true;
 
+        // 2026-11-22: Nexus's Settings.station_power_w (0 = not set) and, Nexus 1.25 (#534),
+        // log_station_power_with_amp. Options > General. Logging only.
+        public int StationPowerW { get; set; }
+        public bool LogStationPowerWithAmp { get; set; }
+
         // UDP-to-Direct parity/cleanup pass, 2026-08-12: the "talk over classic WSJT-X UDP
         // instead of Direct" choice (UseDirectEngine) is retired as a production option -- UDP
         // mode never had a working way to tell jimmy-engine-host.exe to actually enable
@@ -116,6 +121,8 @@ namespace WSJTX_Controller
                 TuneTimeoutSeconds = System.Math.Min(tune, MaxTuneTimeoutSeconds);
             if (ini.KeyExists("clockCheck")) ClockCheck = ini.Read("clockCheck") != "False";
             if (ini.KeyExists("logSpaceWeather")) LogSpaceWeather = ini.Read("logSpaceWeather") != "False";
+            if (ini.KeyExists("stationPowerW") && int.TryParse(ini.Read("stationPowerW"), out int spw)) StationPowerW = System.Math.Max(0, System.Math.Min(2000, spw));
+            if (ini.KeyExists("logStationPowerWithAmp")) LogStationPowerWithAmp = ini.Read("logStationPowerWithAmp") == "True";
         }
 
         public void SaveToIni(IniFile ini)
@@ -133,6 +140,8 @@ namespace WSJTX_Controller
             ini.Write("tuneTimeoutSeconds", TuneTimeoutSeconds.ToString());
             ini.Write("clockCheck", ClockCheck ? "True" : "False");
             ini.Write("logSpaceWeather", LogSpaceWeather ? "True" : "False");
+            ini.Write("stationPowerW", StationPowerW.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            ini.Write("logStationPowerWithAmp", LogStationPowerWithAmp ? "True" : "False");
         }
     }
 }

@@ -268,6 +268,69 @@ namespace WSJTX_Controller
             sb.AppendLine($"Processor count:   {Safe(() => Environment.ProcessorCount.ToString())}");
             sb.AppendLine($"Screen DPI:        {Safe(() => { using (var g = Graphics.FromHwnd(IntPtr.Zero)) return $"{g.DpiX:F0} x {g.DpiY:F0}"; })}");
             sb.AppendLine($"Monitor count:     {Safe(() => Screen.AllScreens.Length.ToString())}");
+            // 2026-11-22 (operator): the computer itself -- what decoding and timing depend on, and
+            // which screen reader is speaking. Hardware only: never the computer's name, the
+            // Windows user name or a network address.
+            sb.AppendLine($"Processor:         {Safe(ProcessorText)}");
+            sb.AppendLine($"Memory:            {Safe(MemoryText)}");
+            sb.AppendLine($"64-bit Windows:    {Safe(() => Environment.Is64BitOperatingSystem ? "Yes" : "No")}");
+            sb.AppendLine($"Power:             {Safe(PowerText)}");
+            sb.AppendLine($"Screen reader:     {Safe(ScreenReaderText)}");
+        }
+
+        internal static string ProcessorText()
+        {
+            using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\CentralProcessor\0"))
+            {
+                string name = (key?.GetValue("ProcessorNameString") as string)?.Trim();
+                object mhz = key?.GetValue("~MHz");
+                string speed = mhz is int m && m > 0 ? $", {m / 1000.0:0.0} GHz" : "";
+                return (string.IsNullOrEmpty(name) ? "unknown" : System.Text.RegularExpressions.Regex.Replace(name, @"\s+", " "))
+                       + speed + $", {Environment.ProcessorCount} logical cores";
+            }
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct MemoryStatusEx
+        {
+            public uint dwLength, dwMemoryLoad;
+            public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile, ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+        }
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx m);
+
+        internal static string MemoryText()
+        {
+            var m = new MemoryStatusEx { dwLength = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(MemoryStatusEx)) };
+            if (!GlobalMemoryStatusEx(ref m)) return "unknown";
+            return $"{m.ullTotalPhys / 1073741824.0:0.0} GB, {m.ullAvailPhys / 1073741824.0:0.0} GB free ({m.dwMemoryLoad}% in use)";
+        }
+
+        internal static string PowerText()
+        {
+            var p = SystemInformation.PowerStatus;
+            string line = p.PowerLineStatus == PowerLineStatus.Online ? "plugged in"
+                        : p.PowerLineStatus == PowerLineStatus.Offline ? "on battery" : "unknown";
+            return p.BatteryChargeStatus.HasFlag(BatteryChargeStatus.NoSystemBattery) ? line + ", no battery"
+                 : $"{line}, battery {p.BatteryLifePercent * 100:0}%";
+        }
+
+        // The screen readers running now, with their versions when Windows lets us read them.
+        internal static string ScreenReaderText()
+        {
+            var found = new List<string>();
+            foreach (var (proc, name) in new[] { ("jfw", "JAWS"), ("nvda", "NVDA"), ("Narrator", "Narrator"), ("zt", "ZoomText"), ("fusion", "Fusion") })
+            {
+                foreach (var p in System.Diagnostics.Process.GetProcessesByName(proc))
+                {
+                    string ver = null;
+                    try { ver = p.MainModule?.FileVersionInfo?.ProductVersion; } catch { }
+                    found.Add(string.IsNullOrWhiteSpace(ver) ? name : $"{name} {ver.Trim()}");
+                    p.Dispose();
+                    break;
+                }
+            }
+            return found.Count == 0 ? "none running" : string.Join(", ", found);
         }
 
         private static void BuildSettingsSection(StringBuilder sb)
@@ -673,12 +736,15 @@ namespace WSJTX_Controller
             public DateTime Written;
             public bool Include;
             public long TailBytes;    // > 0: only the newest this-many bytes go in
+            public DateTime? SinceUtc;// ALL.TXT: only lines stamped on or after this UTC day go in
             public bool Redact;       // a settings file: passwords blanked
             public string Kind;       // log, settings, rules, logbook, summary, other
             public string Note;       // why it is in, or why not
         }
 
         internal const long LogTailBytes = 20L * 1024 * 1024;
+        // ALL.TXT (2026-11-22): the last three days of decodes and transmissions, at most 20 MB.
+        internal const int AllTxtDays = 3;
         internal const int RecentLogFiles = 3;
         private const long SmallFileBytes = 1024 * 1024;
         private const long LogbookFileBytes = 64L * 1024 * 1024;
@@ -773,6 +839,18 @@ namespace WSJTX_Controller
                     Out("backup", "backup of a settings or wording file");
                 else if (!IsSettingsFile(rel) && IsSecretFile(rel))
                     Out("private", "may hold a key or password");
+                else if (top && name.Equals(NativeEngineClient.AllTxtFileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    In("decodes", $"every decode and transmission of the last {AllTxtDays} days (ALL.TXT)", tail: f.Size > LogTailBytes ? LogTailBytes : 0);
+                    f.SinceUtc = now.ToUniversalTime().Date.AddDays(-(AllTxtDays - 1));
+                }
+                else if (top && (name.Equals(NativeEngineClient.DiagLogFileName, StringComparison.OrdinalIgnoreCase)
+                                 || name.Equals(Path.GetFileNameWithoutExtension(NativeEngineClient.DiagLogFileName) + ".1.log", StringComparison.OrdinalIgnoreCase)))
+                    // Nexus's own diagnostic log: two generations of at most 4 MB each, passwords
+                    // masked by Nexus; it holds Record CAT traffic's lines.
+                    In("log", "the engine's diagnostic log (Nexus's own words; Record CAT traffic goes here)", tail: f.Size > LogTailBytes ? LogTailBytes : 0);
+                else if (top && name.StartsWith(NativeEngineClient.HeardReportsFileName, StringComparison.OrdinalIgnoreCase))
+                    Out("lookup", "kept reports of who heard you (rebuilt from PSK Reporter)");
                 else if (top && recentLogs.Contains(rel))
                     In("log", f.Size > LogTailBytes ? $"recent log, newest {LogTailBytes / 1048576} MB of {f.Size / 1048576.0:0.0} MB" : "recent log", tail: f.Size > LogTailBytes ? LogTailBytes : 0);
                 else if (top && rel.StartsWith("log_", StringComparison.OrdinalIgnoreCase) && char.IsDigit(rel.Length > 4 ? rel[4] : 'x'))
@@ -840,6 +918,7 @@ namespace WSJTX_Controller
                     else
                     {
                         byte[] data = f.TailBytes > 0 ? ReadTailSafe(full, f.TailBytes) : ReadFileSafe(full);
+                        if (f.SinceUtc.HasValue) data = AllTxtSince(data, f.SinceUtc.Value);
                         var entry = zip.CreateEntry(entryName, CompressionLevel.Optimal);
                         using (var dest = entry.Open()) dest.Write(data, 0, data.Length);
                     }
@@ -925,6 +1004,33 @@ namespace WSJTX_Controller
         }
 
         // The newest `max` bytes of a file, from the start of a line.
+        // ALL.TXT's lines from `sinceUtc` on: each line starts with its UTC stamp, yyMMdd_hhmmss
+        // (WSJT-X's format, Nexus's alltxt.rs). The file is in time order, so everything from the
+        // first line on or after that day is kept; a file with no such line gives nothing.
+        internal static byte[] AllTxtSince(byte[] data, DateTime sinceUtc)
+        {
+            string cut = sinceUtc.ToString("yyMMdd", System.Globalization.CultureInfo.InvariantCulture);
+            int pos = 0;
+            while (pos < data.Length)
+            {
+                if (pos + 6 <= data.Length)
+                {
+                    bool digits = true;
+                    for (int i = 0; i < 6 && digits; i++) digits = data[pos + i] >= (byte)'0' && data[pos + i] <= (byte)'9';
+                    if (digits && string.CompareOrdinal(Encoding.ASCII.GetString(data, pos, 6), cut) >= 0)
+                    {
+                        byte[] kept = new byte[data.Length - pos];
+                        Buffer.BlockCopy(data, pos, kept, 0, kept.Length);
+                        return kept;
+                    }
+                }
+                int nl = Array.IndexOf(data, (byte)'\n', pos);
+                if (nl < 0) break;
+                pos = nl + 1;
+            }
+            return Array.Empty<byte>();
+        }
+
         private static byte[] ReadTailSafe(string path, long max)
         {
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))

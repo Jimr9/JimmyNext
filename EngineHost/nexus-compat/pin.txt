@@ -6,7 +6,11 @@
 # pin, and its "Checking a patch against a newer Nexus" section for what to do when this pin
 # is updated.
 #
-# TESTER BUILD (2026-11-20, operator's request): pins PRE-RELEASE v1.25.0-beta.2 (2026-11-19, a
+# Upgraded 2026-11-22 to STABLE v1.25.0 (tag object 903e2e5e, commit cac08ac7) from the
+# v1.25.0-beta.2 tester pin: the same eight patches apply unchanged (settings hunk 2 checked: it
+# lands in Settings' Default, not RadioProfile's). Jimmy's own observed-sunspot feed retired:
+# Nexus 1.25 reads swpc_observed_ssn.json itself (#523).
+# Was: TESTER BUILD (2026-11-20, operator's request): pinned PRE-RELEASE v1.25.0-beta.2 (2026-11-19, a
 # LIGHTWEIGHT tag) for the JTDX-style decoder testers asked for. Move to v1.25.0 stable when it
 # ships. Eight patches: tempo-core-message.patch and tempo-core-inbox.patch retired (#512 is
 # upstream in 1.25: a grid-less CQ/call between standard calls is a standard message, chat chunks
@@ -60,10 +64,11 @@
 # re-assessment.
 
 NEXUS_REPO=https://github.com/kd9taw/Nexus.git
-NEXUS_TAG=v1.25.0-beta.2
-NEXUS_COMMIT=21f743404bf3efdddcb24ab2f802f77c0b6afe06
+NEXUS_TAG=v1.25.0
+NEXUS_COMMIT=cac08ac7bb90e4ae9d0d850976abc72169e8f6ce
 
-# DISPOSITION: 2026-11-20 -- pinned AT pre-release v1.25.0-beta.2 for a tester build (operator asked), nothing from main.
+# DISPOSITION: 2026-11-22 -- pinned AT stable v1.25.0 (operator asked for the upgrade), nothing from main.
+# Was: 2026-11-20 -- pinned AT pre-release v1.25.0-beta.2 for a tester build (operator asked), nothing from main.
 # Was: 2026-11-12 -- pinned AT stable v1.24.0 (operator asked for the upgrade), nothing from main.
 # Was: 2026-11-06 -- pinned AT stable v1.23.0 (operator asked for the upgrade), nothing from main.
 # Was: 2026-10-30 -- pinned AT stable v1.21.0 (operator asked for the upgrade), nothing from main

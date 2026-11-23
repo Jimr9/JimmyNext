@@ -123,6 +123,10 @@ namespace WSJTX_Controller
             // default, saved per profile.
             public Func<string> OtaPrograms;
             public Action<string> SaveOtaPrograms;
+            // The modes and bands the operator unchecked on that page (2026-11-22), comma
+            // separated; everything not listed shows. Saved per profile.
+            public Func<string> OtaHiddenModes, OtaHiddenBands;
+            public Action<string> SaveOtaHiddenModes, SaveOtaHiddenBands;
         }
         private readonly Host _host2;
 
@@ -383,7 +387,8 @@ namespace WSJTX_Controller
             long age = ageSecs.Value;
             if (age < 60) return $"{age}s ago";
             if (age < 3600) return $"{age / 60}m ago";
-            return $"{age / 3600}h ago";
+            if (age < 2 * 86400) return $"{age / 3600}h ago";
+            return $"{age / 86400}d ago";   // Who Hears Me's 7-day window (2026-11-22)
         }
 
         // Formats a unix SPOT TIMESTAMP (POTA/SOTA's own SpotTimeUnix) into an age phrase.
@@ -400,6 +405,124 @@ namespace WSJTX_Controller
         // The activator programs, and which of them the list shows (2026-11-09: WWFF joins).
         internal static readonly string[] OtaProgramNames = { "POTA", "SOTA", "WWFF" };
         private readonly Dictionary<string, CheckBox> _otaProgramCbs = new Dictionary<string, CheckBox>();
+
+        // ── Continent and country filters (Nexus 1.25) ──
+        private const string AllContinents = "All continents";
+        private const string AllCountries = "All countries";
+        private ComboBox _otaContinentCb, _otaCountryCb;
+        private static string _otaContinent, _otaCountry;   // the session's choice: a continent name, a country
+        private bool _otaPlacesSetting;
+
+        internal static string ContinentName(string code)
+        {
+            switch ((code ?? "").ToUpperInvariant())
+            {
+                case "NA": return "North America";
+                case "SA": return "South America";
+                case "EU": return "Europe";
+                case "AF": return "Africa";
+                case "AS": return "Asia";
+                case "OC": return "Oceania";
+                case "AN": return "Antarctica";
+                default: return null;
+            }
+        }
+
+        private static string PlacePicked(ComboBox cb, string all) =>
+            cb.SelectedItem is string s && s != all ? s : null;
+
+        // Whether a spot passes the place filters: an unplaced spot passes only "All".
+        internal static bool PassesPlace(OtaSpot spot, string continent, string country) =>
+            (continent == null || ContinentName(spot.Continent) == continent)
+            && (country == null || string.Equals(spot.Country, country, StringComparison.Ordinal));
+
+        // The lists hold the places on the air now (countries within the chosen continent), and the
+        // chosen place even when its last activator has gone, so a choice never moves under the
+        // operator. Rebuilt only when what they would hold changes.
+        private void FillPlaceLists(List<OtaSpot> spots)
+        {
+            var continents = spots.Select(s => ContinentName(s.Continent)).Where(c => c != null).Distinct().OrderBy(c => c, StringComparer.Ordinal).ToList();
+            if (_otaContinent != null && !continents.Contains(_otaContinent)) continents.Add(_otaContinent);
+            var countries = spots.Where(s => _otaContinent == null || ContinentName(s.Continent) == _otaContinent)
+                .Select(s => s.Country).Where(c => !string.IsNullOrEmpty(c)).Distinct().OrderBy(c => c, StringComparer.Ordinal).ToList();
+            if (_otaCountry != null && !countries.Contains(_otaCountry)) countries.Add(_otaCountry);
+            _otaPlacesSetting = true;
+            try
+            {
+                SetPlaceItems(_otaContinentCb, AllContinents, continents, _otaContinent);
+                SetPlaceItems(_otaCountryCb, AllCountries, countries, _otaCountry);
+            }
+            finally { _otaPlacesSetting = false; }
+        }
+
+        private static void SetPlaceItems(ComboBox cb, string all, List<string> places, string chosen)
+        {
+            var want = new List<string> { all };
+            want.AddRange(places);
+            if (cb.Items.Cast<object>().Select(o => o as string).SequenceEqual(want)) return;
+            if (cb.DroppedDown) return;   // never under an open list
+            cb.BeginUpdate();
+            cb.Items.Clear();
+            cb.Items.AddRange(want.Cast<object>().ToArray());
+            cb.SelectedIndex = Math.Max(0, chosen == null ? 0 : want.IndexOf(chosen));
+            cb.EndUpdate();
+        }
+
+        // ── Mode and band filters (2026-11-22) ──
+        internal static readonly string[] OtaBandNames = { "160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m", "6m", "2m", OtherBand };
+        internal const string OtherBand = "Other";
+        private CheckedListBox _otaModeList, _otaBandList;
+        private HashSet<string> _otaHiddenModes, _otaHiddenBands;
+        private bool _otaFilterSetting;
+
+        internal static HashSet<string> ParseHidden(string saved) =>
+            new HashSet<string>((saved ?? "").Split(',').Select(x => x.Trim()).Where(x => x.Length > 0), StringComparer.OrdinalIgnoreCase);
+
+        // The mode a spot is listed under: its own word, upper case; SSB's sidebands as SSB.
+        internal static string OtaModeOf(OtaSpot spot)
+        {
+            string m = (spot.Mode ?? "").Trim().ToUpperInvariant();
+            if (m.Length == 0) return "Unknown";
+            return m == "USB" || m == "LSB" ? "SSB" : m;
+        }
+
+        internal static string OtaBandOf(OtaSpot spot)
+        {
+            string b = SpotRows.BandOfKhz(spot.FreqKhz);
+            return b != null && Array.IndexOf(OtaBandNames, b) >= 0 ? b : OtherBand;
+        }
+
+        internal static bool PassesModeBand(OtaSpot spot, HashSet<string> hiddenModes, HashSet<string> hiddenBands) =>
+            (hiddenModes == null || !hiddenModes.Contains(OtaModeOf(spot))) && (hiddenBands == null || !hiddenBands.Contains(OtaBandOf(spot)));
+
+        private void OnOtaFilterCheck(CheckedListBox list, HashSet<string> hidden, ItemCheckEventArgs e, Action<string> save)
+        {
+            if (_otaFilterSetting) return;
+            string item = list.Items[e.Index] as string;
+            if (item == null) return;
+            if (e.NewValue == CheckState.Checked) hidden.Remove(item); else hidden.Add(item);
+            save(string.Join(",", hidden.OrderBy(x => x, StringComparer.OrdinalIgnoreCase)));
+            BeginInvoke((Action)RefreshPotaSota);   // after the check box itself has changed
+        }
+
+        // The modes list holds the modes on the air now, and every hidden one so it can be checked
+        // again. Rebuilt only when that set changes, and never while the operator is in the list.
+        private void FillModeList(IEnumerable<OtaSpot> spots)
+        {
+            if (_otaModeList == null || _otaModeList.Focused) return;
+            var want = spots.Select(OtaModeOf).Concat(_otaHiddenModes).Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(m => m, StringComparer.OrdinalIgnoreCase).ToList();
+            if (_otaModeList.Items.Cast<object>().Select(o => o as string).SequenceEqual(want)) return;
+            _otaFilterSetting = true;
+            try
+            {
+                _otaModeList.BeginUpdate();
+                _otaModeList.Items.Clear();
+                foreach (string m in want) _otaModeList.Items.Add(m, !_otaHiddenModes.Contains(m));
+                _otaModeList.EndUpdate();
+            }
+            finally { _otaFilterSetting = false; }
+        }
 
         internal static HashSet<string> ParseOtaPrograms(string saved)
         {
@@ -428,6 +551,33 @@ namespace WSJTX_Controller
                 _otaProgramCbs[program] = cb;
                 top.Controls.Add(cb);
             }
+            // Nexus 1.25: the board filters by continent and country, listing only the places
+            // someone is on the air from right now (filled by RefreshPotaSota).
+            _otaContinentCb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 130, AccessibleName = "Continent", Margin = new Padding(3, 3, 6, 3) };
+            _otaCountryCb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 170, AccessibleName = "Country", Margin = new Padding(3, 3, 6, 3) };
+            _otaContinentCb.Items.Add(AllContinents);
+            _otaContinentCb.SelectedIndex = 0;
+            _otaCountryCb.Items.Add(AllCountries);
+            _otaCountryCb.SelectedIndex = 0;
+            _otaContinentCb.SelectedIndexChanged += (s, e) => { if (!_otaPlacesSetting) { _otaContinent = PlacePicked(_otaContinentCb, AllContinents); _otaCountry = null; RefreshPotaSota(); } };
+            _otaCountryCb.SelectedIndexChanged += (s, e) => { if (!_otaPlacesSetting) { _otaCountry = PlacePicked(_otaCountryCb, AllCountries); RefreshPotaSota(); } };
+            top.Controls.Add(_otaContinentCb);
+            top.Controls.Add(_otaCountryCb);
+
+            // Mode and band filters (operator, 2026-11-22): two check lists, everything checked to
+            // start; an unchecked mode or band is hidden. Space toggles an item.
+            _otaHiddenModes = ParseHidden(_host2.OtaHiddenModes?.Invoke());
+            _otaHiddenBands = ParseHidden(_host2.OtaHiddenBands?.Invoke());
+            var filters = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 74, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            _otaModeList = new CheckedListBox { AccessibleName = "Modes to show", Width = 120, Height = 68, CheckOnClick = true, IntegralHeight = false, Margin = new Padding(3, 3, 9, 3) };
+            _otaBandList = new CheckedListBox { AccessibleName = "Bands to show", Width = 120, Height = 68, CheckOnClick = true, IntegralHeight = false, Margin = new Padding(3, 3, 9, 3) };
+            foreach (string b in OtaBandNames) _otaBandList.Items.Add(b, !_otaHiddenBands.Contains(b));
+            _otaModeList.ItemCheck += (s, e) => OnOtaFilterCheck(_otaModeList, _otaHiddenModes, e, v => _host2.SaveOtaHiddenModes?.Invoke(v));
+            _otaBandList.ItemCheck += (s, e) => OnOtaFilterCheck(_otaBandList, _otaHiddenBands, e, v => _host2.SaveOtaHiddenBands?.Invoke(v));
+            filters.Controls.Add(new Label { Text = "Modes:", AutoSize = true, Margin = new Padding(3, 6, 0, 3) });
+            filters.Controls.Add(_otaModeList);
+            filters.Controls.Add(new Label { Text = "Bands:", AutoSize = true, Margin = new Padding(3, 6, 0, 3) });
+            filters.Controls.Add(_otaBandList);
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
             _potaStatusLabel = MakeStatusBox();
@@ -450,10 +600,11 @@ namespace WSJTX_Controller
             bottom.Controls.Add(refreshBtn);
 
             page.Controls.Add(_potaList);
+            page.Controls.Add(filters);
             page.Controls.Add(top);
             page.Controls.Add(bottom);
             var order = new List<Control>(OtaProgramNames.Select(p => (Control)_otaProgramCbs[p]));
-            order.AddRange(new Control[] { _potaList, orderBtn, prepareBtn, chooseBtn, refreshBtn, _potaStatusLabel });
+            order.AddRange(new Control[] { _otaContinentCb, _otaCountryCb, _otaModeList, _otaBandList, _potaList, orderBtn, prepareBtn, chooseBtn, refreshBtn, _potaStatusLabel });
             _pageOrder[page] = order.ToArray();
             return page;
         }
@@ -658,9 +809,13 @@ namespace WSJTX_Controller
                     var spots = new List<OtaSpot>();
                     if (result?.Spots != null)
                     {
+                        FillPlaceLists(result.Spots.Where(s => programs.Contains(s.Program ?? "")).ToList());
+                        FillModeList(result.Spots.Where(s => programs.Contains(s.Program ?? "")));
                         foreach (var spot in result.Spots)
                         {
                             if (!programs.Contains(spot.Program ?? "")) continue;
+                            if (!PassesPlace(spot, _otaContinent, _otaCountry)) continue;
+                            if (!PassesModeBand(spot, _otaHiddenModes, _otaHiddenBands)) continue;
                             // Judged on the SPOT's band and the activation's own place (SpotRows),
                             // never the radio's band or the activator's home state.
                             potaRows.Add(SpotRows.PotaRow(spot, NotesFor(spot), _potaFields, FormatAge(spot.SpotTimeUnix)));
@@ -1015,13 +1170,13 @@ namespace WSJTX_Controller
                 AccessibleName = "Time window",
                 TabIndex = 1,
             };
-            _heardWindowCb.Items.AddRange(new object[] { "Last 15 minutes", "Last 30 minutes" });
+            _heardWindowCb.Items.AddRange(HeardWindowNames);
             _heardWindowCb.SelectedIndex = 0;
             // Picking a time window leaves Start fresh; the "Since" item is Start fresh itself.
             _heardWindowCb.SelectedIndexChanged += (s, e) =>
             {
                 if (_heardWindowSetting) return;
-                if (_heardWindowCb.SelectedIndex < 2 && _host2.HeardSince?.Invoke() != null) _host2.SetHeardSince?.Invoke(null);
+                if (_heardWindowCb.SelectedIndex < HeardWindowMinutes.Length && _host2.HeardSince?.Invoke() != null) _host2.SetHeardSince?.Invoke(null);
                 else RefreshWhoHearsMe();
             };
             // Nexus's own four orders for this list (features/getoutSort), saved per profile.
@@ -1127,7 +1282,11 @@ namespace WSJTX_Controller
             RefreshWhoHearsMe();
         }
 
-        // The time window list shows Start fresh as its third item, "Since 14:32 UTC".
+        // The fixed time windows (2026-11-22: 24 hours and 7 days come from Nexus 1.25's kept
+        // reports of who heard you, the first two from the live hour), then Start fresh as the
+        // last item, "Since 14:32 UTC".
+        internal static readonly int[] HeardWindowMinutes = { 15, 30, 24 * 60, 7 * 24 * 60 };
+        private static readonly object[] HeardWindowNames = { "Last 15 minutes", "Last 30 minutes", "Last 24 hours", "Last 7 days" };
         private void ShowHeardSince()
         {
             if (_heardWindowCb == null) return;
@@ -1135,11 +1294,11 @@ namespace WSJTX_Controller
             _heardWindowSetting = true;
             try
             {
-                while (_heardWindowCb.Items.Count > 2) _heardWindowCb.Items.RemoveAt(2);
+                while (_heardWindowCb.Items.Count > HeardWindowMinutes.Length) _heardWindowCb.Items.RemoveAt(HeardWindowMinutes.Length);
                 if (since != null)
                 {
                     _heardWindowCb.Items.Add("Since " + SinceText(since.Value));
-                    _heardWindowCb.SelectedIndex = 2;
+                    _heardWindowCb.SelectedIndex = HeardWindowMinutes.Length;
                 }
                 else if (_heardWindowCb.SelectedIndex < 0)
                     _heardWindowCb.SelectedIndex = 0;
@@ -1147,9 +1306,14 @@ namespace WSJTX_Controller
             finally { _heardWindowSetting = false; }
         }
 
+        internal static string WindowText(int minutes) =>
+            minutes >= 24 * 60 && minutes % (24 * 60) == 0
+                ? (minutes == 24 * 60 ? "24 hours" : $"{minutes / (24 * 60)} days")
+                : $"{minutes} minutes";
+
         internal static string FormatHeardMeSummary(GettingOutResult r)
         {
-            string window = r.SinceUnix != null ? "since " + SinceText(r.SinceUnix.Value) : $"in the last {r.WindowMinutes} minutes";
+            string window = r.SinceUnix != null ? "since " + SinceText(r.SinceUnix.Value) : "in the last " + WindowText(r.WindowMinutes);
             if (r.Count == 0) return $"No reports of your signal {window}.";
             string who = r.Count == 1 ? "1 station heard you" : $"{r.Count} stations heard you";
             return r.MaxKm > 0 ? $"{who} {window}, furthest {DistanceUnits.FromKm(r.MaxKm):N0} {DistanceUnits.ShortName}." :$"{who} {window}.";
@@ -1336,7 +1500,8 @@ namespace WSJTX_Controller
             _heardInFlight = true;
             long? since = _host2.HeardSince?.Invoke();
             // Start fresh reads back as far as the kept reports go (an hour at most).
-            int minutes = since != null ? 60 : _heardWindowCb.SelectedIndex == 1 ? 30 : 15;
+            int sel = _heardWindowCb.SelectedIndex;
+            int minutes = since != null ? 60 : sel >= 0 && sel < HeardWindowMinutes.Length ? HeardWindowMinutes[sel] : 15;
             string sortKey = HeardSortKeys[Math.Max(0, _heardSortCb?.SelectedIndex ?? 0)];
             System.Threading.Tasks.Task.Run(() =>
             {

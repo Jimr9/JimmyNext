@@ -29,6 +29,10 @@ namespace WSJTX_Controller
         // Canadian provinces as "US-ID" / "CA-ON"; several for a park on a state line; null or
         // empty when it is not known. Never the activator's home address.
         public List<string> States { get; set; }
+        // Where the activator is (Nexus 1.25 spot_country, 2026-11-22): the DXCC entity as cty.dat
+        // names it, and its continent code ("NA", "EU", ...). Null when nothing places the spot.
+        public string Country { get; set; }
+        public string Continent { get; set; }
     }
 
     public class OtaSpotsResult
@@ -335,8 +339,9 @@ namespace WSJTX_Controller
         public SolarDay[] Days { get; set; } = Array.Empty<SolarDay>();   // oldest first
         public long? FetchedAgeSecs { get; set; }
         public string Error { get; set; }
-        // NOAA's newest observed sunspot count with its day (2026-11-15) -- usually today, one day
-        // newer than Days. Jimmy's own feed until Nexus has it (kd9taw/Nexus#523); null until read.
+        // Today's sunspot count so far with its day, one day newer than Days -- Nexus 1.25's own
+        // fetch and "today so far" rule (kd9taw/Nexus#523); null until read and while NOAA has no
+        // row for today yet.
         public SolarDay ObservedSsn { get; set; }
     }
 
@@ -597,6 +602,23 @@ namespace WSJTX_Controller
             if (json == null) { error = "No response from engine host."; return null; }
             try { return JsonSerializer.Deserialize<PathToResult>(json, JsonOptions); }
             catch (Exception ex) { error = $"Could not parse PATH_TO response: {ex.Message}"; return null; }
+        }
+
+        // Nexus 1.25 Record CAT traffic (EngineHost CAT_TRACE_*): the radio-control commands and the
+        // radio's answers go into nexus-diag.log for 30 minutes or 2 MB, then it ends by itself.
+        // Start returns the minutes it will run, or null when the engine did not answer.
+        public int? StartCatTrace()
+        {
+            string r = SendCommand("CAT_TRACE_START", FastTimeoutMs)?.Trim();
+            return r != null && r.StartsWith("OK ") && int.TryParse(r.Substring(3), out int m) ? m : (int?)null;
+        }
+        public bool StopCatTrace() => SendCommand("CAT_TRACE_STOP", FastTimeoutMs)?.Trim() == "OK";
+        // Seconds left while a recording runs; 0 when none is; null when the engine did not answer.
+        public long? CatTraceSecondsLeft()
+        {
+            string r = SendCommand("CAT_TRACE_STATUS", FastTimeoutMs)?.Trim();
+            if (r == "off") return 0;
+            return r != null && r.StartsWith("on ") && long.TryParse(r.Substring(3), out long s) ? s : (long?)null;
         }
 
         public BestTimesResult GetBestTimes(string grid, string mode, bool fullModel, out string error)

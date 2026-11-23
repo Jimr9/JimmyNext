@@ -1401,6 +1401,7 @@ namespace WSJTX_Controller
                 hamQthEnabled, hamQthUsername, hamQthPassword, hamQthCacheDays);
             wsjtxClient.lookupManager     = lookupManager;
             CallbookUpdateDlg.Lookups     = lookupManager;   // the Logbook's Update from Callbook looks up with it
+            CallbookUpdateDlg.OwnCall     = () => wsjtxClient?.myCall;
             wsjtxClient.lotwBoostEnabled  = lotwBoostEnabled;
             // Background shutdown / quiescence, 2026-08-23 (independent audit finding):
             // SafeBeginInvoke (see its own comment) instead of a raw BeginInvoke -- an in-flight
@@ -4853,6 +4854,10 @@ namespace WSJTX_Controller
                         SaveHeardSort = v => WhoHearsMeSort = v,
                         OtaPrograms = () => iniFile != null && iniFile.KeyExists("otaPrograms") ? iniFile.Read("otaPrograms") : null,
                         SaveOtaPrograms = v => iniFile?.Write("otaPrograms", v ?? ""),
+                        OtaHiddenModes = () => iniFile != null && iniFile.KeyExists("otaHiddenModes") ? iniFile.Read("otaHiddenModes") : null,
+                        SaveOtaHiddenModes = v => iniFile?.Write("otaHiddenModes", v ?? ""),
+                        OtaHiddenBands = () => iniFile != null && iniFile.KeyExists("otaHiddenBands") ? iniFile.Read("otaHiddenBands") : null,
+                        SaveOtaHiddenBands = v => iniFile?.Write("otaHiddenBands", v ?? ""),
                         PlanSpot = (call, spotMode, freqKhz) => wsjtxClient?.PlanSpot(call, spotMode, freqKhz),
                         PrepareWouldInterrupt = () => wsjtxClient?.PrepareWouldInterrupt(),
                         PrepareMovesRadio = plan => wsjtxClient == null || wsjtxClient.PrepareMovesRadio(plan),
@@ -5895,7 +5900,7 @@ namespace WSJTX_Controller
                     decodeSnapshot, pskReporterSnapshot,
                     dxClusterAddress, sessionToken, repeatLimitSnapshot, workingFrequenciesSnapshot,
                     NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, logbookOnly, licenseClassSnapshot, wsjtxOutSnapshot,
-                    NativeEngine.LogSpaceWeather);
+                    NativeEngine.LogSpaceWeather, NativeEngine.StationPowerW, NativeEngine.LogStationPowerWithAmp);
                 if (!ok && nativeEngineClient == client)
                 {
                     // Promoted from a raw ShowMessage (2026-08-19, notification-system-
@@ -6015,6 +6020,8 @@ namespace WSJTX_Controller
                 return false;
             if (!client.SetLogSpaceWeatherLive(NativeEngine.LogSpaceWeather))
                 return false;
+            if (!client.SetStationPowerLive(NativeEngine.StationPowerW, NativeEngine.LogStationPowerWithAmp))
+                return false;
             ApplyRadioMasterAudioLevels();
             wsjtxClient?.DebugOutput("[NativeEngine] radio/audio settings and time check applied live (no restart)");
             return true;
@@ -6024,6 +6031,16 @@ namespace WSJTX_Controller
         // or it did not accept -- the caller restarts the engine as before.
         // Options > Logbook's "Save space weather with each contact", on the running engine. False:
         // none running, or it did not accept -- the caller restarts the engine.
+        // Options > General's station power and "an amplifier is inline", on the running engine.
+        public bool TryApplyStationPowerLive()
+        {
+            if (TestModeGuard.IsTestMode) return false;
+            var client = nativeEngineClient;
+            if (client == null || !client.Running || !client.SetStationPowerLive(NativeEngine.StationPowerW, NativeEngine.LogStationPowerWithAmp)) return false;
+            wsjtxClient?.DebugOutput($"[NativeEngine] station power {NativeEngine.StationPowerW} W, amplifier inline {(NativeEngine.LogStationPowerWithAmp ? "on" : "off")} applied live");
+            return true;
+        }
+
         public bool TryApplyLogSpaceWeatherLive()
         {
             if (TestModeGuard.IsTestMode) return false;

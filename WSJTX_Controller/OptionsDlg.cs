@@ -48,6 +48,8 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox _logSpaceWeatherCheckBox;
         private System.Windows.Forms.CheckBox _pathModelFullCheckBox;
         private System.Windows.Forms.ComboBox _distanceUnitsCombo;
+        private System.Windows.Forms.NumericUpDown _stationPowerUpDown;
+        private System.Windows.Forms.CheckBox _ampInlineCheckBox;
         private static readonly string[] DistanceUnitValues = { DistanceUnits.Auto, DistanceUnits.Miles, DistanceUnits.Kilometers };
         private System.Windows.Forms.NumericUpDown _maxCallQueueAgeNumeric;
         private System.Windows.Forms.CheckBox rawShowCqCheckBox;
@@ -584,6 +586,42 @@ namespace WSJTX_Controller
             _distanceUnitsCombo.Items.AddRange(new object[] { "Automatic (from Windows region)", "Miles", "Kilometers" });
             _distanceUnitsCombo.SelectedIndex = Math.Max(0, Array.IndexOf(DistanceUnitValues, ctrl.distanceUnits));
             generalPanel.Controls.Add(_distanceUnitsCombo);
+
+            // 2026-11-22: Nexus's Settings.station_power_w and (1.25, #534) "an amplifier Nexus
+            // can't read is inline: log my Station power". The power is logged when the radio
+            // reports none; with the box ticked it is logged in place of the radio's figure,
+            // which behind an amplifier is only the drive. Logging only: transmit is untouched.
+            generalPanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text     = "Station power (W):",
+                AutoSize = true,
+                Location = new System.Drawing.Point(10, 324),
+                Font     = font,
+                TabStop  = false
+            });
+            _stationPowerUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                AccessibleName = "Station power in watts, 0 for not set",
+                Location       = new System.Drawing.Point(130, 321),
+                Size           = new System.Drawing.Size(80, 21),
+                Minimum        = 0,
+                Maximum        = 2000,
+                Value          = Math.Max(0, Math.Min(2000, ctrl.NativeEngine.StationPowerW)),
+                TabIndex       = 12,
+                Font           = font,
+            };
+            generalPanel.Controls.Add(_stationPowerUpDown);
+            _ampInlineCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text           = "An amplifier is inline: log my station power, not the radio's",
+                AccessibleName = "Amplifier inline: log station power",
+                AutoSize       = true,
+                Location       = new System.Drawing.Point(10, 350),
+                TabIndex       = 13,
+                Checked        = ctrl.NativeEngine.LogStationPowerWithAmp,
+                Font           = font,
+            };
+            generalPanel.Controls.Add(_ampInlineCheckBox);
             // The tab is now taller than the dialog at larger text sizes: scroll rather than clip,
             // as receiveReplyPanel does.
             generalPanel.AutoScroll = true;
@@ -883,6 +921,15 @@ namespace WSJTX_Controller
             if (_pathModelFullCheckBox != null) ctrl.pathModelFull = _pathModelFullCheckBox.Checked;
             if (_distanceUnitsCombo != null && _distanceUnitsCombo.SelectedIndex >= 0)
                 ctrl.distanceUnits = DistanceUnitValues[_distanceUnitsCombo.SelectedIndex];
+
+            int stationPower = _stationPowerUpDown != null ? (int)_stationPowerUpDown.Value : ctrl.NativeEngine.StationPowerW;
+            bool ampInline = _ampInlineCheckBox?.Checked ?? ctrl.NativeEngine.LogStationPowerWithAmp;
+            if (stationPower != ctrl.NativeEngine.StationPowerW || ampInline != ctrl.NativeEngine.LogStationPowerWithAmp)
+            {
+                ctrl.NativeEngine.StationPowerW = stationPower;
+                ctrl.NativeEngine.LogStationPowerWithAmp = ampInline;
+                ctrl.TryApplyStationPowerLive();
+            }
 
             bool logSpaceWeather = _logSpaceWeatherCheckBox?.Checked ?? ctrl.NativeEngine.LogSpaceWeather;
             if (logSpaceWeather != ctrl.NativeEngine.LogSpaceWeather)

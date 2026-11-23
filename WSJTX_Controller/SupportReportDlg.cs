@@ -54,6 +54,71 @@ namespace WSJTX_Controller
         public bool Upload => _uploadRadio.Checked;
         private RadioButton _uploadRadio;
 
+        // ---- Record CAT traffic (Nexus 1.25) ----
+        private const string CatTraceStartText = "Record CAT Traffic";
+        private const string CatTraceStopText = "Stop CAT Recording";
+        private Button _catTraceButton;
+        private bool _catTraceOn, _catTraceBusy;
+
+        // The button's words follow the engine: a recording can still be running from an earlier
+        // visit, or have ended by itself.
+        private void RefreshCatTraceButton()
+        {
+            System.Threading.Tasks.Task.Run(() => new ExternalDataClient().CatTraceSecondsLeft()).ContinueWith(t =>
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                try { BeginInvoke((Action)(() => { if (!IsDisposed) SetCatTraceOn((t.Result ?? 0) > 0); })); } catch { }
+            });
+        }
+
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            RefreshCatTraceButton();
+        }
+
+        private void SetCatTraceOn(bool on)
+        {
+            _catTraceOn = on;
+            _catTraceButton.Text = on ? CatTraceStopText : CatTraceStartText;
+        }
+
+        private void CatTraceButton_Click(object sender, EventArgs e)
+        {
+            if (_catTraceBusy) return;
+            _catTraceBusy = true;
+            bool stopping = _catTraceOn;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                var c = new ExternalDataClient();
+                if (stopping) return c.StopCatTrace() ? "CAT recording stopped." : "The engine did not answer.";
+                int? minutes = c.StartCatTrace();
+                return minutes.HasValue ? $"Recording CAT traffic for {minutes.Value} minutes." : "The engine did not answer. Is the radio connected?";
+            }).ContinueWith(t =>
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                try
+                {
+                    BeginInvoke((Action)(() =>
+                    {
+                        _catTraceBusy = false;
+                        if (IsDisposed) return;
+                        string said = t.Result;
+                        if (said.StartsWith("Recording")) SetCatTraceOn(true);
+                        else if (said.StartsWith("CAT recording stopped")) SetCatTraceOn(false);
+                        try
+                        {
+                            _catTraceButton.AccessibilityObject.RaiseAutomationNotification(
+                                System.Windows.Forms.Automation.AutomationNotificationKind.Other,
+                                System.Windows.Forms.Automation.AutomationNotificationProcessing.ImportantMostRecent, said);
+                        }
+                        catch { }
+                    }));
+                }
+                catch { _catTraceBusy = false; }
+            });
+        }
+
         public SupportReportDlg(Controller ctrl, string prefillCallsign)
         {
             _ctrl           = ctrl;
@@ -230,6 +295,29 @@ namespace WSJTX_Controller
             sendGroup.Controls.Add(saveRadio);
             y += 72;
 
+            // Nexus 1.25 Record CAT traffic (2026-11-22): for a radio problem, start it, leave this
+            // window open, make the problem happen, then send the report. It ends by itself after
+            // 30 minutes; the commands go into the engine's diagnostic log, which the report carries.
+            _catTraceButton = new Button
+            {
+                Text     = CatTraceStartText,
+                Size     = new Size(200, 26),
+                Location = new Point(lx, y),
+                TabIndex = tab++,
+            };
+            _catTraceButton.Click += CatTraceButton_Click;
+            _catTraceButton.AccessibleDescription = "Leave this window open, make the problem happen, then send the report. Stops by itself after 30 minutes.";
+            var hintCat = new Label
+            {
+                Text      = "For radio problems: press Record, leave this window open, make the problem happen, then come back and send the report. It stops by itself after 30 minutes.",
+                Location  = new Point(lx, y + 30),
+                Size      = new Size(fw, 28),
+                Font      = new Font(SystemFonts.DefaultFont.FontFamily, 7.5f),
+                ForeColor = SystemColors.GrayText,
+                AutoSize  = false,
+            };
+            y += 62;
+
             // ---- Buttons ----
             y += 4;
             var okButton = new Button
@@ -260,6 +348,7 @@ namespace WSJTX_Controller
                 lblDesc,     hintDesc,  _descTextBox,
                 lblSteps,    hintSteps, _stepsTextBox,
                 _includeLogbookCheckBox, hintPrivacy, sendGroup,
+                _catTraceButton, hintCat,
                 okButton,    cancelButton,
             });
 

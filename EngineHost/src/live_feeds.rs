@@ -81,6 +81,15 @@ pub struct LiveFeedsCache {
     /// (Options > Decode Engine). Purely informational now that RBN digital is auto-wired
     /// below -- it no longer gates whether the DX Spots tab has anything to show.
     human_cluster_configured: bool,
+
+    /// Nexus 1.25's store of who heard this station (tempo_core::heard_reports, its own file and
+    /// rules: duplicates ignored, a report dated more than an hour ahead refused, the newest
+    /// 500,000 kept). Fed from the PSK Reporter live feed's reports of OUR signal; read by
+    /// GETTING_OUT for windows longer than the live hour. None until opened (--heard-reports).
+    heard: Mutex<Option<tempo_core::heard_reports::HeardReports>>,
+    /// GETTING_OUT's last read of the store: (when, window minutes, spots), reused for a minute
+    /// so the Who Hears Me refresh does not read the whole file every time.
+    heard_read: Mutex<Option<(Instant, i64, Vec<propagation::PathSpot>)>>,
 }
 
 impl LiveFeedsCache {
@@ -97,6 +106,8 @@ impl LiveFeedsCache {
             human_cluster_connected: AtomicBool::new(false),
             human_cluster_last_event: RwLock::new(None),
             human_cluster_configured: dx_cluster_addr.map(|a| !a.trim().is_empty()).unwrap_or(false),
+            heard: Mutex::new(None),
+            heard_read: Mutex::new(None),
         })
     }
 
@@ -120,6 +131,7 @@ impl LiveFeedsCache {
                         if let Some(spot) =
                             propagation::parse_pskr_mqtt_payload(topic, payload, now_unix())
                         {
+                            cache.keep_heard(&spot);
                             if let Ok(mut b) = cache.live_spots.write() {
                                 b.push(spot);
                             }
@@ -215,8 +227,11 @@ impl LiveFeedsCache {
     /// before it is left out of everything (count, furthest, the list). Echoed as `sinceUnix`.
     pub fn getting_out_json(&self, window_minutes: i64, since: Option<i64>) -> String {
         let now = now_unix();
-        let window_minutes = window_minutes.clamp(1, 60);
-        let (spots, covered_minutes) = match self.live_spots.read() {
+        let window_minutes = window_minutes.clamp(1, HEARD_MAX_WINDOW_MINUTES);
+        let (spots, covered_minutes) = if window_minutes > 60 && since.is_none() {
+            // Longer than the live hour: the kept reports (Nexus 1.25's store).
+            (self.heard_spots(now, window_minutes), None)
+        } else { match self.live_spots.read() {
             Ok(g) => {
                 let all = g.recent(now, 10 * 365 * 86_400);
                 let covered = if all.len() >= LIVE_SPOTS_CAP {
@@ -228,7 +243,7 @@ impl LiveFeedsCache {
                 (g.recent(now, window_minutes * 60), covered)
             }
             Err(_) => (Vec::new(), None),
-        };
+        } };
         let connected = self.pskr_connected.load(Ordering::Relaxed);
         let last_event_age_secs = self
             .pskr_last_event
@@ -399,6 +414,99 @@ impl LiveFeedsCache {
     }
 }
 
+/// The longest GETTING_OUT window: a week, read from the kept reports.
+const HEARD_MAX_WINDOW_MINUTES: i64 = 7 * 24 * 60;
+
+impl LiveFeedsCache {
+    /// Open Nexus's heard-reports store at `path` (Jimmy Next's folder). A file that cannot be
+    /// opened (or one a newer Nexus wrote) leaves the store off; the live hour works as before.
+    pub fn open_heard_reports(&self, path: &std::path::Path) {
+        match tempo_core::heard_reports::HeardReports::open(path) {
+            Ok(store) => {
+                if let Ok(mut g) = self.heard.lock() {
+                    *g = Some(store);
+                }
+            }
+            Err(e) => eprintln!("[heard-reports] not kept: {e}"),
+        }
+    }
+
+    /// Keep one live report when it is of OUR signal (Nexus's heard_report_rows rule).
+    fn keep_heard(&self, spot: &propagation::PathSpot) {
+        let rows = heard_report_rows(&self.mycall, std::slice::from_ref(spot));
+        if rows.is_empty() {
+            return;
+        }
+        if let Ok(mut g) = self.heard.lock() {
+            if let Some(store) = g.as_mut() {
+                if let Err(e) = store.record_answer(&self.mycall, &rows, None, now_unix()) {
+                    eprintln!("[heard-reports] a write failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// The kept reports of the last `window_minutes`, as live-feed spots for Nexus's own
+    /// getting_out. Read again at most once a minute per window.
+    fn heard_spots(&self, now: i64, window_minutes: i64) -> Vec<propagation::PathSpot> {
+        if let Ok(g) = self.heard_read.lock() {
+            if let Some((at, w, spots)) = g.as_ref() {
+                if *w == window_minutes && at.elapsed().as_secs() < 60 {
+                    return spots.clone();
+                }
+            }
+        }
+        let from = now - window_minutes * 60;
+        let rows = match self.heard.lock() {
+            Ok(g) => match g.as_ref() {
+                Some(store) => store.all().unwrap_or_default(),
+                None => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        };
+        let spots: Vec<propagation::PathSpot> = rows
+            .into_iter()
+            .filter(|r| r.time >= from && r.my_call.eq_ignore_ascii_case(&self.mycall))
+            .filter_map(|r| {
+                Some(propagation::PathSpot {
+                    time: r.time,
+                    tx_call: r.my_call,
+                    tx_grid: None,
+                    rx_call: r.rx_call,
+                    rx_grid: r.rx_grid,
+                    band: propagation::model::Band::from_label(&r.band)?,
+                    mode: r.mode,
+                    snr: r.snr,
+                    freq_mhz: r.freq_hz.map(|hz| hz as f64 / 1_000_000.0),
+                })
+            })
+            .collect();
+        if let Ok(mut g) = self.heard_read.lock() {
+            *g = Some((Instant::now(), window_minutes, spots.clone()));
+        }
+        spots
+    }
+}
+
+/// Nexus desktop's `heard_report_rows` (src-tauri lib.rs, 1.25): the reports that heard `mycall`,
+/// as the store keeps them.
+fn heard_report_rows(mycall: &str, reports: &[propagation::PathSpot]) -> Vec<tempo_core::heard_reports::HeardReport> {
+    reports
+        .iter()
+        .filter(|s| s.side(mycall) == propagation::Side::HeardMe)
+        .map(|s| tempo_core::heard_reports::HeardReport {
+            time: s.time,
+            my_call: s.tx_call.clone(),
+            rx_call: s.rx_call.clone(),
+            rx_grid: s.rx_grid.clone(),
+            band: s.band.label().to_string(),
+            freq_hz: s.freq_mhz.map(|mhz| (mhz * 1_000_000.0).round() as i64),
+            mode: s.mode.clone(),
+            snr: s.snr,
+        })
+        .collect()
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -418,6 +526,38 @@ fn is_stale(last_event_age_secs: Option<u64>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nexus 1.25's heard-reports store: a live report of OUR signal is kept (one of another
+    /// station's is not), and a window longer than the live hour reads it back.
+    #[test]
+    fn heard_reports_are_kept_and_read_for_long_windows() {
+        let dir = std::env::temp_dir().join(format!("jimmy-heard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(tempo_core::heard_reports::FILE_NAME);
+        let _ = std::fs::remove_file(&path);
+        let cache = LiveFeedsCache::new("W1AW", "FN31", None);
+        cache.open_heard_reports(&path);
+        let spot = |tx: &str, rx: &str, ago: i64| propagation::PathSpot {
+            time: now_unix() - ago,
+            tx_call: tx.into(),
+            tx_grid: Some("FN31".into()),
+            rx_call: rx.into(),
+            rx_grid: Some("JO62".into()),
+            band: propagation::model::Band::B20,
+            mode: Some("FT8".into()),
+            snr: Some(-12.0),
+            freq_mhz: None,
+        };
+        cache.keep_heard(&spot("W1AW", "DL1ABC", 3 * 3600));
+        cache.keep_heard(&spot("K4DOL", "W1AW", 3 * 3600));
+        let day: serde_json::Value = serde_json::from_str(&cache.getting_out_json(24 * 60, None)).unwrap();
+        assert_eq!(day["count"].as_u64(), Some(1), "{day}");
+        assert_eq!(day["windowMinutes"].as_i64(), Some(24 * 60));
+        let live: serde_json::Value = serde_json::from_str(&cache.getting_out_json(15, None)).unwrap();
+        assert_eq!(live["count"].as_u64(), Some(0), "the live hour is the live feed's: {live}");
+        drop(cache);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn no_event_yet_is_not_stale() {

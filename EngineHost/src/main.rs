@@ -491,6 +491,11 @@ struct Args {
     /// Jimmy's Options "Save space weather with each contact" (Settings.log_space_weather).
     /// Absent = Nexus's stock value for a new install (on). SET_LOG_SPACE_WX changes it live.
     log_space_wx: Option<bool>,
+    /// Jimmy's Options "Station power (W)" (Settings.station_power_w; 0 / absent = not set) and
+    /// Nexus 1.25's "an amplifier is inline: log my Station power" (#534,
+    /// Settings.log_station_power_with_amp). Logging only. SET_STATION_POWER changes them live.
+    station_power_w: Option<f64>,
+    amp_inline: Option<bool>,
     /// Frequency-override authority split, 2026-08-24 (independent audit finding): mirrors
     /// Jimmy's own Options>Frequencies per-band/per-mode overrides (FrequencySettings.cs) into
     /// Nexus's own documented working-frequency override mechanism (Engine::band_plan's own doc
@@ -610,6 +615,8 @@ fn parse_args() -> Args {
     let mut tune_timeout_secs: Option<u32> = None;
     let mut clock_check: Option<bool> = None;
     let mut log_space_wx: Option<bool> = None;
+    let mut station_power_w: Option<f64> = None;
+    let mut amp_inline: Option<bool> = None;
     let mut tx_watchdog_min: u32 = 6; // Nexus's own Settings::default() -- see Args::tx_watchdog_min's own comment
     let mut working_frequencies: Vec<tempo_app::settings::WorkingFreq> = Vec::new(); // empty = Nexus's own stock table
 
@@ -701,6 +708,24 @@ fn parse_args() -> Args {
             "--log-dir" => {
                 log_dir = it.next().filter(|v| !v.trim().is_empty()).map(std::path::PathBuf::from);
             }
+            "--diag-log" => {
+                // Nexus's own diagnostic log (tempo_core::applog, nexus-diag.log): startup, CAT and
+                // audio open/failure, the receive-silence transitions, and Record CAT traffic's
+                // lines. Credential-shaped text is masked by applog itself; ~8 MB at most.
+                if let Some(p) = it.next().filter(|v| !v.trim().is_empty()) {
+                    tempo_core::applog::init(std::path::PathBuf::from(p));
+                }
+            }
+            "--heard-reports" => {
+                if let Some(p) = it.next().filter(|v| !v.trim().is_empty()) {
+                    let _ = HEARD_REPORTS_PATH.set(std::path::PathBuf::from(p));
+                }
+            }
+            "--all-txt" => {
+                if let Some(p) = it.next().filter(|v| !v.trim().is_empty()) {
+                    let _ = ALL_TXT_PATH.set(std::path::PathBuf::from(p));
+                }
+            }
             "--tx-watchdog-min" => {
                 if let Some(v) = it.next() {
                     tx_watchdog_min = v.parse().unwrap_or(tx_watchdog_min);
@@ -711,6 +736,12 @@ fn parse_args() -> Args {
             }
             "--log-space-wx" => {
                 log_space_wx = it.next().map(|v| v.eq_ignore_ascii_case("on"));
+            }
+            "--station-power" => {
+                station_power_w = it.next().and_then(|v| v.parse::<f64>().ok()).filter(|w| w.is_finite() && *w > 0.0);
+            }
+            "--amp-inline" => {
+                amp_inline = it.next().map(|v| v.eq_ignore_ascii_case("on"));
             }
             "--tune-timeout-secs" => {
                 tune_timeout_secs = it.next().and_then(|v| v.parse().ok()).filter(|v: &u32| *v >= 1);
@@ -764,6 +795,8 @@ fn parse_args() -> Args {
         tune_timeout_secs,
         clock_check,
         log_space_wx,
+        station_power_w,
+        amp_inline,
         working_frequencies,
         log_dir,
         no_radio,
@@ -805,6 +838,9 @@ fn parse_args() -> Args {
 ///   HALT_TX                             -- calls Engine::halt_tx(). Responds "OK".
 ///   SET_TX_ENABLED <0|1>                -- calls Engine::set_tx_enabled(bool). Responds "OK".
 ///   SET_PSKREPORTER <0|1>                -- calls Engine::set_pskreporter(bool). Responds "OK".
+///   CAT_TRACE_START / CAT_TRACE_STOP     -- Nexus 1.25 Record CAT traffic into --diag-log (30 min
+///                                           / 2 MB, ends by itself). "OK <minutes>" / "OK".
+///   CAT_TRACE_STATUS                     -- "on <seconds left>" or "off".
 ///   SET_MIC_GAIN <0.0-1.0>               -- calls Engine::set_mic_gain(f32). Responds "OK" or
 ///                                          "ERR <message>". Radio-side (CAT) mic gain, applied
 ///                                          only for manual Phone/PTT operation (tempo-audio/
@@ -1446,6 +1482,29 @@ fn kenwood_ac_digits(reply: &str) -> Option<[char; 3]> {
     (d.len() == 3 && d.iter().all(|c| c.is_ascii_digit())).then(|| [d[0], d[1], d[2]])
 }
 
+/// Where ALL.TXT is appended (`--all-txt <file>`, Jimmy Next's own folder). Unset: the lines
+/// Nexus buffers are still drained (it caps them anyway) but written nowhere.
+static ALL_TXT_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+/// Nexus 1.25's heard-reports store (`--heard-reports <file>`, Jimmy Next's own folder).
+static HEARD_REPORTS_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Nexus desktop's `flush_all_txt` (src-tauri lib.rs): append the WSJT-X-format ALL.TXT lines,
+/// every decode -- the JTDX decoder's unchecked `^` rows included, which Jimmy itself never
+/// sees -- and every transmission. Best effort: a write that fails is dropped, never retried.
+fn flush_all_txt(lines: &[String]) {
+    let Some(path) = ALL_TXT_PATH.get() else { return };
+    if lines.is_empty() {
+        return;
+    }
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{}", lines.join("\n"));
+    }
+}
+
 fn handle_control_connection(
     mut stream: std::net::TcpStream,
     engine: Arc<Mutex<Engine>>,
@@ -1469,13 +1528,32 @@ fn handle_control_connection(
             for dev in devices {
                 let _ = writeln!(stream, "{}", dev.name);
             }
+        } else if line == "CAT_TRACE_START" {
+            // Nexus 1.25 Record CAT traffic (tempo_audio::cat_trace): the radio-control commands
+            // and the radio's answers go to the diagnostic log (--diag-log) for 30 minutes or
+            // 2 MB, then it ends by itself. Off at every launch. Answers the minutes it will run.
+            let secs = tempo_audio::cat_trace::start().as_secs();
+            let _ = writeln!(stream, "OK {}", secs / 60);
+        } else if line == "CAT_TRACE_STOP" {
+            tempo_audio::cat_trace::stop();
+            let _ = writeln!(stream, "OK");
+        } else if line == "CAT_TRACE_STATUS" {
+            // "on <seconds left>" or "off" (a trace whose time is up ends here).
+            match tempo_audio::cat_trace::time_left() {
+                Some(left) => {
+                    let _ = writeln!(stream, "on {}", left.as_secs());
+                }
+                None => {
+                    let _ = writeln!(stream, "off");
+                }
+            }
         } else if line == "SNAPSHOT" {
             // Poisoned-lock tolerant, same reasoning as Nexus's own src-tauri: a panic
             // elsewhere while holding this lock must not also take the control channel's
             // ability to report state down with it.
             // split_provenance is read under the SAME lock as the snapshot, so its flags line up
             // with this snapshot's recent_decodes rows (built 1:1, in order, from last_decodes).
-            let (mut snap, special_op, mut split_provenance, counted) = {
+            let (mut snap, special_op, mut split_provenance, counted, all_txt) = {
                 let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
                 // Nexus-owned logbook only (logbook_host.rs): Nexus's own resend of a change the
                 // disk refused for a reason that can pass -- where the Nexus desktop makes the same
@@ -1488,8 +1566,12 @@ fn handle_control_connection(
                     special_op_wire(&eng),
                     eng.last_decodes_multiplexed().to_vec(),
                     eng.last_decodes_counted().to_vec(),
+                    // ALL.TXT, as Nexus desktop's get_snapshot drains it: taken under the lock,
+                    // written after it is released so the poll never waits on the disk.
+                    eng.take_all_txt_pending(),
                 )
             };
+            flush_all_txt(&all_txt);
             // Nexus 1.25 JTDX-style decoder: Jimmy gets only the rows Nexus's own automation acts
             // on. An unchecked `^` row is dropped unless Nexus counted it (a repeat of a checked
             // message); with no verdict in step, every unchecked row is dropped.
@@ -1919,6 +2001,24 @@ fn handle_control_connection(
                 }
                 None => {
                     let _ = writeln!(stream, "ERR SET_LOG_SPACE_WX takes on or off");
+                }
+            }
+        } else if let Some(v) = line.strip_prefix("SET_STATION_POWER ") {
+            // Options > General "Station power (W)" and "An amplifier is inline" (Nexus 1.25,
+            // #534): "<watts> on|off", 0 watts = not set. Logging only: nothing on the transmit
+            // path reads either.
+            let mut w = v.split_whitespace();
+            match (w.next().and_then(|x| x.parse::<f64>().ok()), w.next()) {
+                (Some(watts), Some(amp @ ("on" | "off"))) if watts.is_finite() && watts >= 0.0 => {
+                    let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut s = eng.settings().clone();
+                    s.station_power_w = (watts > 0.0).then_some(watts);
+                    s.log_station_power_with_amp = amp == "on";
+                    eng.apply_settings(s);
+                    let _ = writeln!(stream, "OK");
+                }
+                _ => {
+                    let _ = writeln!(stream, "ERR SET_STATION_POWER takes <watts> on|off");
                 }
             }
         } else if let Some(json) = line.strip_prefix("SET_WORKING_FREQUENCIES ") {
@@ -2351,6 +2451,10 @@ fn handle_control_connection(
                 } else {
                     true // no radio loop: nothing was ever keyed
                 };
+                // ALL.TXT's last lines, after the unkey (Nexus's quit_cleanup order): what the
+                // poll had not drained, with our own FT Tx line held for the end of its over.
+                let all_txt = engine.lock().unwrap_or_else(|e| e.into_inner()).take_all_txt_pending_on_quit();
+                flush_all_txt(&all_txt);
                 let reply = match &log_host {
                     Some(host) => {
                         let mut v = serde_json::to_value(logbook_host::close(host, &engine, logbook_host::DURABLE_WAIT))
@@ -2842,6 +2946,8 @@ fn main() {
         tune_timeout_secs: args.tune_timeout_secs.unwrap_or_else(|| Settings::default().tune_timeout_secs),
         clock_check: args.clock_check.unwrap_or_else(|| Settings::default().clock_check),
         log_space_weather: args.log_space_wx.unwrap_or_else(|| Settings::default().log_space_weather),
+        station_power_w: args.station_power_w,
+        log_station_power_with_amp: args.amp_inline.unwrap_or(false),
         // Frequency-override authority split, 2026-08-24 -- see Args::working_frequencies' own
         // comment. Engine::band_plan (read by Engine::set_tier's own internal auto-QSY on every
         // tier switch) applies these the same way Nexus's own Settings panel would, so Nexus
@@ -3006,6 +3112,9 @@ fn main() {
         &args.mygrid,
         args.dx_cluster_addr.as_deref(),
     );
+    if let Some(p) = HEARD_REPORTS_PATH.get() {
+        live_feeds_cache.open_heard_reports(p);
+    }
     live_feeds_cache.spawn_feed_threads(args.dx_cluster_addr.as_deref());
 
     // Independent audit finding 1, 2026-08-23: bind the control-port listener HERE, on main's

@@ -514,6 +514,8 @@ namespace WSJTX_Controller
     {
         // Jimmy Next's own lookups (set by the Controller): its QRZ or HamQTH login, its cache.
         internal static LookupManager Lookups;
+        // The operator's own call (set by the Controller), for Nexus 1.25's refusal check below.
+        internal static Func<string> OwnCall;
         private const int MaxLookups = 250;    // a run's limit, as Nexus's own update keeps
         private const int PaceMs = 2000;       // one lookup every 2 seconds, as Nexus's
 
@@ -590,10 +592,24 @@ namespace WSJTX_Controller
                     asked++;
                     LookupRecord live = null;
                     try { live = await Lookups.LookupPrimaryAsync(call); } catch { }
-                    // Three in a row with no record is how QRZ refuses lookups: stop, as Nexus does.
+                    // Three in a row with no record is either calls QRZ does not know, or QRZ refusing
+                    // (its daily limit, a lapsed subscription). Nexus 1.25 (callbook_update.rs
+                    // REFUSALS, Refusal::OwnCallNoRecord) tells them apart by looking up the
+                    // station's own call, paced and counted like any lookup: a record means QRZ is
+                    // answering, so the run goes on; none means QRZ is refusing, and the run stops.
                     misses = live == null ? misses + 1 : 0;
-                    if (misses >= 3) { stoppedWhy = "Three lookups in a row found nothing; the callbook may be refusing lookups. Stopped."; break; }
                     await Task.Delay(PaceMs);
+                    if (misses >= 3)
+                    {
+                        string own = OwnCall?.Invoke()?.Trim();
+                        if (string.IsNullOrEmpty(own) || asked >= MaxLookups) { stoppedWhy = "Three lookups in a row found nothing; the callbook may be refusing lookups. Stopped."; break; }
+                        asked++;
+                        LookupRecord mine = null;
+                        try { mine = await Lookups.LookupPrimaryAsync(own); } catch { }
+                        await Task.Delay(PaceMs);
+                        if (mine == null) { stoppedWhy = "The callbook found nothing, not even your own call; it may be refusing lookups. Stopped."; break; }
+                        misses = 0;
+                    }
                 }
                 try { rec = Lookups?.Build(call); } catch { }
                 object ans = NexusLogTools.AnswerOf(call, rec);

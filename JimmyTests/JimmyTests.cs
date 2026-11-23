@@ -2081,6 +2081,7 @@ static class JimmyTests
         SupportLocalChoiceTests();
         DownloadedChangesTests();
         Nexus119Tests();
+        Nexus125Tests();
         ModalElsewhereTests();
         LookupDataScheduleTests();
         ServicesPageTests();
@@ -24548,6 +24549,96 @@ static class JimmyTests
     // ── 2.0.80 (W0CAS): the support report carries the whole Jimmy Next folder -- settings
     // with passwords blanked, lookup data and key files left out, the logbook only when the
     // operator leaves "Include my logbook" checked; the logbook-move reports always. ──
+    // Nexus 1.25 (2026-11-22): ALL.TXT's last days and Nexus's diagnostic log in a support
+    // report, Who Hears Me's longer windows, the POTA board's place filters, and the audio-error
+    // line said once (no receive audio, PTT merged with a refused over).
+    static void Nexus125Tests()
+    {
+        Console.WriteLine("\n── Nexus 1.25: ALL.TXT, diagnostic log, places, audio line ──");
+        // ALL.TXT: lines from the cut-off day on, by their own yyMMdd stamp.
+        byte[] all = System.Text.Encoding.ASCII.GetBytes(
+            "261118_120000    14.074 Rx FT8    -5  0.1 1500 CQ K1ABC FN42\n" +
+            "261120_000015    14.074 Rx FT8   -12  0.2  900 KF4CCG NW8D RR73 ^\n" +
+            "261122_163000    14.074 Tx FT8     0  0.0 1500 NW8D KF4CCG R-04\n");
+        string kept = System.Text.Encoding.ASCII.GetString(SupportReportBuilder.AllTxtSince(all, new DateTime(2026, 11, 20)));
+        Check("ALL.TXT: the older day is left out, the rest kept whole",
+            !kept.Contains("261118") && kept.StartsWith("261120_000015") && kept.Contains("R-04"), true);
+        Check("ALL.TXT: nothing that recent, nothing kept", SupportReportBuilder.AllTxtSince(all, new DateTime(2026, 11, 23)).Length == 0, true);
+
+        string root = Path.Combine(Path.GetTempPath(), "JimmyNexus125_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var now = DateTime.Now;
+            foreach (var f in new[] { "ALL.TXT", "nexus-diag.log", "nexus-diag.1.log", "heard-reports.sqlite" })
+                File.WriteAllText(Path.Combine(root, f), "x");
+            var plan = SupportReportBuilder.PlanFocusedData(root, true, null, now);
+            var allTxt = plan.First(p => p.Rel == "ALL.TXT");
+            Check("report: ALL.TXT goes in, from three days back",
+                allTxt.Include && allTxt.SinceUtc == now.ToUniversalTime().Date.AddDays(-2), true);
+            Check("report: both diagnostic log generations go in",
+                plan.First(p => p.Rel == "nexus-diag.log").Include && plan.First(p => p.Rel == "nexus-diag.1.log").Include, true);
+            Check("report: the heard-reports store stays out", plan.First(p => p.Rel == "heard-reports.sqlite").Include, false);
+        }
+        finally { try { Directory.Delete(root, true); } catch { } }
+
+        // Who Hears Me's longer windows are said in hours and days.
+        CheckStr("heard summary, a day", OtaSpotsWindow.FormatHeardMeSummary(new GettingOutResult { Count = 3, WindowMinutes = 1440 }),
+            "3 stations heard you in the last 24 hours.");
+        CheckStr("heard summary, a week", OtaSpotsWindow.FormatHeardMeSummary(new GettingOutResult { Count = 0, WindowMinutes = 10080 }),
+            "No reports of your signal in the last 7 days.");
+
+        // POTA/SOTA places: by continent name and by country; an unplaced spot only under "All".
+        var ve = new OtaSpot { Activator = "VE3/K1ABC", Country = "Canada", Continent = "NA" };
+        var nowhere = new OtaSpot { Activator = "X" };
+        Check("places: a continent passes its spots", OtaSpotsWindow.PassesPlace(ve, "North America", null), true);
+        Check("places: another continent does not", OtaSpotsWindow.PassesPlace(ve, "Europe", null), false);
+        Check("places: by country", OtaSpotsWindow.PassesPlace(ve, null, "Canada") && !OtaSpotsWindow.PassesPlace(ve, null, "United States"), true);
+        Check("places: an unplaced spot passes only All", OtaSpotsWindow.PassesPlace(nowhere, null, null) && !OtaSpotsWindow.PassesPlace(nowhere, "Europe", null), true);
+
+        // Mode and band filters (2026-11-22): an unchecked mode or band hides its spots.
+        var ssb = new OtaSpot { Mode = "usb", FreqKhz = 14285 };
+        var ft8 = new OtaSpot { Mode = "FT8", FreqKhz = 7074 };
+        var odd = new OtaSpot { Mode = "", FreqKhz = 5000 };
+        CheckStr("filters: USB is listed as SSB", OtaSpotsWindow.OtaModeOf(ssb), "SSB");
+        CheckStr("filters: no mode is Unknown, off-band is Other", OtaSpotsWindow.OtaModeOf(odd) + "/" + OtaSpotsWindow.OtaBandOf(odd), "Unknown/Other");
+        var hideSsb = OtaSpotsWindow.ParseHidden("SSB");
+        Check("filters: a hidden mode hides its spots only",
+            !OtaSpotsWindow.PassesModeBand(ssb, hideSsb, null) && OtaSpotsWindow.PassesModeBand(ft8, hideSsb, null), true);
+        Check("filters: a hidden band hides its spots only",
+            !OtaSpotsWindow.PassesModeBand(ft8, null, OtaSpotsWindow.ParseHidden("40m,6m")) && OtaSpotsWindow.PassesModeBand(ssb, null, OtaSpotsWindow.ParseHidden("40m,6m")), true);
+
+        // The computer in a support report: hardware only.
+        string cpu = SupportReportBuilder.ProcessorText(), mem = SupportReportBuilder.MemoryText();
+        Check("report: processor named, with cores", cpu.Contains("logical cores") && !cpu.StartsWith("unknown"), true);
+        Check("report: memory in GB", mem.Contains(" GB, ") && mem.Contains("% in use"), true);
+        Check("report: no computer or user name", !(cpu + mem + SupportReportBuilder.PowerText() + SupportReportBuilder.ScreenReaderText())
+            .Contains(Environment.MachineName) && !(cpu + mem).Contains(Environment.UserName), true);
+
+        // The audio-error line: no receive audio said once and "back" once; a card just
+        // reopened and waiting is not news; a PTT line inside a refused over is not said again.
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        Check("rx audio: a reopened card waiting is not said", wc.ApplyReceiveAudioLine("noReceiveAudio", "Audio device reopened, waiting for samples…") == null, true);
+        string silent = "Audio input is open but delivering pure silence — every sample is zero.";
+        CheckStr("rx audio: said once", wc.ApplyReceiveAudioLine("noReceiveAudio", silent), "No receive audio: " + silent);
+        Check("rx audio: not again while it lasts", wc.ApplyReceiveAudioLine("noReceiveAudio", "Audio device reopened, waiting for samples…") == null, true);
+        CheckStr("rx audio: back, once", wc.ApplyReceiveAudioLine(null, null), "Receive audio: back.");
+        Check("rx audio: quiet after", wc.ApplyReceiveAudioLine(null, null) == null, true);
+        var t = new DateTime(2026, 11, 22, 12, 0, 0, DateTimeKind.Utc);
+        string ptt = "The rig didn't accept PTT — check your PTT method and CAT/port.";
+        CheckStr("ptt: a refused over carries Nexus's line", wc.PttLineForKeyRefusal("ptt", ptt, t), ptt);
+        Check("ptt: ...and it is not said again on its own", wc.ApplyPttLine("ptt", ptt, t.AddSeconds(3)) == null, true);
+        wc.ApplyPttLine(null, null, t.AddSeconds(30));
+        Check("ptt: a line alone waits for a refused over first", wc.ApplyPttLine("pttUnconfirmed", "The rig did not answer the PTT key in time.", t.AddSeconds(60)) == null, true);
+        CheckStr("ptt: then it is said", wc.ApplyPttLine("pttUnconfirmed", "The rig did not answer the PTT key in time.", t.AddSeconds(63)),
+            "PTT not confirmed: The rig did not answer the PTT key in time.");
+    }
+
     static void SupportReportFolderTests()
     {
         Console.WriteLine("\n── Support report: focused contents and readable names (handoffs 26, 27) ──");

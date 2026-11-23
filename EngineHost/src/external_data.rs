@@ -37,14 +37,10 @@ const SPOT_REFRESH: Duration = Duration::from_secs(90);
 const SPACE_WX_REFRESH: Duration = Duration::from_secs(600);
 /// NOAA's daily solar indices change once a day; every three hours is plenty (2026-10-04).
 const SOLAR_HISTORY_REFRESH: Duration = Duration::from_secs(3 * 3600);
-/// NOAA's observed sunspot numbers, which carry one more day than daily-solar-indices.txt: a count
-/// dated TODAY (2026-11-15). Read hourly, as Nexus desktop reads the daily file -- about 1 KB per
-/// month of history.
-///
-/// JIMMY'S OWN, until Nexus has it: suggested upstream as kd9taw/Nexus#523. When Nexus shows
-/// today's count itself, switch to Nexus's and delete this feed (OBSERVED_SSN_*, observed_ssn,
-/// parse_observed_ssn, SolarHistoryPayload.observed_ssn, and the C# SolarHistoryResult.ObservedSsn).
-const OBSERVED_SSN_URL: &str = "https://services.swpc.noaa.gov/json/solar-cycle/swpc_observed_ssn.json";
+/// Today's sunspot count so far, read hourly as Nexus desktop reads it (Nexus 1.25, kd9taw/Nexus#523):
+/// Nexus's own fetch (`swpc::fetch_observed_ssn`) and its rule (`propagation::ssn_today`) -- only a
+/// count dated TODAY (UTC) is kept; a fetch that fails keeps the last one. Was Jimmy's own feed and
+/// parser until 1.25 (2026-11-15 .. 2026-11-22).
 const OBSERVED_SSN_REFRESH: Duration = Duration::from_secs(3600);
 /// GOES X-ray, on its own (operator, 2026-10-08): a flare's radio blackout reaches the operator
 /// within about a minute instead of waiting up to ten for the SFI/Kp refresh above -- Nexus's own
@@ -107,7 +103,7 @@ pub struct SharedCache {
     // error like every cache here: a failed fetch leaves the last good copy, with its own dates.
     solar_history: RwLock<Cached<DailySolarIndices>>,
     /// The newest dated entry of NOAA's observed sunspot numbers: (00:00 UT of its day, count).
-    observed_ssn: RwLock<Cached<(i64, f32)>>,
+    observed_ssn: RwLock<Cached<Option<propagation::SsnToday>>>,
     solar_wind: RwLock<Cached<SolarWind>>,
     // The fast-lane X-ray flux (W/m², GOES long band), its own age and error -- separate from
     // space_wx's, so the other readings keep their own ages.
@@ -242,9 +238,10 @@ impl SharedCache {
         });
         let cache = self.clone();
         std::thread::spawn(move || loop {
-            let r = contests::fetch(OBSERVED_SSN_URL).and_then(|body| {
-                parse_observed_ssn(&body).ok_or_else(|| "observed sunspot numbers: no dated count in the reply".to_string())
-            });
+            // As Nexus desktop's get_solar_indices: records that read replace what was held, even
+            // with no row for today yet (then nothing is shown); a failed fetch keeps the last one.
+            let now = now_unix();
+            let r = swpc::fetch_observed_ssn().map(|records| propagation::ssn_today(&records, now));
             store(&cache.observed_ssn, r);
             std::thread::sleep(OBSERVED_SSN_REFRESH);
         });
@@ -452,7 +449,9 @@ impl SharedCache {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .value
-                .map(|(day_unix, ssn)| ObservedSsnPayload { day_unix, ssn }),
+                .as_ref()
+                .and_then(|v| v.as_ref())
+                .map(|t| ObservedSsnPayload { day_unix: t.day_unix, ssn: t.ssn }),
         };
         serde_json::to_string(&payload).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     }
@@ -541,7 +540,7 @@ impl SharedCache {
             .iter()
             .map(|spot| {
                 let location = parks.get(&spot.reference).filter(|l| !l.is_empty()).map(String::as_str);
-                SpotWire { spot, location, states: spot_states(spot, location) }
+                SpotWire::new(spot, location)
             })
             .collect();
         let payload = SpotsPayload {
@@ -819,8 +818,8 @@ struct SolarHistoryPayload {
     days: Vec<SolarDayPayload>,
     fetched_age_secs: Option<u64>,
     error: Option<String>,
-    /// NOAA's newest observed sunspot count with its day -- usually TODAY, one day newer than
-    /// `days` (see OBSERVED_SSN_URL). Absent until first read.
+    /// Today's sunspot count so far with its day (Nexus's `ssn_today`), one day newer than `days`.
+    /// Absent until read, and while NOAA has no row for today yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     observed_ssn: Option<ObservedSsnPayload>,
 }
@@ -830,37 +829,6 @@ struct SolarHistoryPayload {
 struct ObservedSsnPayload {
     day_unix: i64,
     ssn: f32,
-}
-
-/// The newest dated count in NOAA's swpc_observed_ssn.json (`[{"Obsdate":"YYYY-MM-DDT00:00:00",
-/// "swpc_ssn":N}, ...]`, oldest first): (00:00 UT of its day, count). An entry without a readable
-/// date or count is skipped, never guessed.
-fn parse_observed_ssn(body: &str) -> Option<(i64, f32)> {
-    let v: serde_json::Value = serde_json::from_str(body).ok()?;
-    v.as_array()?
-        .iter()
-        .filter_map(|e| {
-            let date = e.get("Obsdate")?.as_str()?;
-            let ssn = e.get("swpc_ssn")?.as_f64()? as f32;
-            let mut ymd = date.get(..10)?.split('-').map(|x| x.parse::<i64>().ok());
-            let (y, m, d) = (ymd.next()??, ymd.next()??, ymd.next()??);
-            if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-                return None;
-            }
-            Some((days_from_civil(y, m, d) * 86_400, ssn))
-        })
-        .max_by_key(|(day, _)| *day)
-}
-
-/// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's days_from_civil).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
 }
 
 #[derive(serde::Serialize)]
@@ -897,6 +865,20 @@ struct SpotWire<'a> {
     location: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     states: Vec<String>,
+    /// Where the activator is (Nexus 1.25 `propagation::pota::spot_country`): the DXCC entity as
+    /// cty.dat names it and its continent code ("NA"), for the board's filters. Absent when
+    /// nothing places the spot -- never a guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    country: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continent: Option<&'static str>,
+}
+
+impl<'a> SpotWire<'a> {
+    fn new(spot: &'a OtaSpot, location: Option<&'a str>) -> Self {
+        let (country, continent) = propagation::pota::spot_country(spot);
+        SpotWire { spot, location, states: spot_states(spot, location), country, continent }
+    }
 }
 
 /// Where the activation is: Nexus's own answer for the spot; for a park it has none for, the
@@ -1185,22 +1167,24 @@ mod space_wx_wire_tests {
     }
 
     #[test]
-    fn observed_ssn_takes_the_newest_dated_count() {
-        let body = r#"[{"Obsdate":"2026-11-14T00:00:00","swpc_ssn":121},
-                      {"Obsdate":"2026-11-15T00:00:00","swpc_ssn":96},
-                      {"Obsdate":"bad","swpc_ssn":5},
-                      {"Obsdate":"2026-11-16T00:00:00","swpc_ssn":null}]"#;
-        // 2026-11-15 00:00 UT = 1_794_700_800.
-        assert_eq!(parse_observed_ssn(body), Some((1_794_700_800, 96.0)));
-        assert_eq!(days_from_civil(1970, 1, 1), 0);
-        assert_eq!(parse_observed_ssn("<html>error</html>"), None);
-        assert_eq!(parse_observed_ssn("[]"), None);
+    fn observed_ssn_is_nexus_today_count() {
+        // 2026-11-15 00:00 UT = 1_794_700_800. Nexus's rule: only a count dated today is kept.
+        let records = propagation::parse_observed_ssn(
+            r#"[{"Obsdate":"2026-11-14T00:00:00","swpc_ssn":121},{"Obsdate":"2026-11-15T00:00:00","swpc_ssn":96}]"#,
+        )
+        .unwrap();
+        let today = propagation::ssn_today(&records, 1_794_700_800 + 3600);
+        assert_eq!(today.as_ref().map(|t| (t.day_unix, t.ssn)), Some((1_794_700_800, 96.0)));
+        assert!(propagation::ssn_today(&records, 1_794_700_800 + 86_400).is_none(), "no row for the 16th yet");
 
         let cache = SharedCache::new("EN52");
-        cache.observed_ssn.write().unwrap().value = Some((1_794_700_800, 96.0));
+        cache.observed_ssn.write().unwrap().value = Some(today);
         let v: serde_json::Value = serde_json::from_str(&cache.solar_history_json()).unwrap();
         assert_eq!(v["observedSsn"]["dayUnix"].as_i64(), Some(1_794_700_800));
         assert_eq!(v["observedSsn"]["ssn"].as_f64(), Some(96.0));
+        cache.observed_ssn.write().unwrap().value = Some(None);
+        let v: serde_json::Value = serde_json::from_str(&cache.solar_history_json()).unwrap();
+        assert!(v.get("observedSsn").is_none(), "no count for today: nothing shown");
     }
 
     #[test]
@@ -1800,7 +1784,7 @@ mod spot_state_tests {
         assert!(spot_states(&spot, Some("FR-ARA")).is_empty(), "another country's region is not a state");
         spot.states = vec!["US-ID".to_string()];
         assert_eq!(spot_states(&spot, Some("US-MT")), ["US-ID"], "Nexus's own answer for the spot comes first");
-        let wire = serde_json::to_value(SpotWire { spot: &spot, location: None, states: spot_states(&spot, None) }).unwrap();
+        let wire = serde_json::to_value(SpotWire::new(&spot, None)).unwrap();
         assert_eq!(wire["states"], serde_json::json!(["US-ID"]));
         assert_eq!(propagation::pota::sota_state("W7M/MT-001"), Some("US-MT"), "a summit is placed by SOTA's own data");
     }
