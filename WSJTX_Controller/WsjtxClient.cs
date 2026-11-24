@@ -4596,7 +4596,17 @@ namespace WSJTX_Controller
 
             if (theirHz > 0) DirectSetRxOffset(theirHz);
 
-            if (!answeringOurCq)
+            // A station answering a call of ours gets the reply where it heard us, as Nexus and
+            // WSJT-X do once a contact is under way -- never a fresh Best Free pick (KF4CCG
+            // 2026-11-23, see _calledOnHz). Hold and a manual move this contact still win.
+            uint heardUsHz = !answeringOurCq && replySem.AddressedToMe && !_manualFreqThisQso
+                && ctrl.txFreqMode != TxFreqMode.Hold ? CalledOnHz(nCall) : 0;
+            if (heardUsHz > 0)
+            {
+                DebugOutput($"{Time()} ReplyTo: '{nCall}' answered our call -- Tx stays at {heardUsHz} Hz, where they heard us");
+                DirectSetTxOffset(heardUsHz);
+            }
+            else if (!answeringOurCq)
             {
                 switch (ctrl.txFreqMode)
                 {

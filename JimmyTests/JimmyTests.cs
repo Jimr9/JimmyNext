@@ -18920,7 +18920,7 @@ static class JimmyTests
             const int theirHz = 1234;
 
             // Runs one reply to `message` in `mode`, returns the commands the stub saw.
-            System.Collections.Generic.List<string> RunReply(WsjtxClient.TxFreqMode mode, string message, string curCmd)
+            System.Collections.Generic.List<string> RunReply(WsjtxClient.TxFreqMode mode, string message, string curCmd, int calledOnHz = 0)
             {
                 var ctrl = new Controller();
                 ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
@@ -18934,6 +18934,13 @@ static class JimmyTests
                 wc.TestStopPollTimer();
                 wc.TestSetBestOffsets(2500, 2500);   // so BestFree has a slot to send
                 if (curCmd != null) wc.TestSetCurCmd(curCmd);
+                // Our earlier over to 9V1SH, as Nexus reports it (a Mine row).
+                if (calledOnHz > 0)
+                    wc.TestRememberCalledOnHz(new[] { new DirectDecodeRow
+                    {
+                        Mine = true, TxAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 60,
+                        FreqHz = calledOnHz, Message = "<9V1SH> KB0UZT FN42",
+                    } });
 
                 const string call = "9V1SH";
                 var dmsg = new EnqueueDecodeMessage
@@ -18984,6 +18991,17 @@ static class JimmyTests
                 Check($"Caller answers our CQ ({mode}): RX follows the caller (SET_RX_OFFSET 1234)", HasExact(ans, "SET_RX_OFFSET 1234"), true);
                 Check($"Caller answers our CQ ({mode}): our CQ TX frequency is preserved (no SET_TX_OFFSET)", Has(ans, "SET_TX_OFFSET"), false);
             }
+
+            // KF4CCG 2026-11-23 (3B8/E70A): a station we called at 401 Hz answers us. The report
+            // goes out at 401, where it heard us -- not at Best Free's new pick.
+            var answered = RunReply(WsjtxClient.TxFreqMode.BestFree, "KB0UZT 9V1SH -07", null, 401);
+            Check("Station answers our call (BestFree): TX stays where it heard us (SET_TX_OFFSET 401)", HasExact(answered, "SET_TX_OFFSET 401"), true);
+            Check("Station answers our call (BestFree): no Best Free move (no SET_TX_OFFSET 2500)", HasExact(answered, "SET_TX_OFFSET 2500"), false);
+            var answeredHold = RunReply(WsjtxClient.TxFreqMode.Hold, "KB0UZT 9V1SH -07", null, 401);
+            Check("Station answers our call (Hold): TX left alone (no SET_TX_OFFSET)", Has(answeredHold, "SET_TX_OFFSET"), false);
+            // Control: never called them, so Best Free picks as before.
+            var unknown = RunReply(WsjtxClient.TxFreqMode.BestFree, "KB0UZT 9V1SH -07", null);
+            Check("Station we never called answers (BestFree): Best Free pick as before (SET_TX_OFFSET 2500)", HasExact(unknown, "SET_TX_OFFSET 2500"), true);
         }
         catch (Exception ex)
         {

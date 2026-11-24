@@ -1485,6 +1485,37 @@ namespace WSJTX_Controller
                 AnnounceOverSwitched(_onAirTxMsg);
         }
 
+        // Where each station last heard us: the audio frequency of our newest over to that call,
+        // from Nexus's own record of what it keyed (its Mine rows). A station that answers a call
+        // of ours gets the reply there (ReplyTo) -- KF4CCG 2026-11-23: 3B8/E70A answered a call
+        // sent at 401 Hz and Best Free moved the R-07 to 1421 Hz; 3B8 never copied it. Cleared
+        // with the band's audio offsets (ClearAudioOffsets).
+        private readonly Dictionary<string, (long At, uint Hz)> _calledOnHz =
+            new Dictionary<string, (long At, uint Hz)>(StringComparer.OrdinalIgnoreCase);
+        private const long CalledOnHzMaxAgeSec = 15 * 60;
+
+        private void RememberCalledOnHz(IEnumerable<DirectDecodeRow> rows)
+        {
+            if (rows == null) return;
+            foreach (var row in rows)
+            {
+                if (row == null || !row.Mine || !row.TxAt.HasValue || row.FreqHz <= 0 || string.IsNullOrEmpty(row.Message)) continue;
+                string to = WsjtxMessage.ToCall(WsjtxMessage.NormalizeDecodedMessage(row.Message));
+                if (string.IsNullOrEmpty(to) || to == "CQ") continue;
+                if (_calledOnHz.TryGetValue(to, out var had) && had.At > row.TxAt.Value) continue;
+                _calledOnHz[to] = (row.TxAt.Value, (uint)Math.Round(row.FreqHz));
+            }
+        }
+
+        // 0 when we have not called this station recently.
+        private uint CalledOnHz(string call)
+        {
+            if (string.IsNullOrEmpty(call) || !_calledOnHz.TryGetValue(call, out var c)) return 0;
+            return DateTimeOffset.UtcNow.ToUnixTimeSeconds() - c.At <= CalledOnHzMaxAgeSec ? c.Hz : 0;
+        }
+
+        internal void TestRememberCalledOnHz(IEnumerable<DirectDecodeRow> rows) => RememberCalledOnHz(rows);
+
         // A late decode switched the over already on the air (Nexus 1.20's mid-over switch): said
         // once, as the "Sending ..." notification, wherever focus is (operator, 2026-10-22). With
         // the status box focused its own render already says it, so it is not said twice.
@@ -2169,6 +2200,7 @@ namespace WSJTX_Controller
             transmitting = radio.Transmitting;
             bool transmittingChanged = wasTransmitting != transmitting;
             TrackOnAirTxMsg(snap, transmittingChanged && transmitting);
+            RememberCalledOnHz(snap.RecentDecodes);
             _directPollSeq++;
             // Direct mode's own real transmitting-flag transition -- edge-triggered (only on an
             // actual change), matching the UDP path's ProcessTxStart/ProcessTxEnd exactly. See

@@ -22,6 +22,7 @@ namespace WSJTX_Controller
             analysisCompleted = false;
             pendingCqAfterAnalysis = false;
             _manualAnalysisRequested = false;
+            _calledOnHz.Clear();
             DebugOutput($"{Time()} [BAND-AUDIT] ClearAudioOffsets: bandIdx:{bandIdx} skipFirstDecodeSeries:{skipFirstDecodeSeries} mode:'{mode}'");
         }
 
