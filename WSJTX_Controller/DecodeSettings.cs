@@ -39,11 +39,10 @@ namespace WSJTX_Controller
         public bool SingleDecode { get; set; } = false;
 
         // Nexus 1.25 decoder choice per mode: "jtdx" (the JTDX-style decoder) or "standard"
-        // (WSJT-X's, at DecodeDepth). FT8 starts on JTDX; FT4 on Standard, because JTDX's FT4
-        // decoder drops a doubtful decode of a call not on its active-call list. Live via
+        // (WSJT-X's, at DecodeDepth). Both start on JTDX, Nexus's own default. Live via
         // SET_DECODERS (EngineHost), so no engine restart.
         public string Ft8Decoder { get; set; } = "jtdx";
-        public string Ft4Decoder { get; set; } = "standard";
+        public string Ft4Decoder { get; set; } = "jtdx";
 
         // The JTDX-style decoder's preset, shared by FT8 and FT4 as in Nexus:
         // "easy", "keen", "ludicrous" or "custom".
