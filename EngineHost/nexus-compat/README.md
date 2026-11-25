@@ -59,6 +59,17 @@ stay pinned; do NOT import `main`. What the next stable upgrade needs:
   SET_CLOCK_CHECK uses Nexus's public `apply_settings` + `clear_clock_offset(true)`; ATU_STATUS
   reads PTT with Nexus's `Rig::read_ptt`. Both are public API -- check they still exist.
 
+## Eight-patch re-assessment -- 2026-11-25 (v1.25.0 -> v1.25.1)
+
+1.25.1 is Nexus's Rig-split safety release. All eight patches kept, same +/- payload.
+`tempo-audio-slot.patch` re-anchored by hand: 1.25.1 rewrote `apply_tx_dial_shift`'s split
+writes (they now carry a Stop TX handle and no time budget), but the `dont_set_mode` gate stays
+on the same `let md` line. The new split paths (`preset_rig_split` at a quiet point,
+`rig_split_on_the_dial` for Tune/PTT) take their mode from `rig_mode_effective()`, which
+`tempo-app-engine.patch` already empties under `dont_set_mode`. `tempo-app-engine.patch` hunk 2
+fuzzes past 1.25.1's new `cq_typed` field; `tempo-audio-service.patch`'s test hunk fuzzes into
+`mod tests` as before. EQSL_PROGRAM_VERSION 1.25.1.
+
 ## Eight-patch re-assessment -- 2026-11-20 (v1.24.0 -> v1.25.0-beta.2, TESTER BUILD)
 
 Pinned to a PRE-RELEASE at the operator's request so testers get Nexus 1.25's JTDX-style FT8/FT4
